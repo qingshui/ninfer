@@ -127,16 +127,16 @@ set_tests_properties(
   ninfer_qwen3_5_state_image_test
   PROPERTIES SKIP_RETURN_CODE 77 LABELS "gpu")
 
-ninfer_add_test(ninfer_qwen3_5_t3_capture_nonblocking_test
-  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_t3_capture_nonblocking.cpp"
+ninfer_add_test(ninfer_qwen3_5_capture_nonblocking_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_capture_nonblocking.cpp"
   LIBRARIES ninfer_model_execution ninfer_model_loading ninfer_core)
-set_tests_properties(ninfer_qwen3_5_t3_capture_nonblocking_test
+set_tests_properties(ninfer_qwen3_5_capture_nonblocking_test
   PROPERTIES SKIP_RETURN_CODE 77 LABELS "gpu;real")
 
-ninfer_add_test(ninfer_qwen3_5_t6_packed_contract_test
-  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_t6_packed_contract.cpp"
+ninfer_add_test(ninfer_qwen3_5_packed_forward_contract_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_packed_forward_contract.cpp"
   LIBRARIES ninfer_model_execution ninfer_model_loading ninfer_core)
 
-ninfer_add_test(ninfer_qwen3_5_t1_f2_f5_contract_test
-  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_t1_f2_f5_contract.cpp"
+ninfer_add_test(ninfer_qwen3_5_prefill_contract_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_prefill_contract.cpp"
   LIBRARIES ninfer_model_execution ninfer_model_loading ninfer_core)

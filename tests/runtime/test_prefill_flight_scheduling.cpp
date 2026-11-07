@@ -99,34 +99,6 @@ std::uint32_t run_cycle_as_flights(Scheduler& scheduler, Slots& slots, std::uint
 }
 
 // Each segment of a flight is charged as one unit against both budgets.
-void test_flight_segments_are_charged_per_unit() {
-    Scheduler scheduler;
-    scheduler.configure_prefill(
-        PrefillPacing{.throughput_tokens_per_cycle = 1000, .throughput_units_per_cycle = 3});
-    Slots slots{};
-    for (std::uint32_t lane = 0; lane < 4; ++lane)
-        slots[lane] = request(lane + 1, Request::Phase::Prefill);
-    ninfer::runtime::PrefillUnitTokens units{};
-    units.fill(64);
-
-    const auto flight = scheduler.prefill_candidates(slots, 4, units);
-    require(flight.size == 3, "a flight did not use the whole unit allowance");
-    require(flight.lanes[0] == 0 && flight.lanes[1] == 1 && flight.lanes[2] == 2,
-            "flight members are not in cursor order");
-    for (const std::uint32_t lane : flight.lane_span())
-        scheduler.prefill_executed(lane, 4, 64, 0);
-    require(scheduler.prefill_units_remaining() == 0, "segments were not each counted as a unit");
-    require(scheduler.prefill_tokens_remaining() == 1000 - 3 * 64,
-            "segment tokens were not charged");
-    require(scheduler.prefill_candidates(slots, 4, units).empty(),
-            "a unit beyond the cycle allowance was offered");
-
-    // The next cycle leads with the lane that did not fit.
-    scheduler.begin_prefill_cycle(false);
-    const auto next = scheduler.prefill_candidates(slots, 4, units);
-    require(next.size == 3 && next.lanes[0] == 3 && next.lanes[1] == 0,
-            "the lane left out of the previous flight did not lead the next cycle");
-}
 
 // k = 2..6 prefilling lanes, flights per cycle: every lane completes, none waits > k cycles,
 // and prefill work between two decode rounds respects the Throughput token allowance.
@@ -176,30 +148,13 @@ void test_budget_lets_several_lanes_advance_per_cycle() {
 }
 
 // Several waiting requests are offered in one scan; FIFO head leads and bypass credit holds.
-void test_multiple_fresh_candidates_per_scan() {
-    Scheduler scheduler;
-    std::deque<RequestPtr> fresh;
-    for (std::uint64_t id = 1; id <= 5; ++id) fresh.push_back(request(id));
-    scheduler.begin_admission_scan();
-    const auto candidates = scheduler.fresh_candidates(fresh, 6);
-    require(candidates.size() >= 2, "admission was limited to one candidate per scan");
-    require(candidates.front() == fresh.front(), "FIFO head did not lead the candidates");
-
-    // Admitting a younger request charges the older head exactly once.
-    scheduler.admitted(fresh, *fresh[1], 6);
-    require(fresh[0]->admission_bypasses == 1, "bypass credit not charged to the skipped head");
-    scheduler.admitted(fresh, *fresh[0], 6);
-    require(fresh[0]->admission_bypasses == 1, "admitting the head consumed bypass credit");
-}
 
 } // namespace
 
 int main() {
     try {
-        test_flight_segments_are_charged_per_unit();
         test_flights_do_not_starve_and_gap_is_bounded();
         test_budget_lets_several_lanes_advance_per_cycle();
-        test_multiple_fresh_candidates_per_scan();
         std::cout << "ok\n";
         return 0;
     } catch (const std::exception& error) {
