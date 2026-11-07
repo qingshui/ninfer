@@ -64,6 +64,7 @@ public:
                ContextMachineCostModel context_cost)
         : instance_(instance), max_context_(options.max_context),
           max_concurrency_(options.max_concurrency),
+          prefill_chunk_(options.prefill_chunk),
           max_outstanding_(static_cast<std::size_t>(options.max_concurrency) +
                            options.max_pending_requests),
           speculative_positions_(options.speculative.backend == SpeculativeBackend::None
@@ -75,6 +76,8 @@ public:
             options.max_pending_requests == 0 || pending_timeout_.count() <= 0) {
             throw std::invalid_argument("Engine core bounds are invalid");
         }
+        scheduler_.configure_prefill(prefill_pacing(instance_.session->prefill_pack_tokens(),
+                                                    prefill_chunk_, max_concurrency_));
         cumulative_stats_.context_transfers.kv.resize(instance_.session->kv_pools().size());
         for (const auto& pool : instance_.session->kv_pools()) {
             cumulative_stats_.kv_pools.push_back({pool.id.index, std::string(pool.label), 0});
@@ -131,6 +134,56 @@ public:
 
     EngineCore(const EngineCore&)            = delete;
     EngineCore& operator=(const EngineCore&) = delete;
+
+    // The only definition of the prefill pacing constants. `pack_tokens` is
+    // Session::prefill_pack_tokens(): the most tokens one prefill execution carries over all its
+    // segments. Without a resolved chunk there is no unit size to budget, so a Throughput cycle
+    // keeps one unit.
+    //  - Throughput: one packed execution of pack_tokens per cycle, over up to max(2, C) units.
+    //  - Interleave: at most kInterleaveChunks chunks of tokens per decode round, and no more
+    //    than kInterleaveNs of predicted time; a lane without an estimate starts with
+    //    kInterleaveColdTokens.
+    //  - kInterleaveNs bounds the decode stall that the prefill work in front of a decode round
+    //    may cause. The single 1024-token chunk per cycle that preceded this pacing cost 50 ms at
+    //    depth 0 and 125 ms at 160K (measured prefill cost per token: 48 us at depth 0, 77 us at
+    //    64K, 106 us at 128K, 120 us at 160K). 100 ms is that chunk at the middle of the contexts
+    //    served beside decode, so a shallow cycle spends it on one whole chunk and a deep one on
+    //    fewer tokens than the old chunk. A flight also has a fixed cost of roughly 14 ms
+    //    (inferred from flights of a few hundred tokens) that the measured ns/token spreads over
+    //    its tokens.
+    //  - Time-derived units are multiples of kUnitGranularity, the chunk alignment.
+    //  - Debt: a decode round takes 4-6 ms alone, but a lane that shares every cycle with 100 ms
+    //    of prefill decodes at about a twentieth of its solo rate, for as long as the prefill
+    //    lasts (tens of seconds at 128K-200K contexts). The Scheduler counts the prefill time
+    //    that ran beside a waiting lane as a debt. kInterleaveDebtCapNs lets a short request
+    //    prefill without waiting (three 100 ms cycles), and each Interleave cycle repays
+    //    kInterleaveRepayNs, about a quarter of a 15-20 ms decode-only cycle, so a long prefill
+    //    keeps about a fifth of the time while a lane decodes.
+    static constexpr std::uint64_t kInterleaveNs         = 100'000'000;
+    static constexpr std::uint32_t kInterleaveChunks     = 2;
+    static constexpr std::uint32_t kInterleaveColdTokens = 1024;
+    static constexpr std::uint32_t kUnitGranularity      = 128;
+    static constexpr std::uint64_t kInterleaveDebtCapNs  = 300'000'000;
+    static constexpr std::uint64_t kInterleaveRepayNs    = 4'000'000;
+
+    [[nodiscard]] static PrefillPacing prefill_pacing(std::uint32_t pack_tokens,
+                                                      std::uint32_t prefill_chunk,
+                                                      std::uint32_t concurrency) noexcept {
+        PrefillPacing pacing;
+        pacing.interleave_ns = kInterleaveNs;
+        if (prefill_chunk == 0) {
+            pacing.throughput_units_per_cycle = 1;
+            return pacing;
+        }
+        pacing.throughput_tokens_per_cycle = std::max(pack_tokens, prefill_chunk);
+        pacing.throughput_units_per_cycle  = std::max(2U, concurrency);
+        pacing.interleave_tokens_per_cycle = kInterleaveChunks * prefill_chunk;
+        pacing.interleave_cold_tokens      = std::min(prefill_chunk, kInterleaveColdTokens);
+        pacing.unit_granularity            = kUnitGranularity;
+        pacing.interleave_debt_cap_ns      = kInterleaveDebtCapNs;
+        pacing.interleave_repay_ns         = kInterleaveRepayNs;
+        return pacing;
+    }
 
     class Submission {
     public:
@@ -351,6 +404,8 @@ private:
         std::vector<TokenId> control_tokens;
         std::uint32_t control_stride = 0;
         std::vector<std::size_t> generated_sizes;
+        // Wall clock at the Session call that started a prefill or replay execution.
+        Clock::time_point started{};
     };
 
     using EngineHostPhase = RequestEngineHostPhase;
@@ -511,6 +566,56 @@ private:
         typename ResourceManagement::ReclaimCursor reclaim;
     };
 
+    // ResourceManagement may release a checkpoint that a Capture or Demote transaction still
+    // reads, so the Engine calls publish/finish/abandon/release_source only while the Session has
+    // no context operation. A request that ends during one keeps its Session result and lane
+    // release; only this resource tail is recorded here and replayed by begin_cycle.
+    // `finished`: publish the continuation checkpoint, then finish its owner. Otherwise: release
+    // the request's waiting source, then abandon its owner.
+    struct DeferredSettlement {
+        std::uint64_t request_id = 0;
+        typename ResourceManagement::OwnerToken owner = 0;
+        std::optional<Checkpoint> checkpoint;
+        std::shared_ptr<const typename Request::BasePlan> base;
+        std::uint64_t publication_order = 0;
+        bool finished                   = false;
+    };
+
+    // Fixes, for one settle/cancel pass, whether resource tails must wait. The decision is taken
+    // before the pass calls Session::finish/abort, because those calls queue their own residency
+    // release and would otherwise make every tail look blocked.
+    class SettlementPass {
+    public:
+        explicit SettlementPass(EngineCore& engine) : engine_(engine) {
+            engine_.pass_blocked_ = engine_.resource_calls_blocked();
+        }
+
+        ~SettlementPass() { engine_.pass_blocked_.reset(); }
+
+        SettlementPass(const SettlementPass&)            = delete;
+        SettlementPass& operator=(const SettlementPass&) = delete;
+
+    private:
+        EngineCore& engine_;
+    };
+
+    // A context operation is in flight, or earlier tails are waiting and must stay ahead.
+    [[nodiscard]] bool resource_calls_blocked() const noexcept {
+        return !deferred_settlements_.empty() || instance_.session->has_context_operation();
+    }
+
+    // Runs the resource tail now, or records it when resource calls are blocked.
+    void settle_resources(DeferredSettlement&& settlement);
+
+    void apply_settlement(const DeferredSettlement& settlement);
+
+    // Replays recorded tails in publication order while no context operation is in flight.
+    void flush_deferred_settlements();
+
+    // Whether the Session declines to end this lane's sequence now. A sequence already consumed
+    // by commit has nothing left to end; only an execution that still names it defers settlement.
+    [[nodiscard]] bool lane_terminal_blocked(const Request& request) const noexcept;
+
     [[nodiscard]] std::optional<GenerationTimingObservation>
     record_committed_output(const std::shared_ptr<Request>& request, std::uint32_t accepted_tokens);
 
@@ -563,9 +668,18 @@ private:
 
     bool prepare_semantic_capture(const std::shared_ptr<Request>& request);
 
-    void resolve_prefill_progress(const std::shared_ptr<Request>& request,
-                                  typename ModelContract::PrefillProgress&& progress,
-                                  ComputeFlight flight);
+    using PrefillRow = typename decltype(std::declval<typename ModelContract::PrefillProgress&>()
+                                             .rows)::value_type;
+
+    // Applies the prefill result of one flight: charges every segment to the cycle budget, then
+    // resolves its rows in member order.
+    void resolve_prefill_flight(typename ModelContract::PrefillProgress&& progress,
+                                ComputeFlight flight);
+
+    // `flight` is consumed only by a row that carries a pending token, which exists only in a
+    // single-segment flight.
+    void resolve_prefill_progress(const std::shared_ptr<Request>& request, PrefillRow&& progress,
+                                  ComputeFlight& flight);
 
     void ensure_base_plan(const std::shared_ptr<Request>& request);
 
@@ -601,6 +715,14 @@ private:
 
     bool try_admit_one(bool restoring);
 
+    // Longest an admission that waits for capacity keeps the Engine in begin_cycle to chain its
+    // reclaim steps (see begin_cycle).
+    static constexpr std::chrono::milliseconds kAdmissionBurst{50};
+
+    // Polls until the running context operation finishes or `deadline` passes. True when no
+    // context operation remains.
+    bool await_context_operation(HostPhaseMeasurement& boundary, Clock::time_point deadline);
+
     void observe_scheduling(const std::shared_ptr<Request>& request,
                             GenerationSchedulingTransition transition, Clock::time_point now = {});
 
@@ -611,8 +733,46 @@ private:
     [[nodiscard]] ExecutionUnit execution_unit(const Request& request) const;
 
     void reserve_resident_units(ReservationScope scope = ReservationScope::Round);
-    [[nodiscard]] std::optional<std::uint32_t>
-    next_prefill(const std::array<std::shared_ptr<Request>, kMaximumConcurrency>&) const;
+
+    using LaneSlots = std::array<std::shared_ptr<Request>, kMaximumConcurrency>;
+
+    // The lanes that can take a prefill/replay unit in this reservation pass: resident lanes
+    // without a pending capture, cancellation or Session execution, and not blocked by a
+    // context operation.
+    [[nodiscard]] LaneSlots prefill_slots() const;
+
+    // Most tokens the next prefill/replay unit of every lane could process: the public prefill
+    // chunk, limited by the prompt suffix a prefilling request still has to compute. Lanes
+    // that are not in `slots` or do not prefill get 0.
+    [[nodiscard]] PrefillUnitTokens prefill_unit_limits(const LaneSlots& slots) const;
+
+    // Upper bound of the next unit of every lane: the Scheduler's caps for `limits`, with an
+    // exclusive lane capped as if it were the only prefilling lane because it runs alone.
+    [[nodiscard]] PrefillUnitTokens prefill_unit_caps(const LaneSlots& slots,
+                                                      const PrefillUnitTokens& limits) const;
+
+    // The lane the Session's Vision window continues, when it can run now.
+    [[nodiscard]] std::optional<std::uint32_t> continuation_prefill_lane(const LaneSlots&) const;
+
+    // The prefilling or replaying lane that must run alone: the progress owner, else the Vision
+    // continuation lane. nullopt when every prefill lane may be packed.
+    [[nodiscard]] std::optional<std::uint32_t> exclusive_prefill_lane(const LaneSlots&) const;
+
+    [[nodiscard]] std::optional<std::uint32_t> next_prefill(const LaneSlots&,
+                                                            const PrefillUnitTokens& caps) const;
+
+    // Segments the Session may join into one prefill execution, bounded by the lane count.
+    [[nodiscard]] std::uint32_t prefill_pack_limit() const;
+
+    // The lanes of the next prefill execution: next_prefill() first, then the lanes the cycle
+    // allowance admits behind it while the group may be packed. Packing starts only from a
+    // prefilling lane, ends at the first Replay lane and excludes an exclusive lane. `caps` are
+    // the tokens the lanes' permits carry.
+    [[nodiscard]] std::vector<std::uint32_t>
+    next_prefill_lanes(const LaneSlots&, const PrefillUnitTokens& caps) const;
+
+    // Whether any lane that is not blocked by a capture waits for a decode or control round.
+    [[nodiscard]] bool decode_waiting() const;
 
     // Admission can pin an existing writer's tail after its reservation. Membership must
     // observe current context dependencies, including pauses selected during reclamation.
@@ -621,7 +781,10 @@ private:
     [[nodiscard]] ComputeFlight freeze_members(std::span<const std::uint32_t> lanes,
                                                UnitKind kind) const;
 
-    [[nodiscard]] bool start_prefill(std::uint32_t lane);
+    // Starts one execution for a non-empty prefix of `lanes`, which are all prefilling or a
+    // single replaying lane. Lanes the Session does not admit keep their sequences and lose
+    // their Engine unit; the next cycle step reserves them again.
+    [[nodiscard]] bool start_prefill(std::span<const std::uint32_t> lanes);
 
     [[nodiscard]] bool start_decode(const RoundMembership& membership);
 
@@ -654,6 +817,7 @@ private:
     Instance& instance_;
     const std::uint32_t max_context_;
     const std::uint32_t max_concurrency_;
+    const std::uint32_t prefill_chunk_;
     const std::size_t max_outstanding_;
     const std::uint32_t speculative_positions_;
     const std::chrono::milliseconds pending_timeout_;
@@ -676,6 +840,8 @@ private:
     std::uint64_t admission_generation_ = 1;
     std::array<std::optional<CaptureDecision>, kMaximumConcurrency> capture_decisions_;
     std::shared_ptr<Request> context_owner_;
+    std::deque<DeferredSettlement> deferred_settlements_;
+    std::optional<bool> pass_blocked_;
     std::vector<std::shared_ptr<Request>> paused_;
     Scheduling scheduler_;
     std::optional<ComputeFlight> compute_;

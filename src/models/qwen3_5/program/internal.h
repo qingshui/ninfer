@@ -8,6 +8,7 @@
 #include "models/common/qwen/vision/vision.h"
 #include "models/qwen3_5/program/program.h"
 #include "models/qwen3_5/execution/parameters.h"
+#include "models/qwen3_5/execution/text.h"
 #include "models/qwen3_5/program/resources.h"
 #include "models/qwen3_5/program/graphs.h"
 #include "models/qwen3_5/program/planning/startup.h"
@@ -17,10 +18,8 @@
 #include <deque>
 #include <memory>
 #include <optional>
-
-namespace ninfer::models::qwen3_5::execution {
-class TextRun;
-}
+#include <variant>
+#include <vector>
 
 namespace ninfer::models::qwen3_5::detail {
 
@@ -62,8 +61,18 @@ struct ComputeOperation {
     bool cancelled               = false;
     bool speculative             = false;
     bool row_finished            = false;
-    bool graph_started           = false;
-    bool projected               = false;
+    // Prefill rows share one TextRun over the summed token axis; `segments` lists them in row
+    // order and `width` is their total length.
+    bool packed        = false;
+    // Prefill segments and decode rows share one token axis [prefill segments | verify block].
+    // Decode rows occupy compact rows [0, batch) and segments the rows after them; `width` is the
+    // verify width, `prefill_tokens` the column where the verify block starts and `axis_tokens`
+    // the extent of the whole token axis.
+    bool mixed                       = false;
+    std::uint32_t prefill_tokens     = 0;
+    std::uint32_t axis_tokens        = 0;
+    bool graph_started = false;
+    bool projected     = false;
     std::array<std::uint32_t, kMaximumConcurrency> dead_positions{};
     std::optional<runtime::DecisionInput> decision;
     std::optional<Commit> commit;
@@ -72,11 +81,23 @@ struct ComputeOperation {
     GpuExecutionObservation gpu;
     AttentionWorkCounters attention;
     std::optional<Tensor> input_embeddings;
+    std::vector<execution::SequenceSegment> segments;
     std::unique_ptr<execution::TextRun> text;
 
     ComputeOperation(runtime::ExecutionRequest<ExecutionTypes>&&);
     ~ComputeOperation();
 };
+
+// The decode rows of a decode or mixed operation.
+[[nodiscard]] inline const DecodeWork& decode_part(const ComputeOperation& operation) {
+    if (const auto* mixed = std::get_if<MixedWork>(&operation.request.work.operation))
+        return mixed->decode;
+    return std::get<DecodeWork>(operation.request.work.operation);
+}
+
+[[nodiscard]] inline bool has_decode(const ComputeOperation& operation) {
+    return std::holds_alternative<DecodeWork>(operation.request.work.operation) || operation.mixed;
+}
 
 struct ContextOperation {
     runtime::ExecutionRequest<ExecutionTypes> request;
@@ -106,19 +127,28 @@ public:
     void install_residencies(const ContextWork&);
     void initialize_inputs(ComputeOperation&);
     void initialize_decode(ComputeOperation&, const DecodeWork&);
+    void initialize_mixed(ComputeOperation&, const MixedWork&);
+    void validate_mixed(const MixedWork&) const;
     void initialize_forward(ComputeOperation&, const ForwardWork&);
+    void initialize_packed_forward(ComputeOperation&, const ForwardWork&);
+    void validate_packed_forward(const ForwardWork&) const;
+    void publish_continuation_hidden(ComputeOperation&);
     void initialize_score(ComputeOperation&, const ScoreWork&);
     void upload_input(std::uint32_t width, std::uint32_t batch);
     void upload_positions(std::uint32_t width, std::uint32_t batch);
     void upload_ingress();
     void begin_target(ComputeOperation&);
+    void begin_mixed_target(ComputeOperation&);
     bool advance_target(ComputeOperation&);
     void begin_draft(ComputeOperation&);
     void begin_mtp_draft(ComputeOperation&);
+    void finish_mixed_forward(ComputeOperation&);
     void prepare_mtp_draft(ComputeOperation&);
     void run_mtp_draft(std::uint32_t batch, std::uint32_t steps, std::uint32_t frontier);
     void run_dflash_draft(std::uint32_t batch, std::uint32_t minimum, std::uint32_t maximum);
-    void project_decode(std::uint32_t batch, std::uint32_t width);
+    // `column` is where the rows' hidden starts on the token axis: zero for a decode execution,
+    // the summed prefill length for a mixed one.
+    void project_decode(std::uint32_t batch, std::uint32_t width, std::uint32_t column = 0);
     void decide_decode(std::uint32_t batch, std::uint32_t width);
     void readback_decode(std::uint32_t batch, bool speculative);
     GraphPreparationSample initialize_graphs(GraphPreparationMode = GraphPreparationMode::Complete);
@@ -127,10 +157,12 @@ public:
     void append_draft_history(std::uint32_t batch, ops::KVCacheAppendPrefixExecutionEnvelope);
     void commit_draft_history(ComputeOperation&);
     void align_mtp_history(ComputeOperation&);
-    void rebuild_mtp_history(std::uint32_t batch);
+    void align_packed_mtp_history(ComputeOperation&);
+    void rebuild_mtp_history(std::uint32_t batch, std::uint32_t column = 0);
     void execute_mtp_commit(std::uint32_t batch, bool repair, bool counts,
                             DecodeGraphSection* repair_section = nullptr,
-                            DecodeGraphSection* counts_section = nullptr);
+                            DecodeGraphSection* counts_section = nullptr,
+                            std::uint32_t column               = 0);
     void request_decision(ComputeOperation&);
     void launch_decision(ComputeOperation&);
     void launch_commit(ComputeOperation&);

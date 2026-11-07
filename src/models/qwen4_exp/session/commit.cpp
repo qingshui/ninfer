@@ -55,12 +55,13 @@ void SessionImpl::finish_result(ComputeResult result) {
         if (tx.kind == Kind::Prefill) {
             const auto& s = sequence(tx.members[0]);
             PrefillProgress progress;
-            progress.summary                 = {s.request->summary.prompt_tokens, s.reused,
-                                s.reused ? PrefixReusePath::Checkpoint : PrefixReusePath::Root};
-            progress.processed_prompt_tokens = tx.result->rows[0].processed;
-            progress.complete                = true;
+            auto& row                   = progress.rows.emplace_back();
+            row.summary                 = {s.request->summary.prompt_tokens, s.reused,
+                           s.reused ? PrefixReusePath::Checkpoint : PrefixReusePath::Root};
+            row.processed_prompt_tokens = tx.result->rows[0].processed;
+            row.complete                = true;
 
-            progress.pending.emplace(std::move(batch));
+            row.pending.emplace(std::move(batch));
             events.push_back({tx.ticket, tx.members, std::move(progress)});
         } else {
             events.push_back({tx.ticket, tx.members, std::move(batch)});
@@ -91,11 +92,12 @@ void SessionImpl::finish_result(ComputeResult result) {
     if (tx.kind == Kind::Prefill) {
         const auto& s = sequence(tx.members[0]);
         PrefillProgress progress;
-        progress.summary                 = {s.request->summary.prompt_tokens, s.reused,
-                            s.reused ? PrefixReusePath::Checkpoint : PrefixReusePath::Root};
-        progress.processed_prompt_tokens = tx.result->rows[0].processed;
-        progress.complete                = false;
-        progress.capture_ready =
+        auto& row                   = progress.rows.emplace_back();
+        row.summary                 = {s.request->summary.prompt_tokens, s.reused,
+                       s.reused ? PrefixReusePath::Checkpoint : PrefixReusePath::Root};
+        row.processed_prompt_tokens = tx.result->rows[0].processed;
+        row.complete                = false;
+        row.capture_ready =
             s.capture && s.captures[s.next_capture].frontier == completed[0].main_frontier;
 
         tx.event.emplace(SessionEvent{tx.ticket, tx.members, std::move(progress)});
@@ -309,7 +311,7 @@ DiscardResult Session::discard(PendingBatch&& batch) noexcept {
 
 FinishResult Session::finish(SequenceHandle handle) {
     auto& p = *impl_;
-    if (!p.valid(handle) || execution_pending(handle) || context_blocks(handle)) return {};
+    if (terminal_blocked(handle)) return {};
     auto& s = p.sequence(handle);
     if (s.phase != detail::Phase::Finished) return {};
     FinishResult result{runtime::ConsumeStatus::Consumed, s.speculative, {}};
@@ -323,7 +325,7 @@ FinishResult Session::finish(SequenceHandle handle) {
 
 AbortResult Session::abort(SequenceHandle handle) {
     auto& p = *impl_;
-    if (!p.valid(handle) || execution_pending(handle) || context_blocks(handle)) return {};
+    if (terminal_blocked(handle)) return {};
     auto& s = p.sequence(handle);
     AbortResult result{runtime::ConsumeStatus::Consumed, s.speculative};
     const auto lane = s.lane;

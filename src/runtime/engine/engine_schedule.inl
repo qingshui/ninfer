@@ -204,6 +204,8 @@ void EngineCore<Instance>::resolve_context_progress(
             // Generation start was published when the first binding obtained its resources.
         }
         finish_engine_phase(boundary, EngineHostPhase::Boundary);
+        // The lane starts a new request, so no estimate carries over.
+        scheduler_.prefill_lane_released(control.destination.value);
         slots_[control.destination.value] = request;
         materializing_.reset();
         boundary = begin_host_phase();
@@ -228,6 +230,7 @@ void EngineCore<Instance>::resolve_context_progress(
                       [](const auto& a, const auto& b) { return a->id < b->id; });
             finish_engine_phase(boundary, EngineHostPhase::Boundary);
             slots_[lane].reset();
+            scheduler_.prefill_lane_released(lane);
             request->lane.reset();
             request->residency.reset();
             request->sequence.reset();
@@ -839,8 +842,68 @@ EngineCore<Instance>::execution_unit(const Request& request) const {
 }
 
 template <class Instance>
-std::optional<std::uint32_t> EngineCore<Instance>::next_prefill(
-    const std::array<std::shared_ptr<Request>, kMaximumConcurrency>& candidates) const {
+typename EngineCore<Instance>::LaneSlots EngineCore<Instance>::prefill_slots() const {
+    LaneSlots slots = slots_;
+    for (std::uint32_t lane = 0; lane < max_concurrency_; ++lane) {
+        const auto& request = slots[lane];
+        if (!request) continue;
+        if (!request->sequence || request->capture_pending ||
+            request->cancelled.load(std::memory_order_acquire) ||
+            instance_.session->context_blocks(*request->sequence) ||
+            instance_.session->execution_pending(*request->sequence))
+            slots[lane].reset();
+    }
+    return slots;
+}
+
+template <class Instance>
+PrefillUnitTokens EngineCore<Instance>::prefill_unit_limits(const LaneSlots& slots) const {
+    PrefillUnitTokens limits{};
+    for (std::uint32_t lane = 0; lane < max_concurrency_; ++lane) {
+        const auto& request = slots[lane];
+        if (!request || !(request->is_prefilling() || request->is_replaying())) continue;
+        // Without a resolved chunk the Engine knows no unit size; the Session's window decides.
+        std::uint32_t tokens = prefill_chunk_ == 0 ? std::numeric_limits<std::uint32_t>::max()
+                                                   : prefill_chunk_;
+        if (request->is_prefilling() && request->admitted_begin) {
+            const BeginSummary& begin = *request->admitted_begin;
+            const std::uint32_t suffix =
+                begin.prompt_tokens > begin.reused_prompt_tokens
+                    ? begin.prompt_tokens - begin.reused_prompt_tokens
+                    : 0U;
+            const std::uint32_t computed = std::min(request->computed_prompt_tokens, suffix);
+            tokens                       = std::min(tokens, suffix - computed);
+        }
+        limits[lane] = std::max(tokens, 1U);
+    }
+    return limits;
+}
+
+template <class Instance>
+PrefillUnitTokens EngineCore<Instance>::prefill_unit_caps(const LaneSlots& slots,
+                                                          const PrefillUnitTokens& limits) const {
+    auto caps = scheduler_.prefill_unit_caps(limits);
+    // An exclusive lane runs alone, so the lanes ahead of it in cursor order do not spend its cap.
+    if (const auto exclusive = exclusive_prefill_lane(slots);
+        exclusive && limits[*exclusive] != 0) {
+        PrefillUnitTokens alone{};
+        alone[*exclusive] = limits[*exclusive];
+        caps[*exclusive]  = scheduler_.prefill_unit_caps(alone)[*exclusive];
+    }
+    return caps;
+}
+
+template <class Instance>
+bool EngineCore<Instance>::decode_waiting() const {
+    return std::any_of(slots_.begin(), slots_.end(), [](const auto& request) {
+        return request && !request->capture_pending &&
+               (request->is_decode_ready() || request->is_control_ready());
+    });
+}
+
+template <class Instance>
+std::optional<std::uint32_t>
+EngineCore<Instance>::continuation_prefill_lane(const LaneSlots& candidates) const {
     const auto preferred = instance_.session->prefill_continuation();
     if (preferred)
         for (std::uint32_t lane = 0; lane < max_concurrency_; ++lane) {
@@ -849,7 +912,58 @@ std::optional<std::uint32_t> EngineCore<Instance>::next_prefill(
                 (request->is_prefilling() || request->is_replaying()))
                 return lane;
         }
-    return scheduler_.next_prefill(candidates, max_concurrency_);
+    return std::nullopt;
+}
+
+template <class Instance>
+std::optional<std::uint32_t>
+EngineCore<Instance>::exclusive_prefill_lane(const LaneSlots& candidates) const {
+    if (const auto owner = scheduler_.progress_owner()) {
+        for (std::uint32_t lane = 0; lane < max_concurrency_; ++lane) {
+            const auto& request = candidates[lane];
+            if (request && request->sequence && request->id == owner &&
+                (request->is_prefilling() || request->is_replaying()))
+                return lane;
+        }
+    }
+    return continuation_prefill_lane(candidates);
+}
+
+template <class Instance>
+std::optional<std::uint32_t>
+EngineCore<Instance>::next_prefill(const LaneSlots& candidates,
+                                   const PrefillUnitTokens& caps) const {
+    // A continuing sequence keeps the lane, but its units still spend the cycle allowance.
+    if (const auto lane = continuation_prefill_lane(candidates)) {
+        LaneSlots only{};
+        only[*lane] = candidates[*lane];
+        return scheduler_.next_prefill(only, max_concurrency_, caps);
+    }
+    return scheduler_.next_prefill(candidates, max_concurrency_, caps);
+}
+
+template <class Instance>
+std::uint32_t EngineCore<Instance>::prefill_pack_limit() const {
+    return std::min(instance_.session->prefill_pack_limit(), max_concurrency_);
+}
+
+template <class Instance>
+std::vector<std::uint32_t>
+EngineCore<Instance>::next_prefill_lanes(const LaneSlots& candidates,
+                                         const PrefillUnitTokens& caps) const {
+    const auto first = next_prefill(candidates, caps);
+    if (!first) return {};
+    std::vector<std::uint32_t> lanes{*first};
+    const auto limit = prefill_pack_limit();
+    if (limit <= 1 || !candidates[*first]->is_prefilling() || exclusive_prefill_lane(candidates))
+        return lanes;
+    const auto membership = scheduler_.prefill_candidates(candidates, max_concurrency_, caps);
+    if (membership.empty() || membership.lanes[0] != *first) return lanes;
+    for (std::size_t i = 1; i < membership.size && lanes.size() < limit; ++i) {
+        if (!candidates[membership.lanes[i]]->is_prefilling()) break;
+        lanes.push_back(membership.lanes[i]);
+    }
+    return lanes;
 }
 
 template <class Instance>
@@ -872,7 +986,26 @@ void EngineCore<Instance>::reserve_resident_units(ReservationScope scope) {
         if (continuation && slots_[*priority]->sequence != continuation)
             instance_.session->yield_prefill(*continuation);
     }
-    const auto prefill = priority_prefill ? priority_prefill : next_prefill(slots_);
+    // The cycle allowance is handed out once per pass. The cap of a unit is fixed in its permit
+    // and is the Session's upper bound for the window; a lane the allowance does not reach
+    // takes no unit in this pass.
+    const auto eligible = prefill_slots();
+    const auto caps     = prefill_unit_caps(slots_, prefill_unit_limits(eligible));
+    const auto prefill  = priority_prefill ? priority_prefill : next_prefill(eligible, caps);
+    // Prefilling lanes that may share the first prefill lane's execution: the lanes the cycle
+    // allowance admits behind it. An exclusive lane and a replaying lane run alone.
+    std::array<bool, kMaximumConcurrency> joinable{};
+    std::optional<std::uint32_t> pack_head;
+    const auto pack_limit = prefill_pack_limit();
+    if (prefill && pack_limit > 1 && slots_[*prefill]->is_prefilling() &&
+        !exclusive_prefill_lane(slots_)) {
+        const auto membership = scheduler_.prefill_candidates(eligible, max_concurrency_, caps);
+        if (!membership.empty() && membership.lanes[0] == *prefill) {
+            pack_head = *prefill;
+            for (std::size_t i = 1; i < membership.size; ++i)
+                joinable[membership.lanes[i]] = slots_[membership.lanes[i]]->is_prefilling();
+        }
+    }
     std::vector<std::uint32_t> candidates;
     for (std::uint32_t lane = 0; lane < max_concurrency_; ++lane) {
         const auto& request = slots_[lane];
@@ -887,17 +1020,21 @@ void EngineCore<Instance>::reserve_resident_units(ReservationScope scope) {
         return slots_[a]->id < slots_[b]->id;
     });
     if (prefill) {
-        auto remaining = slots_;
+        auto remaining = eligible;
         remaining[*prefill].reset();
-        while (const auto fallback = scheduler_.next_prefill(remaining, max_concurrency_)) {
+        while (const auto fallback = scheduler_.next_prefill(remaining, max_concurrency_, caps)) {
             candidates.push_back(*fallback);
             remaining[*fallback].reset();
         }
     }
-    std::optional<std::uint32_t> granted_prefill;
+    std::vector<std::uint32_t> granted_prefill;
     for (const auto lane : candidates) {
-        const auto request = slots_[lane];
-        if (granted_prefill && request && (request->is_prefilling() || request->is_replaying()))
+        const auto request      = slots_[lane];
+        const bool prefill_lane = request && (request->is_prefilling() || request->is_replaying());
+        // Behind a granted prefill lane, only the lanes that can share its execution take a unit.
+        const bool joining = prefill_lane && !granted_prefill.empty();
+        if (joining && !(pack_head == granted_prefill.front() && joinable[lane] &&
+                         granted_prefill.size() < pack_limit))
             continue;
         if (!request || !request->sequence || request->capture_pending ||
             request->cancelled.load(std::memory_order_acquire) ||
@@ -908,17 +1045,23 @@ void EngineCore<Instance>::reserve_resident_units(ReservationScope scope) {
             if (priority == lane) return;
             continue;
         }
-        const auto unit = execution_unit(*request);
+        auto unit = execution_unit(*request);
+        if (prefill_lane) {
+            // Nothing is left of this cycle's allowance for the lane.
+            if (caps[lane] == 0) continue;
+            unit.tokens = caps[lane];
+        }
         std::optional<typename ResourceManagement::ReclaimCursor> cursor;
         for (;;) {
             const auto result = instance_.session->reserve_units({&unit, 1});
             if (result) {
                 reserved_units_[lane] = UnitPermit{unit, *request->residency};
-                if (request->is_prefilling() || request->is_replaying()) granted_prefill = lane;
+                if (prefill_lane) granted_prefill.push_back(lane);
                 break;
             }
-            if (result.status == UnitReservationStatus::ExecutionUnavailable ||
-                instance_.session->has_context_operation()) {
+            // A lane that only joins another execution never forces reclamation or a pause.
+            if (joining) break;
+            if (result.status == UnitReservationStatus::ExecutionUnavailable) {
                 if (priority == lane) return;
                 break;
             }
@@ -930,8 +1073,12 @@ void EngineCore<Instance>::reserve_resident_units(ReservationScope scope) {
             if (!cursor) cursor.emplace(resources_.begin_reclaim(*instance_.session));
             const auto reclaimed = reclaim(result.assessment, false, {}, &*cursor);
             if (reclaimed == ReclaimProgress::Transferring ||
-                reclaimed == ReclaimProgress::Deferred)
+                reclaimed == ReclaimProgress::Deferred) {
+                // A running context operation holds back only the lane whose shortage it could
+                // not cover with releases; the other lanes keep their units.
+                if (instance_.session->has_context_operation() && priority != lane) break;
                 return;
+            }
             if (reclaimed == ReclaimProgress::Changed || reclaimed == ReclaimProgress::Retry)
                 continue;
             if (request->recovery_pending)
@@ -943,8 +1090,9 @@ void EngineCore<Instance>::reserve_resident_units(ReservationScope scope) {
             throw std::logic_error("progress owner cannot obtain its legal unit");
         }
     }
-    if (granted_prefill && !prepare_semantic_capture(slots_[*granted_prefill]))
-        reserved_units_[*granted_prefill].reset();
+    // A lane whose capture cannot be prepared loses its unit and leaves the execution.
+    for (const auto lane : granted_prefill)
+        if (!prepare_semantic_capture(slots_[lane])) reserved_units_[lane].reset();
 }
 
 template <class Instance>
@@ -958,13 +1106,20 @@ template <class Instance>
         instance_.session->execution_pending(*request->sequence))
         return false;
     const auto current = execution_unit(*request);
+    // The tokens of a prefill/replay permit are the cap fixed when it was reserved, not a
+    // function of the request, so only the other kinds compare them.
+    const bool windowed = current.kind == UnitKind::Prefill || current.kind == UnitKind::Replay;
     return permit->residency == *request->residency && permit->unit.sequence == current.sequence &&
-           permit->unit.kind == current.kind && permit->unit.tokens == current.tokens;
+           permit->unit.kind == current.kind &&
+           (windowed ? permit->unit.tokens != 0 : permit->unit.tokens == current.tokens);
 }
 
 template <class Instance>
 void EngineCore<Instance>::begin_cycle(HostPhaseMeasurement& boundary) {
     control_executed_.fill(false);
+    // Tails recorded while a context operation was in flight run before anything else in this
+    // cycle, and in particular before admission can select a source.
+    flush_deferred_settlements();
     (void)expire_pending_requests();
     if (!instance_.session->has_context_operation()) {
         for (const auto& request : slots_) {
@@ -977,16 +1132,22 @@ void EngineCore<Instance>::begin_cycle(HostPhaseMeasurement& boundary) {
     }
     (void)settle_terminal_requests(boundary);
     cancel_active_requests(snapshot_cancellations(), boundary);
-    for (auto it = paused_.begin();
-         !instance_.session->has_context_operation() && it != paused_.end();) {
-        const auto request = *it;
-        if (!request->cancelled.load(std::memory_order_acquire)) {
-            ++it;
-            continue;
+    {
+        const SettlementPass paused_pass(*this);
+        for (auto it = paused_.begin(); it != paused_.end();) {
+            const auto request = *it;
+            // Dropping a suspended snapshot erases a checkpoint that an in-flight context operation
+            // may still hold; such a request waits. Replay-route requests own no checkpoint.
+            if (!request->cancelled.load(std::memory_order_acquire) ||
+                (request->suspended && request->suspended->has_snapshot() &&
+                 instance_.session->has_context_operation())) {
+                ++it;
+                continue;
+            }
+            request->suspended.reset();
+            it = paused_.erase(it);
+            complete_cancelled(request);
         }
-        request->suspended.reset();
-        it = paused_.erase(it);
-        complete_cancelled(request);
     }
     const bool recovering = std::any_of(slots_.begin(), slots_.end(),
                                         [](const auto& r) { return r && r->recovery_pending; }) ||
@@ -1005,8 +1166,12 @@ void EngineCore<Instance>::begin_cycle(HostPhaseMeasurement& boundary) {
         (void)try_admit_one(true);
         if (instance_.session->has_context_operation()) (void)poll_execution(boundary);
     }
+    // Settlement, cancellation and the handoff above have fixed which lanes wait for a decode
+    // round; the cycle's prefill allowance depends on it.
+    scheduler_.begin_prefill_cycle(decode_waiting());
     reserve_resident_units();
-    if (!scheduler_.progress_owner() && paused_.empty() && !context_owner_ && !recovering) {
+    const auto run_admission = [&] {
+        if (scheduler_.progress_owner() || !paused_.empty() || context_owner_ || recovering) return;
         if (!admission_decision_ && consume_admission_check()) {
             ++admission_generation_;
             scheduler_.begin_admission_scan();
@@ -1014,12 +1179,40 @@ void EngineCore<Instance>::begin_cycle(HostPhaseMeasurement& boundary) {
         if (admission_decision_ || scheduler_.admission_scan_pending()) {
             (void)try_admit_one(false);
         }
+    };
+    run_admission();
+    // A request that waits for capacity advances one reclaim step per attempt, and a step is
+    // an asynchronous context operation that finishes within milliseconds. Waiting for it
+    // here lets the next step start before resident growth or a capture takes what it freed,
+    // instead of spending a whole cycle (a prefill unit plus a decode round) on every step.
+    // The burst is bounded so one admission never holds back the cycle for longer than that.
+    const auto burst_end = Clock::now() + kAdmissionBurst;
+    bool context_settled = false;
+    while (admission_decision_ && !admission_decision_->restoring && !materializing_ &&
+           instance_.session->has_context_operation() && Clock::now() < burst_end) {
+        if (!await_context_operation(boundary, burst_end)) break;
+        context_settled = true;
+        run_admission();
     }
     if (instance_.session->has_context_operation()) {
         (void)poll_execution(boundary);
-        if (!instance_.session->has_context_operation()) reserve_resident_units();
+        context_settled = context_settled || !instance_.session->has_context_operation();
     }
+    // Units reserved before a context operation ended may have been invalidated by it.
+    if (context_settled && !instance_.session->has_context_operation()) reserve_resident_units();
     cycle_step_ = CycleStep::Control;
+}
+
+template <class Instance>
+bool EngineCore<Instance>::await_context_operation(HostPhaseMeasurement& boundary,
+                                                   Clock::time_point deadline) {
+    while (instance_.session->has_context_operation()) {
+        (void)poll_execution(boundary);
+        if (!instance_.session->has_context_operation()) break;
+        if (Clock::now() >= deadline) return false;
+        std::this_thread::yield();
+    }
+    return true;
 }
 
 template <class Instance>
@@ -1073,13 +1266,22 @@ template <class Instance>
             }
             reserve_resident_units(ReservationScope::Prefill);
             auto eligible = slots_;
+            PrefillUnitTokens caps{};
             for (std::uint32_t lane = 0; lane < max_concurrency_; ++lane) {
-                if (!unit_runnable(lane)) eligible[lane].reset();
+                if (!unit_runnable(lane)) {
+                    eligible[lane].reset();
+                } else if (reserved_units_[lane]->unit.kind == UnitKind::Prefill ||
+                           reserved_units_[lane]->unit.kind == UnitKind::Replay) {
+                    caps[lane] = reserved_units_[lane]->unit.tokens;
+                }
             }
-            if (const auto lane = next_prefill(eligible)) {
+            if (const auto lanes = next_prefill_lanes(eligible, caps); !lanes.empty()) {
                 set_host_work_class(HostWorkClass::Prefill);
-                if (!start_prefill(*lane)) return submitted;
+                if (!start_prefill(lanes)) return submitted;
                 submitted = true;
+                // The cycle stays in Prefill: once this flight completes, the Scheduler
+                // allowance decides whether another unit starts before the next begin_cycle.
+                break;
             }
             cycle_step_ = CycleStep::Complete;
             break;
@@ -1098,7 +1300,7 @@ template <class Instance>
 template <class Instance>
 bool EngineCore<Instance>::process_measurement() {
     if (!resident_empty() || !paused_.empty() || materializing_ || context_owner_ ||
-        admission_decision_ || execution_outstanding())
+        admission_decision_ || !deferred_settlements_.empty() || execution_outstanding())
         return false;
     MeasurementCommand command;
     {
@@ -1143,7 +1345,7 @@ void EngineCore<Instance>::worker_loop() noexcept {
         {
             std::unique_lock lock(queue_mutex_);
             if (!stopping_ && pending_.empty() && resident_empty() && paused_.empty() &&
-                !execution_outstanding()) {
+                deferred_settlements_.empty() && !execution_outstanding()) {
                 queue_cv_.wait(lock,
                                [&] { return stopping_ || !pending_.empty() || measurement_; });
             }

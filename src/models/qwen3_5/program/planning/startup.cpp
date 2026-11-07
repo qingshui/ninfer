@@ -5,6 +5,7 @@
 #include "models/common/context/storage.h"
 #include "models/qwen3_5/execution/mtp.h"
 #include "models/qwen3_5/planning.h"
+#include "models/qwen3_5/prefill_chunk.h"
 #include "models/qwen3_5/program/planning/startup.h"
 #include "models/common/qwen/vision/vision.h"
 #include "models/qwen3_5/execution/workspace.h"
@@ -40,6 +41,14 @@ enum class GdnWorkspacePath : std::uint8_t {
     Prefill,
     Snapshot,
     ReplayRecord,
+};
+
+// The verify block that follows the prefill segments of a mixed traversal: `batch` decode rows of
+// `width` columns each, mixed in through `path`.
+struct MixedTail {
+    std::int32_t batch;
+    std::int32_t width;
+    GdnWorkspacePath path;
 };
 
 std::size_t checked_add(std::size_t a, std::size_t b, const char* label) {
@@ -112,6 +121,10 @@ ResourceLayout persistent_layout(const SequencePlanImpl& plan) {
         .output_rows         = dimension(config.vocab_size),
         .public_tokens       = dimension(profile.public_tokens),
         .prefill_chunk       = std::min(plan.prefill_chunk, plan.capacity),
+        .pack_tokens         = plan.pack_tokens,
+        .pack_segments       = plan.pack_segments,
+        .mixed_decode_rows   = plan.mixed_decode_rows,
+        .mixed_tokens        = plan.mixed_tokens,
         .batch_capacity      = plan.max_concurrency,
         .draft_window        = plan.draft_window,
         .backend             = plan.speculative_backend,
@@ -134,7 +147,14 @@ WorkspaceSpec build_workspace_plan(const SequencePlanImpl& plan) {
         plan.draft_window >= static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max())) {
         throw std::invalid_argument("sequence workspace dimensions are invalid");
     }
+    // The token axis of one prefill traversal is the summed packed segment length; every
+    // per-sequence Op sees at most one chunk.
+    const std::uint32_t pack_u32 = std::max(plan.pack_tokens, chunk_u32);
+    if (pack_u32 > static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max())) {
+        throw std::invalid_argument("sequence workspace dimensions are invalid");
+    }
     const auto chunk  = static_cast<std::int32_t>(chunk_u32);
+    const auto pack   = static_cast<std::int32_t>(pack_u32);
     const auto drafts = static_cast<std::int32_t>(plan.draft_window);
     const auto verify = drafts + 1;
     const ops::CausalAttentionExecutionEnvelope text_envelope{1, plan.capacity};
@@ -166,7 +186,8 @@ WorkspaceSpec build_workspace_plan(const SequencePlanImpl& plan) {
                                  std::int32_t last, TextPhase phase, GdnWorkspacePath path,
                                  std::int32_t batch_size, std::int32_t min_width,
                                  std::int32_t max_width,
-                                 ops::CausalAttentionExecutionEnvelope envelope) {
+                                 ops::CausalAttentionExecutionEnvelope envelope,
+                                 const MixedTail* tail = nullptr) {
         for (const auto& block : profile.text.layers) {
             {
                 auto stage = layout.scope();
@@ -176,12 +197,19 @@ WorkspaceSpec build_workspace_plan(const SequencePlanImpl& plan) {
                     scratch(layout, execution::attention_projection_workspace_bytes(*attention,
                                                                                     first, last));
                     (void)workspace::text_attention_results(layout, config, last);
-                    scratch(layout, ops::causal_softmax_attention_workspace_capacity_bytes(
-                                        {dimension(config.attention->head_dim),
-                                         dimension(config.attention->num_attention_heads),
-                                         dimension(config.attention->num_key_value_heads)},
-                                        plan.kv_storage, envelope, batch_size, min_width, max_width,
-                                        plan.multiprocessor_count));
+                    const auto attention_bytes = [&](std::int32_t batch, std::int32_t lo,
+                                                     std::int32_t hi) {
+                        return ops::causal_softmax_attention_workspace_capacity_bytes(
+                            {dimension(config.attention->head_dim),
+                             dimension(config.attention->num_attention_heads),
+                             dimension(config.attention->num_key_value_heads)},
+                            plan.kv_storage, envelope, batch, lo, hi, plan.multiprocessor_count);
+                    };
+                    // The prefill segments and the verify block call the Op one after the other.
+                    scratch(layout, std::max(attention_bytes(batch_size, min_width, max_width),
+                                             tail ? attention_bytes(tail->batch, tail->width,
+                                                                    tail->width)
+                                                  : std::size_t{0}));
                     add_scratch(layout, attention->output, first, last);
                 } else {
                     const auto& gdn = std::get<execution::GdnProfile>(block.mixer);
@@ -189,6 +217,13 @@ WorkspaceSpec build_workspace_plan(const SequencePlanImpl& plan) {
                     scratch(layout, ops::gdn_norm_control_proj_workspace_capacity_bytes(
                                         gdn.control, first, last));
                     (void)workspace::gdn_projection(layout, config, last);
+                    const auto tail_bytes = [&](const MixedTail& value) {
+                        return value.path == GdnWorkspacePath::ReplayRecord
+                                   ? execution::gdn_record_workspace_bytes(
+                                         gdn, value.batch, value.width, value.width)
+                                   : execution::gdn_snapshot_workspace_bytes(
+                                         gdn, value.batch, value.width, value.width);
+                    };
                     if (path == GdnWorkspacePath::Snapshot) {
                         scratch(layout, execution::gdn_snapshot_workspace_bytes(
                                             gdn, batch_size, min_width, max_width));
@@ -197,15 +232,17 @@ WorkspaceSpec build_workspace_plan(const SequencePlanImpl& plan) {
                                             gdn, batch_size, min_width, max_width));
                     } else {
                         (void)workspace::gdn_prefill_conv(layout, config, last);
-                        scratch(layout,
-                                execution::gdn_projection_workspace_bytes(gdn, first, last));
+                        scratch(layout, std::max(execution::gdn_projection_workspace_bytes(
+                                                     gdn, first, last),
+                                                 tail ? tail_bytes(*tail) : std::size_t{0}));
                     }
                     (void)workspace::gdn_recurrent_output(layout, config, last);
                     if (path == GdnWorkspacePath::Prefill) {
                         scratch(layout,
                                 ops::gated_delta_net_workspace_capacity_bytes(
                                     dimension(config.gdn->linear_num_key_heads),
-                                    dimension(config.gdn->linear_num_value_heads), first, last));
+                                    dimension(config.gdn->linear_num_value_heads), min_width,
+                                    max_width));
                     }
                     (void)workspace::gdn_normalized_output(layout, config, last);
                     add_scratch(layout, gdn.output, first, last);
@@ -226,7 +263,10 @@ WorkspaceSpec build_workspace_plan(const SequencePlanImpl& plan) {
                 scratch(layout, bytes);
             }
         }
-        if (!plan.causal_scoring) { linear_scratch(layout, profile.text.output_head, first, last); }
+        // The output head only ever reads the last column of a sampled window.
+        if (!plan.causal_scoring) {
+            linear_scratch(layout, profile.text.output_head, first, std::min(last, chunk));
+        }
     };
     const auto mtp_post_mixer = [&](WorkspaceLayoutBuilder& layout, int first, int last) {
         linear_scratch(layout, profile.mtp->output, first, last);
@@ -250,14 +290,32 @@ WorkspaceSpec build_workspace_plan(const SequencePlanImpl& plan) {
 
     WorkspaceSpec out;
     WorkspaceLayoutBuilder text_prefill;
-    text_common_root(text_prefill, chunk);
-    target_body(text_prefill, 1, chunk, qwen3_5::TextPhase::Prefill, GdnWorkspacePath::Prefill, 1,
+    text_common_root(text_prefill, pack);
+    target_body(text_prefill, 1, pack, qwen3_5::TextPhase::Prefill, GdnWorkspacePath::Prefill, 1,
                 1, chunk, text_envelope);
     if (!plan.causal_scoring) {
         scratch(text_prefill,
                 ops::sampling_workspace_capacity_bytes(dimension(profile.public_tokens), 1, 1));
     }
     out.text_prefill = finish(text_prefill);
+
+    // A mixed traversal runs the token-wise stages once over the prefill segments and the verify
+    // block together; the mixers handle the two parts one after the other.
+    if (plan.mixed_tokens != 0) {
+        const auto mixed = static_cast<std::int32_t>(plan.mixed_tokens);
+        for (std::int32_t rows = 1; rows <= static_cast<std::int32_t>(plan.mixed_decode_rows);
+             ++rows) {
+            const MixedTail tail{rows, verify,
+                                 plan.speculative_backend == SpeculativeBackend::Mtp
+                                     ? GdnWorkspacePath::ReplayRecord
+                                     : GdnWorkspacePath::Snapshot};
+            WorkspaceLayoutBuilder text_mixed;
+            text_common_root(text_mixed, mixed);
+            target_body(text_mixed, 1, mixed, qwen3_5::TextPhase::Prefill,
+                        GdnWorkspacePath::Prefill, 1, 1, chunk, text_envelope, &tail);
+            out.text_mixed = std::max(out.text_mixed, finish(text_mixed));
+        }
+    }
 
     if (plan.causal_scoring) {
         WorkspaceLayoutBuilder causal_score;
@@ -318,8 +376,9 @@ WorkspaceSpec build_workspace_plan(const SequencePlanImpl& plan) {
         };
 
         // Main, history writes, and draft steps reuse the workspace in sequence. Their inputs,
-        // conditioning, and outputs live in the execution frame.
-        out.mtp_prefill = std::max(out.text_prefill, mtp_history(1, chunk));
+        // conditioning, and outputs live in the execution frame. History is written per segment,
+        // so it never sees more than one chunk.
+        out.mtp_prefill = mtp_history(1, chunk);
         for (std::int32_t batch = 1; batch <= static_cast<std::int32_t>(plan.max_concurrency);
              ++batch) {
             const std::int32_t aggregate = batch * verify;
@@ -510,8 +569,8 @@ WorkspaceSpec build_workspace_plan(const SequencePlanImpl& plan) {
     }
 
     out.general_capacity =
-        std::max({out.text_prefill, out.ordinary_round, out.mtp_prefill, out.mtp_round,
-                  out.dflash_context, out.dflash_round, out.causal_score});
+        std::max({out.text_prefill, out.text_mixed, out.ordinary_round, out.mtp_prefill,
+                  out.mtp_round, out.dflash_context, out.dflash_round, out.causal_score});
     out.capacity = out.general_capacity;
     if (plan.features.vision) {
         out.vision =
@@ -537,6 +596,9 @@ void validate_target_options(const execution::ModelProfile& profile, DeviceConte
     if (options.max_context == 0 ||
         options.max_context > profile.config.text.max_position_embeddings) {
         throw std::invalid_argument("max_context exceeds the configured position capacity");
+    }
+    if (options.prefill_chunk == 0) {
+        throw std::invalid_argument("prefill_chunk must be resolved before sequence planning");
     }
     if (options.prefill_chunk % kPrefillChunkAlignment != 0) {
         throw std::invalid_argument("prefill_chunk must be a nonzero multiple of 128");
@@ -587,6 +649,10 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
     impl->context_bytes                     = context_bytes;
     impl->max_concurrency                   = inputs.max_concurrency;
     impl->prefill_chunk                     = inputs.prefill_chunk;
+    impl->pack_tokens                       = inputs.pack_tokens;
+    impl->pack_segments                     = inputs.pack_segments;
+    impl->mixed_decode_rows                 = inputs.mixed_decode_rows;
+    impl->mixed_tokens                      = inputs.mixed_tokens;
     impl->draft_window                      = inputs.draft_window;
     impl->speculative_backend               = inputs.speculative_backend;
     impl->proposal_head                     = inputs.proposal_head;
@@ -630,13 +696,35 @@ make_sequence_planner_impl(std::shared_ptr<const execution::ModelProfile> profil
                            DeviceContext& device, const EngineOptions& options,
                            std::shared_ptr<const moe::Plan> moe) {
     validate_target_options(*profile, device, options);
+    const auto chunk    = std::min(options.prefill_chunk, options.max_context);
+    const bool scoring  = options.purpose == EnginePurpose::CausalScoring;
+    const bool offload  = moe != nullptr;
+    const bool masked   = is_masked_draft_backend(options.speculative.backend);
+    // Offloaded experts size their bridge resources for one chunk, so their pack stays within a
+    // chunk. Masked draft windows carry per-row draft state and scoring has a single row; both
+    // execute one segment at a time.
+    const auto pack_tokens   = offload || scoring ? chunk
+                                                  : resolve_prefill_pack_tokens(chunk,
+                                                                                options.max_context);
+    const auto pack_segments = masked || scoring ? 1U : options.max_concurrency;
+    // Decode rows ride a prefill execution as a verify block. Every row is a distinct sequence
+    // and at least one prefill segment is present, so at most max_concurrency - 1 rows fit.
+    // Offloaded experts, masked draft windows and scoring never mix.
+    const auto mixed_rows = offload || masked || scoring || options.max_concurrency < 2
+                                ? 0U
+                                : options.max_concurrency - 1;
+    const auto mixed_tokens =
+        resolve_mixed_tokens(pack_tokens, mixed_rows, options.speculative.draft_tokens);
     SequencePlanningInputs inputs{
-        .profile         = std::move(profile),
-        .moe             = std::move(moe),
-        .capacity        = options.max_context,
-        .max_concurrency = options.max_concurrency,
-        .prefill_chunk =
-            std::min(options.prefill_chunk ? options.prefill_chunk : 1024U, options.max_context),
+        .profile                    = std::move(profile),
+        .moe                        = std::move(moe),
+        .capacity                   = options.max_context,
+        .max_concurrency            = options.max_concurrency,
+        .prefill_chunk              = chunk,
+        .pack_tokens                = pack_tokens,
+        .pack_segments              = pack_segments,
+        .mixed_decode_rows          = mixed_rows,
+        .mixed_tokens               = mixed_tokens,
         .draft_window               = options.speculative.draft_tokens,
         .speculative_backend        = options.speculative.backend,
         .kv_storage                 = options.kv_cache,

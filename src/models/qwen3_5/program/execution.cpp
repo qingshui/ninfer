@@ -42,6 +42,13 @@ void RankProgramImpl::progress() {
                 operation.stage = ComputeStage::Readback;
                 break;
             }
+            if (operation.mixed) {
+                if (operation.speculative) begin_draft(operation);
+                request_decision(operation);
+                begin_target(operation);
+                operation.stage = ComputeStage::Forward;
+                break;
+            }
             if (std::holds_alternative<DecodeWork>(operation.request.work.operation)) {
                 if (!operation.speculative || !graphs) append_draft_history(operation);
                 if (operation.speculative) begin_draft(operation);
@@ -56,6 +63,11 @@ void RankProgramImpl::progress() {
             if (!advance_target(operation)) {
                 request_decision(operation);
                 return;
+            }
+            if (operation.mixed) {
+                finish_mixed_forward(operation);
+                operation.stage = ComputeStage::AwaitDecision;
+                break;
             }
             if (std::holds_alternative<DecodeWork>(operation.request.work.operation)) {
                 if (backend == SpeculativeBackend::Mtp && !operation.speculative)
@@ -86,12 +98,7 @@ void RankProgramImpl::progress() {
                         frame.backend_table_rows.slice(0, 0, 1),
                         {operation.width, operation.width});
                 }
-                const auto source = resources.frame.input_view(static_cast<int>(operation.width), 1)
-                                        .hidden.slice(1, static_cast<int>(operation.width - 1), 1);
-                const auto target = resources.state_images.continuation_hidden(
-                    operation.rows[operation.forward_row].state_offsets.destination);
-                CUDA_CHECK(cudaMemcpyAsync(target.data, source.data, target.bytes(),
-                                           cudaMemcpyDeviceToDevice, device.stream()));
+                publish_continuation_hidden(operation);
             }
             if (operation.width) prefill_timer.record_stop();
             gpu_timer.record_result();
@@ -103,7 +110,16 @@ void RankProgramImpl::progress() {
             if (operation.width)
                 operation.gpu.add_prefill(
                     static_cast<std::uint64_t>(prefill_timer.elapsed_ms() * 1.0e6));
-            if (const auto* forward = std::get_if<ForwardWork>(&operation.request.work.operation)) {
+            if (operation.packed) {
+                // Every segment completed in the one traversal; none samples.
+                auto& result = std::get<ForwardResult>(operation.result->output);
+                for (const auto& segment : operation.segments)
+                    result.processed_tokens.push_back(segment.tokens);
+                operation.forward_row    = static_cast<std::uint32_t>(operation.rows.size());
+                operation.forward_offset = 0;
+                operation.stage          = ComputeStage::Readback;
+            } else if (const auto* forward =
+                           std::get_if<ForwardWork>(&operation.request.work.operation)) {
                 auto& result       = std::get<ForwardResult>(operation.result->output);
                 const auto& window = forward->inputs[operation.forward_row];
                 operation.forward_offset += operation.width;
@@ -161,6 +177,37 @@ void RankProgramImpl::progress() {
             return;
         }
     }
+}
+
+// A mixed traversal is complete: the segments align their MTP history and publish their
+// continuation hidden, then the decode rows project their logits from the verify block.
+void RankProgramImpl::finish_mixed_forward(ComputeOperation& operation) {
+    if (backend == SpeculativeBackend::Mtp) align_packed_mtp_history(operation);
+    publish_continuation_hidden(operation);
+    resources.work.reset();
+    project_decode(operation.batch, operation.width, operation.prefill_tokens);
+    gpu_timer.end_target();
+    operation.projected = true;
+}
+
+// Each sequence's last Main hidden column seeds its continuation: the next window, the first
+// token's sampling and MTP conditioning read it from the destination State.
+void RankProgramImpl::publish_continuation_hidden(ComputeOperation& operation) {
+    const auto total =
+        static_cast<int>(operation.mixed ? operation.axis_tokens : operation.width);
+    const auto hidden  = resources.frame.input_view(total, 1).hidden;
+    const auto publish = [&](std::uint32_t last_column, std::int64_t destination) {
+        const auto source = hidden.slice(1, static_cast<int>(last_column), 1);
+        const auto target = resources.state_images.continuation_hidden(destination);
+        CUDA_CHECK(cudaMemcpyAsync(target.data, source.data, target.bytes(),
+                                   cudaMemcpyDeviceToDevice, device.stream()));
+    };
+    if (operation.packed || operation.mixed) {
+        for (const auto& segment : operation.segments)
+            publish(segment.token_offset + segment.tokens - 1, segment.destination_offset);
+        return;
+    }
+    publish(operation.width - 1, operation.rows[operation.forward_row].state_offsets.destination);
 }
 
 } // namespace ninfer::models::qwen3_5::detail

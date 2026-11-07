@@ -174,9 +174,10 @@ std::uint32_t SessionImpl::unit_end(const Sequence& s, ExecutionUnitKind kind,
     const auto frontier = s.continuation.metadata.main_frontier;
     switch (kind) {
     case ExecutionUnitKind::Prefill:
-        return window_end(s, frontier, s.request->summary.prompt_tokens);
+        return window_end(s, frontier,
+                          capped_end(frontier, s.request->summary.prompt_tokens, tokens));
     case ExecutionUnitKind::Replay:
-        return window_end(s, frontier, s.replay_target);
+        return window_end(s, frontier, capped_end(frontier, s.replay_target, tokens));
     case ExecutionUnitKind::Decode:
         return frontier + std::min({shape.draft_tokens + 1, std::max(tokens, 1U),
                                     shape.max_context - frontier});
@@ -345,6 +346,14 @@ bool Session::execution_pending(SequenceHandle handle) const noexcept {
     return impl_->compute &&
            std::find(impl_->compute->members.begin(), impl_->compute->members.end(), handle) !=
                impl_->compute->members.end();
+}
+
+bool Session::terminal_blocked(SequenceHandle handle) const noexcept {
+    // Conservative: any context transaction blocks every lane. Residency releases queued by
+    // earlier finish/abort calls touch no checkpoint and no transaction, so they do not.
+    const auto& p = *impl_;
+    return !p.valid(handle) || p.operation || p.pending_maintenance || execution_pending(handle) ||
+           context_blocks(handle);
 }
 
 bool Session::context_blocks(SequenceHandle handle) const noexcept {

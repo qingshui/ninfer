@@ -155,6 +155,20 @@ RequestBasePlan SessionImpl::plan_request(qwen::PreparedPromptData&& prompt,
     return RequestBasePlan(std::move(base));
 }
 
+namespace {
+// End of a prefill/replay window that processes at most `tokens` prompt positions from `begin`;
+// zero leaves the window to the Session.
+std::uint32_t bounded_end(std::uint32_t begin, std::uint32_t end, std::uint32_t tokens) noexcept {
+    return tokens == 0 ? end
+                       : static_cast<std::uint32_t>(
+                             std::min<std::uint64_t>(end, std::uint64_t{begin} + tokens));
+}
+
+bool is_window_unit(ExecutionUnitKind kind) noexcept {
+    return kind == ExecutionUnitKind::Prefill || kind == ExecutionUnitKind::Replay;
+}
+} // namespace
+
 UnitDemand SessionImpl::prefill_unit(std::uint32_t prompt, std::uint32_t cursor) const {
     UnitDemand out{.kind = ExecutionUnitKind::Prefill};
     out.main_frontier    = std::min(prompt, cursor + prefill_chunk);
@@ -173,14 +187,17 @@ UnitDemand SessionImpl::next_unit(const SequenceState& state, const RequestContr
     case ExecutionUnitKind::Prefill:
         if (request.lifecycle != Lifecycle::Prefilling || !request.prefill)
             throw std::logic_error("prefill demand requires a prefill cursor");
-        out.main_frontier = window_end(state, request, request.prefill->cursor,
-                                       request.prefill->prompt_tokens, vision::Window{});
+        out.main_frontier =
+            window_end(state, request, request.prefill->cursor,
+                       bounded_end(request.prefill->cursor, request.prefill->prompt_tokens, tokens),
+                       vision::Window{});
         break;
     case ExecutionUnitKind::Replay:
         if (request.lifecycle != Lifecycle::Replaying)
             throw std::logic_error("request is not replaying");
-        out.main_frontier = window_end(state, request, request.replay_cursor, request.replay_target,
-                                       vision::Window{});
+        out.main_frontier = window_end(
+            state, request, request.replay_cursor,
+            bounded_end(request.replay_cursor, request.replay_target, tokens), vision::Window{});
         break;
     case ExecutionUnitKind::Decode:
         if (request.lifecycle != Lifecycle::Active || !tokens || f >= capacity)
@@ -211,6 +228,9 @@ ResourceReservation SessionImpl::reserve_units(std::span<const ExecutionUnit> un
     std::array<UnitDemand, kMaximumConcurrency> coverage{};
     std::array<std::uint32_t, kMaximumConcurrency> old_main{}, old_backend{};
     std::array<std::uint32_t, kMaximumConcurrency> add_main{}, add_backend{};
+    // Growth of a decode unit out to the reserve horizon; only lanes in `horizon` use it.
+    std::array<std::uint32_t, kMaximumConcurrency> horizon_main{}, horizon_backend{};
+    std::array<bool, kMaximumConcurrency> horizon{};
     std::array<bool, kMaximumConcurrency> seen{};
     for (std::size_t index = 0; index < units.size(); ++index) {
         const auto& unit = units[index];
@@ -223,11 +243,13 @@ ResourceReservation SessionImpl::reserve_units(std::span<const ExecutionUnit> un
         auto& request     = requests[lane];
         const auto& state = active_sequence(lane);
         demands[lane]     = next_unit(state, request, unit.kind, unit.tokens);
-        if (unit.kind == ExecutionUnitKind::Prefill || unit.kind == ExecutionUnitKind::Replay) {
+        if (is_window_unit(unit.kind)) {
             auto& demand = demands[lane];
             demand.main_frontier =
                 window_end(state, request, state.continuation.metadata.execution_frontier,
-                           demand.main_frontier, vision_window);
+                           bounded_end(state.continuation.metadata.execution_frontier,
+                                       demand.main_frontier, unit.tokens),
+                           vision_window);
             demand.backend_frontier = speculative_backend == SpeculativeBackend::Mtp
                                           ? (demand.main_frontier ? demand.main_frontier - 1 : 0)
                                       : has_backend_pool() ? demand.main_frontier
@@ -238,16 +260,22 @@ ResourceReservation SessionImpl::reserve_units(std::span<const ExecutionUnit> un
             state.continuation.metadata.execution_frontier < request.base->summary.prompt_tokens)
             return {.status = runtime::UnitReservationStatus::ExecutionUnavailable};
         if (request.permit) {
-            const auto& permit = *request.permit;
-            if (permit.kind != unit.kind || permit.tokens != unit.tokens)
+            auto& permit = *request.permit;
+            if (permit.kind != unit.kind ||
+                (!is_window_unit(unit.kind) && permit.tokens != unit.tokens))
                 throw std::logic_error("an existing execution permit cannot change its operation");
-            if (unit.kind == ExecutionUnitKind::Prefill || unit.kind == ExecutionUnitKind::Replay) {
-                // A permit retains capacity through its frontier. A checkpoint or an execution
-                // window may shorten the next prefix, but cannot enlarge that retained grant.
+            if (is_window_unit(unit.kind)) {
+                // A permit retains capacity through its frontier. A cap, a checkpoint or an
+                // execution window may shorten the next prefix, but cannot enlarge that
+                // retained grant. The permit keeps the shorter frontier, which bounds the window
+                // the execution starts with.
                 demands[lane].main_frontier =
                     std::min(demands[lane].main_frontier, permit.main_frontier);
                 demands[lane].backend_frontier =
                     std::min(demands[lane].backend_frontier, permit.backend_frontier);
+                permit.main_frontier    = demands[lane].main_frontier;
+                permit.backend_frontier = demands[lane].backend_frontier;
+                permit.tokens           = unit.tokens;
             } else if (permit.main_frontier != demands[lane].main_frontier ||
                        permit.backend_frontier != demands[lane].backend_frontier)
                 throw std::logic_error("an existing execution permit cannot change its frontier");
@@ -270,22 +298,80 @@ ResourceReservation SessionImpl::reserve_units(std::span<const ExecutionUnit> un
                 backend_kv_histories->reserved_growth_pages(state.kv->backend->handle());
             add_backend[lane] = backend > old_backend[lane] ? backend - old_backend[lane] : 0;
         }
+        // A decode unit also asks for the pages of the next kDecodeGrowthReserveTokens positions,
+        // so one reclaim serves many steps. A recovering lane already holds its full coverage.
+        const auto current = state.continuation.metadata.execution_frontier;
+        const auto target = std::min<std::uint64_t>(capacity, std::uint64_t{current} +
+                                                                  kDecodeGrowthReserveTokens);
+        if (unit.kind == ExecutionUnitKind::Decode && !request.permit && !request.recovery &&
+            target > demands[lane].main_frontier) {
+            const auto main_target = static_cast<std::uint32_t>(target);
+            const auto backend_target = speculative_backend == SpeculativeBackend::Mtp
+                                            ? main_target - 1
+                                        : has_backend_pool() ? main_target
+                                                             : 0;
+            const auto main = text_kv_histories->write_pages(
+                state.kv->text.handle(), state.continuation.metadata.text_kv_valid, main_target);
+            horizon_main[lane] = main > old_main[lane] ? main - old_main[lane] : 0;
+            horizon_backend[lane] = add_backend[lane];
+            if (state.kv->backend) {
+                const auto backend = backend_kv_histories->write_pages(
+                    state.kv->backend->handle(), backend_kv_valid(state), backend_target);
+                horizon_backend[lane] = backend > old_backend[lane] ? backend - old_backend[lane] : 0;
+            }
+            horizon[lane] = true;
+        }
     }
-    ContextDemand bundle;
-    std::array<context::ContextDemandId, kMaximumConcurrency> main_ids, backend_ids;
-    for (const auto& unit : units) {
-        const auto lane = this->lane(unit.sequence);
-        if (requests[lane].permit) continue;
-        const auto& state = active_sequence(lane);
-        main_ids[lane] =
-            bundle.add_growth(*text_kv_histories, state.kv->text.handle(), add_main[lane]);
-        if (state.kv->backend)
-            backend_ids[lane] = bundle.add_growth(*backend_kv_histories,
-                                                  state.kv->backend->handle(), add_backend[lane]);
+    struct Bundle {
+        ContextDemand demand;
+        std::array<context::ContextDemandId, kMaximumConcurrency> main, backend;
+    };
+
+    const auto build = [&](bool with_horizon) {
+        Bundle bundle;
+        for (const auto& unit : units) {
+            const auto lane = this->lane(unit.sequence);
+            if (requests[lane].permit) continue;
+            const auto& state = active_sequence(lane);
+            const bool wide   = with_horizon && horizon[lane];
+            bundle.main[lane] = bundle.demand.add_growth(
+                *text_kv_histories, state.kv->text.handle(),
+                wide ? horizon_main[lane] : add_main[lane]);
+            if (state.kv->backend)
+                bundle.backend[lane] = bundle.demand.add_growth(
+                    *backend_kv_histories, state.kv->backend->handle(),
+                    wide ? horizon_backend[lane] : add_backend[lane]);
+        }
+        return bundle;
+    };
+    const bool any_horizon = std::any_of(horizon.begin(), horizon.end(), [](bool v) { return v; });
+    std::optional<Bundle> chosen;
+    std::optional<ContextAssessment> wanted;
+    if (any_horizon) {
+        auto wide      = build(true);
+        auto affordable = directory.assess(wide.demand);
+        if (affordable.ready())
+            chosen = std::move(wide);
+        else
+            wanted = std::move(affordable);
     }
-    auto assessment = directory.assess(bundle);
-    if (!assessment.ready()) return {.assessment = std::move(assessment)};
-    auto reserved = directory.reserve(bundle);
+    if (!chosen) {
+        // The horizon is a preference; the minimum is the requirement.
+        auto narrow     = build(false);
+        auto assessment = directory.assess(narrow.demand);
+        if (!assessment.ready()) {
+            // When the minimum is short, let one reclaim cover the horizon as well, unless that
+            // larger demand needs something the minimum does not.
+            if (wanted && wanted->status == context::ContextAvailability::NeedsReclaim)
+                return {.assessment = std::move(*wanted)};
+            return {.assessment = std::move(assessment)};
+        }
+        chosen = std::move(narrow);
+    }
+    auto& bundle   = *chosen;
+    auto& main_ids = bundle.main;
+    auto& backend_ids = bundle.backend;
+    auto reserved = directory.reserve(bundle.demand);
     if (!reserved) return {.assessment = std::move(reserved.assessment)};
     std::array<bool, kMaximumConcurrency> added{};
     try {
@@ -349,8 +435,10 @@ void SessionImpl::release_units(std::span<const SequenceHandle> handles) noexcep
 
 void SessionImpl::require_unit(std::uint32_t lane, ExecutionUnitKind kind,
                                std::uint32_t tokens) const {
+    // The tokens of a prefill/replay permit are an upper bound that the permit frontier already
+    // carries, not part of the unit's identity.
     if (!requests[lane].permit || requests[lane].permit->kind != kind ||
-        requests[lane].permit->tokens != tokens)
+        (!is_window_unit(kind) && requests[lane].permit->tokens != tokens))
         throw std::logic_error("execution does not match its reserved unit");
 }
 

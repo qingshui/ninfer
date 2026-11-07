@@ -1,6 +1,7 @@
 #pragma once
 
 #include "context_budget.h"
+#include "models/qwen3_5/prefill_chunk.h"
 #include "models/qwen3_5/program/internal.h"
 #include "models/qwen3_5/session/internal.h"
 #include "runtime/executor/local_executor.h"
@@ -110,8 +111,11 @@ public:
     NativeRankFixture(std::shared_ptr<const q35::ModelDefinition> definition,
                       std::shared_ptr<const q35::ModelShard> model,
                       std::shared_ptr<const q35::execution::ModelProfile> profile,
-                      const EngineOptions& options, ContextBudget budget = {})
+                      const EngineOptions& configured, ContextBudget budget = {})
         : definition(std::move(definition)) {
+        auto options = configured;
+        options.prefill_chunk =
+            q35::resolve_prefill_chunk(options, models::WeightPlacement::Resident);
         auto device   = std::make_unique<DeviceContext>();
         device_       = device.get();
         auto instance = std::make_unique<runtime::RankModelInstance<ObservedTypes>>(
@@ -225,10 +229,15 @@ public:
         return {};
     }
 
-    q35::PrefillProgress prefill(q35::SequenceHandle sequence) {
-        const auto ticket = session_.start_prefill(sequence);
-        if (!ticket) throw std::logic_error("native prefill had no execution capacity");
-        return wait<q35::PrefillProgress>(*ticket);
+    q35::PrefillRowProgress prefill(q35::SequenceHandle sequence) {
+        const auto start = session_.start_prefill({&sequence, 1}, {});
+        if (!start) throw std::logic_error("native prefill had no execution capacity");
+        if (start->segments != 1)
+            throw std::logic_error("single prefill admitted several segments");
+        auto progress = wait<q35::PrefillProgress>(start->ticket);
+        if (progress.rows.size() != 1)
+            throw std::logic_error("single prefill returned several rows");
+        return std::move(progress.rows.front());
     }
 
     q35::ReplayProgress replay(q35::SequenceHandle sequence) {

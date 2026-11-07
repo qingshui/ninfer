@@ -5,6 +5,30 @@
 
 namespace ninfer::models::qwen3_5 {
 
+namespace {
+
+// Advances the context epoch when a call starts or ends a context operation. Execution steps that
+// leave the retained checkpoints and their placements alone do not, so a cached reclaim ranking
+// survives the decode steps between two reclaim attempts.
+class OperationWatch {
+public:
+    explicit OperationWatch(detail::SessionImpl& impl) noexcept
+        : impl_(impl), pending_(impl.has_context_operation()) {}
+
+    ~OperationWatch() {
+        if (impl_.has_context_operation() != pending_) impl_.note_context_change();
+    }
+
+    OperationWatch(const OperationWatch&)            = delete;
+    OperationWatch& operator=(const OperationWatch&) = delete;
+
+private:
+    detail::SessionImpl& impl_;
+    bool pending_;
+};
+
+} // namespace
+
 RequestBasePlan::RequestBasePlan(std::shared_ptr<detail::RequestBasePlanImpl> impl) noexcept
     : impl_(std::move(impl)) {}
 
@@ -158,6 +182,7 @@ runtime::ContextReleaseMeasure Session::release_measure(const ContextReleaseSet&
 }
 
 runtime::ContextStart Session::start_maintenance(const ContextAssessment& assessment) {
+    impl_->note_context_change();
     return impl_->start_maintenance(assessment);
 }
 
@@ -197,10 +222,12 @@ bool Session::valid_checkpoint(CheckpointHandle h) const noexcept {
 }
 
 bool Session::release_checkpoint(CheckpointHandle h) noexcept {
+    impl_->note_context_change();
     return impl_->release_checkpoint(h);
 }
 
 bool Session::revoke_snapshot(ResumeState& paused) noexcept {
+    impl_->note_context_change();
     return impl_->revoke_snapshot(paused);
 }
 
@@ -210,6 +237,7 @@ std::size_t Session::host_bytes_released(std::span<const CheckpointHandle> check
 
 std::size_t Session::release_redundant_host(std::span<const CheckpointHandle> excluded,
                                             std::optional<SequenceHandle> pending_backup) {
+    impl_->note_context_change();
     return impl_->release_redundant_host(excluded, pending_backup);
 }
 
@@ -218,20 +246,26 @@ ResourceReservation Session::reserve_units(std::span<const ExecutionUnit> units)
 }
 
 bool Session::reclaim_capture_reservation(const ContextAssessment& assessment) {
+    impl_->note_context_change();
     return impl_->reclaim_capture_reservation(assessment);
 }
 
 void Session::release_units(std::span<const SequenceHandle> units) noexcept {
+    impl_->note_context_change();
     impl_->release_units(units);
 }
 
 BindingReservation Session::start_binding(const RequestBasePlan& base, runtime::LaneId lane,
                                           const SourceCandidate& source, ResumeState* resume,
                                           ExecutionUnitKind kind, std::uint32_t tokens) {
+    impl_->note_context_change();
     return impl_->start_binding(base, lane, source, resume, kind, tokens);
 }
 
-bool Session::start_capture(SequenceHandle h) { return impl_->start_capture(h); }
+bool Session::start_capture(SequenceHandle h) {
+    impl_->note_context_change();
+    return impl_->start_capture(h);
+}
 
 std::vector<std::uint32_t> Session::capture_frontiers(SequenceHandle h) const {
     std::vector<std::uint32_t> result;
@@ -251,15 +285,18 @@ bool Session::capture_is_input(SequenceHandle h) const { return impl_->capture_i
 
 std::optional<CapturePreparation>
 Session::prepare_capture(SequenceHandle h, std::span<const CheckpointHandle> host_victims) {
+    impl_->note_context_change();
     return impl_->prepare_capture(h, host_victims);
 }
 
 void Session::skip_capture(SequenceHandle h, runtime::CaptureSkip reason) {
+    impl_->note_context_change();
     impl_->skip_capture(h, reason);
 }
 
 runtime::ContextStart Session::start_demote(const ContextDemotion& plan,
                                             std::span<const CheckpointHandle> host_victims) {
+    impl_->note_context_change();
     return impl_->start_demote(plan, host_victims);
 }
 
@@ -274,6 +311,7 @@ bool Session::pause_contributes(SequenceHandle sequence, const PauseOption& opti
 
 bool Session::prepare_pause(SequenceHandle sequence, runtime::PauseAction action,
                             std::span<const CheckpointHandle> host_victims) {
+    impl_->note_context_change();
     return impl_->prepare_pause(sequence, action, host_victims);
 }
 
@@ -316,6 +354,7 @@ Session::plan_releases(std::span<const CheckpointHandle> allowed,
 }
 
 bool Session::start_pause(SequenceHandle h, runtime::PauseAction action) {
+    impl_->note_context_change();
     return impl_->start_pause(h, action);
 }
 
@@ -329,56 +368,111 @@ bool Session::recovery_pending(SequenceHandle sequence) const noexcept {
 
 bool Session::has_context_operation() const noexcept { return impl_->has_context_operation(); }
 
-std::optional<runtime::ExecutionTicket> Session::start_prefill(SequenceHandle h, bool c) {
-    return impl_->start_prefill(h, c);
+std::uint64_t Session::context_epoch() const noexcept { return impl_->context_epoch(); }
+
+bool Session::context_pins(CheckpointHandle handle) const noexcept {
+    return impl_->context_pins(handle);
+}
+
+std::uint32_t Session::prefill_pack_limit() const noexcept { return impl_->prefill_pack_limit(); }
+
+std::uint32_t Session::prefill_pack_tokens() const noexcept { return impl_->prefill_pack_tokens(); }
+
+std::optional<PrefillStart> Session::start_prefill(std::span<const SequenceHandle> sequences,
+                                                   std::span<const bool> constrained) {
+    const OperationWatch watch(*impl_);
+    return impl_->start_prefill(sequences, constrained);
+}
+
+std::uint32_t Session::mixed_decode_limit() const noexcept { return impl_->mixed_decode_limit(); }
+
+bool Session::prefill_mixable(SequenceHandle h) const { return impl_->prefill_mixable(h); }
+
+std::optional<MixedStart> Session::start_mixed(std::span<const SequenceHandle> prefill,
+                                               std::span<const bool> prefill_constrained,
+                                               std::span<const SequenceHandle> decode,
+                                               std::span<const runtime::RoundBudget> budgets,
+                                               std::span<const bool> decode_constrained) {
+    const OperationWatch watch(*impl_);
+    return impl_->start_mixed(prefill, prefill_constrained, decode, budgets, decode_constrained);
 }
 
 std::optional<runtime::ExecutionTicket> Session::start_replay(SequenceHandle h) {
+    const OperationWatch watch(*impl_);
     return impl_->start_replay(h);
 }
 
 std::optional<runtime::ExecutionTicket>
 Session::start_decode(std::span<const SequenceHandle> h, std::span<const runtime::RoundBudget> b,
                       std::span<const bool> c) {
+    const OperationWatch watch(*impl_);
     return impl_->start_decode(h, b, c);
 }
 
 std::optional<runtime::ExecutionTicket>
 Session::start_control(std::span<const SequenceHandle> h, std::span<const TokenId> ids,
                        std::uint32_t stride, std::span<const std::optional<std::uint32_t>> splits) {
+    const OperationWatch watch(*impl_);
     return impl_->start_control(h, ids, stride, splits);
 }
 
 std::optional<runtime::ExecutionTicket> Session::start_score(qwen::PreparedPrompt&& prompt,
                                                              std::uint32_t first) {
+    const OperationWatch watch(*impl_);
     return impl_->start_score(qwen::PreparedPromptAccess::take(std::move(prompt)), first);
 }
 
-std::optional<SessionEvent> Session::poll() { return impl_->poll(); }
+std::optional<SessionEvent> Session::poll() {
+    const OperationWatch watch(*impl_);
+    auto event = impl_->poll();
+    // A finished context operation has moved checkpoints, pages or placements.
+    if (event && std::holds_alternative<ContextProgress>(event->result))
+        impl_->note_context_change();
+    return event;
+}
 
 void Session::supply(runtime::ExecutionTicket ticket, runtime::DecisionInput&& input) {
+    const OperationWatch watch(*impl_);
     impl_->supply(ticket, std::move(input));
 }
 
 CommitResult Session::commit(PendingBatch&& pending, std::span<const runtime::CommitDecision> d) {
+    const OperationWatch watch(*impl_);
     return impl_->commit(std::move(pending), d);
 }
 
 DiscardResult Session::discard(PendingBatch&& pending) noexcept {
+    const OperationWatch watch(*impl_);
     return impl_->discard(std::move(pending));
 }
 
-void Session::cancel_context() noexcept { impl_->cancel_context(); }
+void Session::cancel_context() noexcept {
+    impl_->note_context_change();
+    impl_->cancel_context();
+}
 
 bool Session::execution_pending(SequenceHandle h) const noexcept {
     return impl_->execution_pending(h);
 }
 
-FinishResult Session::finish(SequenceHandle h) noexcept { return impl_->finish(h); }
+bool Session::terminal_blocked(SequenceHandle h) const noexcept {
+    return impl_->terminal_blocked(h);
+}
 
-AbortResult Session::abort(SequenceHandle h) noexcept { return impl_->abort(h); }
+FinishResult Session::finish(SequenceHandle h) noexcept {
+    impl_->note_context_change();
+    return impl_->finish(h);
+}
 
-void Session::fail_all_cleanup() noexcept { impl_->fail_all_cleanup(); }
+AbortResult Session::abort(SequenceHandle h) noexcept {
+    impl_->note_context_change();
+    return impl_->abort(h);
+}
+
+void Session::fail_all_cleanup() noexcept {
+    impl_->note_context_change();
+    impl_->fail_all_cleanup();
+}
 
 PhysicalUsageSnapshot Session::physical_usage() const noexcept { return impl_->physical_usage(); }
 
@@ -408,7 +502,9 @@ SessionImpl::SessionImpl(std::shared_ptr<const ModelDefinition> definition_in, S
       draft_window(plan.draft_window), speculative_backend(plan.speculative_backend),
       context_cache(plan.context_cache), vision_enabled(plan.profile->options.vision),
       causal_scoring(plan.causal_scoring) {
-    if (!definition || !plan.profile || plan.context.pools.empty())
+    if (!definition || !plan.profile || plan.context.pools.empty() ||
+        plan.pack_tokens < plan.prefill_chunk || plan.pack_segments == 0 ||
+        plan.pack_segments > plan.max_concurrency)
         throw std::invalid_argument("Session preparation is incomplete");
     checkpoints.configure(Checkpoints::capacity_for_metadata(directory.metadata_budget().limit()),
                           directory.metadata_budget(), &recovery_index);
@@ -451,7 +547,7 @@ void SessionImpl::fail_all_cleanup() noexcept {
 }
 
 FinishResult SessionImpl::finish(SequenceHandle h) noexcept {
-    if (!valid_sequence(h) || execution_pending(h) || context_blocks(h)) return {};
+    if (terminal_blocked(h)) return {};
     try {
         const auto l  = lane(h);
         auto& state   = sequences[l];
@@ -465,7 +561,7 @@ FinishResult SessionImpl::finish(SequenceHandle h) noexcept {
 }
 
 AbortResult SessionImpl::abort(SequenceHandle h) noexcept {
-    if (!valid_sequence(h) || execution_pending(h) || context_blocks(h)) return {};
+    if (terminal_blocked(h)) return {};
     const auto l = lane(h);
     AbortResult out{runtime::ConsumeStatus::Consumed, requests[l].speculative_stats};
     clear_lane(sequences[l], requests[l]);

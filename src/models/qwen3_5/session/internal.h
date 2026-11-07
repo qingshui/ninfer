@@ -50,6 +50,12 @@ struct RequestBasePlanImpl {
     [[nodiscard]] bool accepts_capture(std::uint32_t frontier) const noexcept;
     [[nodiscard]] CaptureGroup capture_group(std::uint32_t frontier) const;
 };
+// How far past its frontier a decode unit reserves KV growth when the pool allows it. A pool that
+// cannot hold the whole horizon still grants the unit's own minimum, and a pool that cannot hold
+// the minimum is reclaimed up to the horizon, so one reclaim serves many decode steps. The
+// reservation is released when the unit commits.
+inline constexpr std::uint32_t kDecodeGrowthReserveTokens = 1024;
+
 enum class Lifecycle : std::uint8_t {
     Empty,
     Binding,
@@ -250,6 +256,8 @@ struct MaintenanceOperation {
 
 struct DemoteOperation {
     static constexpr auto kind = ContextOperationKind::Demote;
+    // The checkpoints whose pages and State images this transfer reads.
+    std::vector<CheckpointHandle> sources;
 };
 
 struct PauseOperation {
@@ -370,12 +378,32 @@ public:
                    const ContextAssessment&, runtime::ExecutionReservation);
     [[nodiscard]] bool start_pause(SequenceHandle sequence, runtime::PauseAction);
     [[nodiscard]] bool has_context_operation() const noexcept;
+    [[nodiscard]] std::uint64_t context_epoch() const noexcept;
+    [[nodiscard]] bool context_pins(CheckpointHandle) const noexcept;
+
+    // Called by Session entry points that change the retained set, its placements or pins, or
+    // hand capacity back. Checkpoint publication and retirement advance the epoch through the
+    // store; a context operation starting or ending advances it through Session's watch.
+    void note_context_change() noexcept { ++context_mutations_; }
+
     [[nodiscard]] bool context_blocks(SequenceHandle sequence) const noexcept;
     [[nodiscard]] bool execution_pending(SequenceHandle sequence) const noexcept;
+    [[nodiscard]] bool terminal_blocked(SequenceHandle sequence) const noexcept;
     // A resumed binding retains its complete recovery capacity until committed new progress.
     [[nodiscard]] bool recovery_pending(SequenceHandle sequence) const noexcept;
-    [[nodiscard]] std::optional<runtime::ExecutionTicket> start_prefill(SequenceHandle,
-                                                                        bool constrained = false);
+    [[nodiscard]] std::uint32_t prefill_pack_limit() const noexcept;
+    [[nodiscard]] std::uint32_t prefill_pack_tokens() const noexcept;
+    [[nodiscard]] bool crosses_execution_boundary(const SequenceState&, std::uint32_t begin,
+                                                  std::uint32_t end) const;
+    [[nodiscard]] std::optional<PrefillStart> start_prefill(std::span<const SequenceHandle>,
+                                                            std::span<const bool> constrained);
+    [[nodiscard]] std::uint32_t mixed_decode_limit() const noexcept;
+    [[nodiscard]] bool prefill_mixable(SequenceHandle) const;
+    [[nodiscard]] std::optional<MixedStart>
+    start_mixed(std::span<const SequenceHandle> prefill, std::span<const bool> prefill_constrained,
+                std::span<const SequenceHandle> decode,
+                std::span<const runtime::RoundBudget> budgets,
+                std::span<const bool> decode_constrained);
     [[nodiscard]] std::optional<runtime::ExecutionTicket> start_replay(SequenceHandle);
     [[nodiscard]] std::optional<runtime::ExecutionTicket>
     start_decode(std::span<const SequenceHandle>, std::span<const runtime::RoundBudget>,
@@ -423,6 +451,7 @@ public:
     std::array<RequestControl, kMaximumConcurrency> requests;
     std::array<std::uint64_t, kMaximumConcurrency> lane_epochs{};
     std::uint64_t next_sequence = 1;
+    std::uint64_t context_mutations_ = 0;
     mutable context::RecoveryIndex<> recovery_index{directory.metadata_budget()};
     Checkpoints checkpoints;
     context::MetadataAccount count_storage{directory.metadata_budget()};
@@ -454,11 +483,13 @@ public:
     void release_residency(runtime::ResidencyId);
     void submit_releases();
 
-    enum class OperationKind { Prefill, Replay, Decode, Control, Score, Normalize };
+    enum class OperationKind { Prefill, Replay, Decode, Mixed, Control, Score, Normalize };
 
     struct Execution {
         OperationKind kind;
         runtime::ExecutionTicket ticket;
+        // Prefill segments first, then decode rows. Every per-member vector follows this order; a
+        // Mixed execution's pending batch and decisions cover the members from `decode_begin` on.
         std::vector<SequenceHandle> members;
         std::vector<Continuation> bases;
         std::vector<ContinuationMetadata> completed;
@@ -472,6 +503,7 @@ public:
         std::optional<SessionEvent> completion;
         std::vector<runtime::CommitDecision> decisions;
         std::uint64_t vision_id = 0;
+        std::size_t decode_begin = 0;
         bool result_ready       = false;
         bool committed          = false;
         bool discarded          = false;
@@ -526,6 +558,18 @@ public:
     void commit_completed_unit();
     void advance_score();
     [[nodiscard]] PendingBatch generated_pending(const GeneratedResult&);
+    [[nodiscard]] bool matches_pending(const PendingBatch&) const noexcept;
+    // The end of the window the sequence's next prefill execution would cover, when that window
+    // can share an execution with decode rows.
+    [[nodiscard]] std::optional<std::uint32_t> mixable_end(const SequenceState&,
+                                                           const RequestControl&) const;
+    void append_prefill_row(Execution&, ForwardWork&, SequenceHandle, std::uint32_t begin,
+                            std::uint32_t end, bool constrained);
+    void append_decode_row(Execution&, DecodeWork&, SequenceHandle,
+                           const runtime::RoundBudget&, bool constrained);
+    // Settle and adopt the prefill segments of a mixed execution together with its decode rows.
+    void prepare_segments(Execution&, std::array<bool, kMaximumConcurrency>& recovery);
+    void adopt_segments(Execution&, const std::array<bool, kMaximumConcurrency>& recovery) noexcept;
     [[nodiscard]] std::optional<runtime::ExecutionTicket>
     submit_execution(Execution&&, runtime::ExecutionReservation, Work&&);
 

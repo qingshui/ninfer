@@ -1,6 +1,7 @@
 #include "models/qwen4_exp/session/internal.h"
 
 #include <algorithm>
+#include <stdexcept>
 
 namespace ninfer::models::qwen4_exp {
 namespace {
@@ -28,16 +29,41 @@ std::optional<PlePrefetch> prefetch(const detail::SessionImpl& p, const detail::
 }
 } // namespace
 
-std::optional<runtime::ExecutionTicket> Session::start_prefill(SequenceHandle handle,
-                                                               bool constrained) {
-    auto& p = *impl_;
-    auto& s = p.sequence(handle);
+std::uint32_t Session::prefill_pack_limit() const noexcept { return 1; }
+
+std::uint32_t Session::prefill_pack_tokens() const noexcept { return impl_->shape.prefill_chunk; }
+
+std::uint32_t Session::mixed_decode_limit() const noexcept { return 0; }
+
+bool Session::prefill_mixable(SequenceHandle) const { return false; }
+
+std::optional<MixedStart> Session::start_mixed(std::span<const SequenceHandle>,
+                                               std::span<const bool>,
+                                               std::span<const SequenceHandle>,
+                                               std::span<const runtime::RoundBudget>,
+                                               std::span<const bool>) {
+    throw std::logic_error("this model does not mix decode rows into a prefill execution");
+}
+
+std::optional<PrefillStart> Session::start_prefill(std::span<const SequenceHandle> sequences,
+                                                   std::span<const bool> constrained_rows) {
+    if (sequences.empty() ||
+        (!constrained_rows.empty() && constrained_rows.size() != sequences.size()))
+        throw std::invalid_argument("prefill membership is invalid");
+    const auto handle      = sequences.front();
+    const bool constrained = !constrained_rows.empty() && constrained_rows.front();
+    auto& p                = *impl_;
+    auto& s                = p.sequence(handle);
     if (p.compute) return {};
     if (s.phase != detail::Phase::Prefill || !s.permit || s.capture_pending)
         throw std::logic_error("prefill has no executable unit");
     const auto frontier = s.continuation.metadata.main_frontier;
+    // The permitted frontier holds the reserved capacity; the permit's tokens cap the window.
     const auto end =
-        p.window_end(s, frontier, std::min(s.permitted_frontier, s.request->summary.prompt_tokens));
+        p.window_end(s, frontier,
+                     detail::capped_end(
+                         frontier, std::min(s.permitted_frontier, s.request->summary.prompt_tokens),
+                         s.permit->tokens));
     const bool capture = s.capture && s.captures[s.next_capture].frontier == end;
     const bool sample  = end == s.request->summary.prompt_tokens && !capture;
     auto reservation   = p.executor->try_reserve(runtime::FrameKind::Compute);
@@ -59,7 +85,7 @@ std::optional<runtime::ExecutionTicket> Session::start_prefill(SequenceHandle ha
         if (forward.visual) tx.vision_id = forward.visual->window.id;
         forward.prefetch = prefetch(p, s, end, s.request->summary.prompt_tokens);
         submit(p, std::move(*reservation), {{}, std::move(forward)});
-        return tx.ticket;
+        return PrefillStart{tx.ticket, 1};
     } catch (const std::exception& error) {
         p.executor->fail(error.what());
         throw;
@@ -73,7 +99,10 @@ std::optional<runtime::ExecutionTicket> Session::start_replay(SequenceHandle han
     if (s.phase != detail::Phase::Replay || !s.permit || s.capture_pending)
         throw std::logic_error("replay has no executable unit");
     const auto begin = s.continuation.metadata.main_frontier;
-    const auto end   = p.window_end(s, begin, std::min(s.permitted_frontier, s.replay_target));
+    const auto end =
+        p.window_end(s, begin,
+                     detail::capped_end(begin, std::min(s.permitted_frontier, s.replay_target),
+                                        s.permit->tokens));
     if (end <= begin) throw std::logic_error("replay has no missing input window");
     auto reservation = p.executor->try_reserve(runtime::FrameKind::Compute);
     if (!reservation) return {};

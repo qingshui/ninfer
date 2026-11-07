@@ -189,7 +189,9 @@ enum class ExecutionUnitKind : std::uint8_t { Prefill, Replay, Decode, Control, 
 struct ExecutionUnit {
     SequenceHandle sequence;
     ExecutionUnitKind kind = ExecutionUnitKind::Decode;
-    // Decode: remaining output budget. Control: exact forced span. Other kinds: zero.
+    // Decode: remaining output budget. Control: exact forced span. Prefill/Replay: upper bound on
+    // the prompt positions the window covers from the sequence's cursor; zero leaves the window to
+    // the Session. Normalize: zero.
     std::uint32_t tokens = 0;
 };
 
@@ -226,13 +228,43 @@ private:
     friend class detail::SessionImpl;
 };
 
-struct PrefillProgress {
+// One prefill segment of an execution. `pending` exists only when the execution has one segment.
+struct PrefillRowProgress {
     runtime::BeginSummary summary;
     std::uint32_t processed_prompt_tokens = 0;
     bool complete                         = false;
 
     std::optional<PendingBatch> pending;
     bool capture_ready = false;
+};
+
+// Rows follow the execution members.
+struct PrefillProgress {
+    std::vector<PrefillRowProgress> rows;
+};
+
+// `segments` is the length of the candidate prefix the execution admitted. More than one segment
+// means every segment is a non-final, text-only window.
+struct PrefillStart {
+    runtime::ExecutionTicket ticket;
+    std::uint32_t segments = 0;
+};
+
+// `segments` and `decode_rows` are the prefixes of the candidate lists the execution admitted,
+// which may be shorter than requested. Zero decode rows means the execution is an ordinary packed
+// prefill and reports a PrefillProgress.
+struct MixedStart {
+    runtime::ExecutionTicket ticket;
+    std::uint32_t segments    = 0;
+    std::uint32_t decode_rows = 0;
+};
+
+// The event members are the prefill segments followed by the decode rows. `prefill` follows the
+// segments; none of its rows carries a pending batch. `decode` covers the decode rows only and is
+// the object committed or discarded; the segments settle with it.
+struct MixedProgress {
+    PrefillProgress prefill;
+    PendingBatch decode;
 };
 
 struct CommitRowResult {
@@ -307,9 +339,9 @@ struct ScoreComplete {
 struct SessionEvent {
     runtime::ExecutionTicket ticket;
     std::vector<SequenceHandle> members;
-    std::variant<PrefillProgress, PendingBatch, ReplayProgress, ControlComplete, ScoreComplete,
-                 ContextProgress, runtime::DecisionRequest, runtime::DecisionConsumed,
-                 runtime::ExecutionComplete>
+    std::variant<PrefillProgress, PendingBatch, MixedProgress, ReplayProgress, ControlComplete,
+                 ScoreComplete, ContextProgress, runtime::DecisionRequest,
+                 runtime::DecisionConsumed, runtime::ExecutionComplete>
         result;
 };
 
@@ -419,13 +451,52 @@ public:
     start_demote(const ContextDemotion&, std::span<const CheckpointHandle> host_victims = {});
     [[nodiscard]] bool start_pause(SequenceHandle sequence, runtime::PauseAction);
     [[nodiscard]] bool has_context_operation() const noexcept;
+    // Advances when the retained checkpoint set, the placements of its records, the pins of a
+    // context operation or the operation itself change, and when capacity is handed back by a
+    // release. Pages that execution steps take from or return to the free pool do not advance it.
+    // Two equal values mean the set of releasable checkpoints and their ranking inputs are the
+    // same, so a reclaim ranking derived from one may be reused at the other.
+    [[nodiscard]] std::uint64_t context_epoch() const noexcept;
+    // True while an in-flight context operation depends on this checkpoint (a lease, or its own
+    // source, carried, retired, captured or demoted set). A pinned checkpoint is not released
+    // until the operation completes; every other checkpoint may be released during it.
+    [[nodiscard]] bool context_pins(CheckpointHandle) const noexcept;
     void cancel_context() noexcept;
     [[nodiscard]] bool context_blocks(SequenceHandle sequence) const noexcept;
     [[nodiscard]] bool execution_pending(SequenceHandle sequence) const noexcept;
+    // True when finish/abort of this sequence cannot run now: its lane is owned by a context
+    // operation or an execution. This is the only condition under which they decline.
+    [[nodiscard]] bool terminal_blocked(SequenceHandle sequence) const noexcept;
     // A resumed binding retains its complete recovery capacity until committed new progress.
     [[nodiscard]] bool recovery_pending(SequenceHandle sequence) const noexcept;
-    [[nodiscard]] std::optional<runtime::ExecutionTicket> start_prefill(SequenceHandle,
-                                                                        bool constrained = false);
+    // Upper bound on the segments one start_prefill call admits.
+    [[nodiscard]] std::uint32_t prefill_pack_limit() const noexcept;
+    // Upper bound on the tokens one start_prefill call carries, summed over its segments. A single
+    // window always fits (>= the prefill chunk).
+    [[nodiscard]] std::uint32_t prefill_pack_tokens() const noexcept;
+    // Admits a non-empty prefix of `sequences`. The first segment always runs; a later one joins
+    // only while every segment so far is a non-final, text-only window and the backend is not
+    // DFlash. A final (token-producing), Vision or DFlash segment runs alone. `constrained` is
+    // empty or parallel to `sequences`.
+    [[nodiscard]] std::optional<PrefillStart>
+    start_prefill(std::span<const SequenceHandle> sequences, std::span<const bool> constrained);
+    // Upper bound on the decode rows one start_mixed call carries; zero when this Session never
+    // mixes (offloaded experts, masked draft windows, scoring, a single lane).
+    [[nodiscard]] std::uint32_t mixed_decode_limit() const noexcept;
+    // True when the sequence's next prefill window can share an execution with decode rows: a
+    // non-final, text-only window that stays inside one prefix execution segment.
+    [[nodiscard]] bool prefill_mixable(SequenceHandle) const;
+    // Carries a packed prefill and decode rows in one execution. The first prefill segment must be
+    // mixable; later ones follow the packing rules and additionally need prefill_mixable, and the
+    // total stays within prefill_pack_tokens(). Decode rows are admitted in the given order up to
+    // mixed_decode_limit() and stop before the first constrained row. No admitted decode row makes
+    // this an ordinary packed prefill. `prefill_constrained` and `decode_constrained` are empty or
+    // parallel to their sequences.
+    [[nodiscard]] std::optional<MixedStart>
+    start_mixed(std::span<const SequenceHandle> prefill, std::span<const bool> prefill_constrained,
+                std::span<const SequenceHandle> decode,
+                std::span<const runtime::RoundBudget> budgets,
+                std::span<const bool> decode_constrained);
     [[nodiscard]] std::optional<runtime::ExecutionTicket> start_replay(SequenceHandle);
     [[nodiscard]] std::optional<runtime::ExecutionTicket>
     start_decode(std::span<const SequenceHandle>, std::span<const runtime::RoundBudget>,

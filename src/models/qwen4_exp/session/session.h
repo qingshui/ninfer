@@ -144,7 +144,10 @@ enum class ExecutionUnitKind : std::uint8_t { Prefill, Replay, Decode, Control }
 struct ExecutionUnit {
     SequenceHandle sequence;
     ExecutionUnitKind kind = ExecutionUnitKind::Decode;
-    std::uint32_t tokens   = 0;
+    // Decode: remaining output budget. Control: exact forced span. Prefill/Replay: upper bound on
+    // the prompt positions the window covers from the sequence's frontier; zero leaves the window
+    // to the Session.
+    std::uint32_t tokens = 0;
 };
 
 class PendingBatch {
@@ -177,13 +180,38 @@ private:
     friend class Session;
 };
 
-struct PrefillProgress {
+// One prefill segment of an execution. `pending` exists only when the execution has one segment.
+struct PrefillRowProgress {
     runtime::BeginSummary summary;
     std::uint32_t processed_prompt_tokens = 0;
     bool complete                         = false;
 
     std::optional<PendingBatch> pending;
     bool capture_ready = false;
+};
+
+// Rows follow the execution members.
+struct PrefillProgress {
+    std::vector<PrefillRowProgress> rows;
+};
+
+// `segments` is the length of the candidate prefix the execution admitted.
+struct PrefillStart {
+    runtime::ExecutionTicket ticket;
+    std::uint32_t segments = 0;
+};
+
+// This model never mixes decode rows into a prefill execution; the types exist so every model
+// presents the same Session surface.
+struct MixedStart {
+    runtime::ExecutionTicket ticket;
+    std::uint32_t segments    = 0;
+    std::uint32_t decode_rows = 0;
+};
+
+struct MixedProgress {
+    PrefillProgress prefill;
+    PendingBatch decode;
 };
 
 struct CommitRowResult {
@@ -255,9 +283,9 @@ struct ScoreComplete {
 struct SessionEvent {
     runtime::ExecutionTicket ticket;
     std::vector<SequenceHandle> members;
-    std::variant<PrefillProgress, PendingBatch, ReplayProgress, ControlComplete, ScoreComplete,
-                 ContextProgress, runtime::DecisionRequest, runtime::DecisionConsumed,
-                 runtime::ExecutionComplete>
+    std::variant<PrefillProgress, PendingBatch, MixedProgress, ReplayProgress, ControlComplete,
+                 ScoreComplete, ContextProgress, runtime::DecisionRequest,
+                 runtime::DecisionConsumed, runtime::ExecutionComplete>
         result;
 };
 
@@ -376,13 +404,40 @@ public:
     start_demote(const ContextDemotion&, std::span<const CheckpointHandle> host_victims = {});
     [[nodiscard]] bool start_pause(SequenceHandle, runtime::PauseAction);
     [[nodiscard]] bool has_context_operation() const noexcept;
+    // This Session does not track directory mutations, so every query reports a new epoch and
+    // no reclaim plan derived from an earlier one is reused.
+    [[nodiscard]] std::uint64_t context_epoch() const noexcept { return ++context_queries_; }
+
+    // Conservative: an in-flight context operation pins every checkpoint, so nothing is released
+    // until it completes.
+    [[nodiscard]] bool context_pins(CheckpointHandle) const noexcept {
+        return has_context_operation();
+    }
+
     [[nodiscard]] bool context_blocks(SequenceHandle) const noexcept;
     [[nodiscard]] bool recovery_pending(SequenceHandle) const noexcept;
     [[nodiscard]] bool execution_pending(SequenceHandle) const noexcept;
+    // True when finish/abort cannot run now. Conservative: any context transaction blocks every
+    // lane. This is the only condition under which they decline a resident, finishable sequence.
+    [[nodiscard]] bool terminal_blocked(SequenceHandle) const noexcept;
     void cancel_context();
 
-    [[nodiscard]] std::optional<runtime::ExecutionTicket> start_prefill(SequenceHandle,
-                                                                        bool constrained = false);
+    // This model runs one prefill window per execution.
+    [[nodiscard]] std::uint32_t prefill_pack_limit() const noexcept;
+    // The window is one prefill chunk at most, so that is the capacity of an execution.
+    [[nodiscard]] std::uint32_t prefill_pack_tokens() const noexcept;
+    // Admits the first sequence of `sequences`; `constrained` is empty or parallel to it.
+    [[nodiscard]] std::optional<PrefillStart>
+    start_prefill(std::span<const SequenceHandle> sequences, std::span<const bool> constrained);
+    // This model never mixes: the limit is zero, no window is mixable and start_mixed is a
+    // contract violation.
+    [[nodiscard]] std::uint32_t mixed_decode_limit() const noexcept;
+    [[nodiscard]] bool prefill_mixable(SequenceHandle) const;
+    [[nodiscard]] std::optional<MixedStart>
+    start_mixed(std::span<const SequenceHandle> prefill, std::span<const bool> prefill_constrained,
+                std::span<const SequenceHandle> decode,
+                std::span<const runtime::RoundBudget> budgets,
+                std::span<const bool> decode_constrained);
     [[nodiscard]] std::optional<runtime::ExecutionTicket> start_replay(SequenceHandle);
     [[nodiscard]] std::optional<runtime::ExecutionTicket>
     start_decode(std::span<const SequenceHandle>, std::span<const runtime::RoundBudget>,
@@ -403,6 +458,7 @@ public:
 
 private:
     std::unique_ptr<detail::SessionImpl> impl_;
+    mutable std::uint64_t context_queries_ = 0;
 };
 
 } // namespace ninfer::models::qwen4_exp
