@@ -88,13 +88,11 @@ decode 小 W（≤16）和 MTP verify 路径不受影响。
 
 | 内容 | 位置 |
 | --- | --- |
-| Scheduler 节拍与公平性 | `tests/runtime/test_scheduler.cpp`、`tests/runtime/test_t5_flight_scheduling.cpp` |
-| 回收缓存与 pin | `tests/runtime/test_resource_manager.cpp`、`tests/models/qwen3_5/test_native_transactions.cpp` |
-| 默认 chunk 单一来源 | `tests/models/qwen3_5/test_t1_prefill_chunk_default.cpp`、`tests/test_t1_prefill_chunk_default.py` |
-| 捕获不阻塞与取消回收 | `tests/models/qwen3_5/test_t3_capture_nonblocking.cpp` |
-| 打包合同与模型级一致性 | `tests/models/qwen3_5/test_t6_packed_contract.cpp`、`test_packed_prefill_real.cpp` |
-| 大 W 与 decode 小 W attention | `tests/test_t4_large_w_prefill_f6.py`、`tests/test_t4_decode_width_ops.py` |
-| 贪心输出与 PPL | `tests/test_t4_serve_greedy_ppl.py` |
+| Scheduler 节拍与公平性 | `tests/runtime/test_scheduler.cpp`、`tests/runtime/test_prefill_flight_scheduling.cpp` |
+| prefill 配速与默认 chunk | `tests/runtime/test_prefill_pack_pacing.cpp`、`tests/models/qwen3_5/test_prefill_contract.cpp` |
+| 回收缓存与 pin | `tests/runtime/test_resource_manager.cpp`、`tests/models/qwen3_5/test_native_transactions.cpp`、`tests/test_context_reclaim.py` |
+| 捕获不阻塞与取消回收 | `tests/models/qwen3_5/test_capture_nonblocking.cpp` |
+| 打包合同与模型级一致性 | `tests/models/qwen3_5/test_packed_forward_contract.cpp`、`test_packed_prefill_real.cpp` |
 | 打包基准 | `bench/models/qwen3_5/packed_prefill_bench.cpp`（记录 `segments, segment_tokens, total_tokens, packed_ms, sequential_ms`） |
 
 ## 已过时的稳定文档
