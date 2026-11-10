@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from bisect import bisect_left, bisect_right
 from copy import deepcopy
+import hashlib
 from pathlib import Path
 import os
 import tempfile
@@ -120,6 +121,7 @@ class ArtifactWriter:
         metadata: dict | None = None,
         provenance: dict | None = None,
         max_file_bytes: int = DEFAULT_MAX_FILE_BYTES,
+        reproducible_identity: bool = False,
     ) -> None:
         self.path = Path(path)
         self.objects = plan_objects(specs)
@@ -138,7 +140,13 @@ class ArtifactWriter:
             self.objects[-1].offset + self.objects[-1].bytes,
             max_file_bytes=max_file_bytes,
         )
-        self.artifact_id = uuid4().bytes
+        # A reproducible identity depends only on the complete directory, so one
+        # converter input yields byte-identical files; otherwise each file is unique.
+        self.artifact_id = (
+            hashlib.sha256(b"ninfer-artifact-id-v1\0" + encoded).digest()[:16]
+            if reproducible_identity
+            else uuid4().bytes
+        )
         self._coverage = {obj.id: _Coverage() for obj in self.objects}
         self._prefixes = [0]
         for file in self.directory.files:

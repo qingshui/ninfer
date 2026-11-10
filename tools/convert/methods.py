@@ -323,6 +323,10 @@ def import_encoded(request: PrepareRequest) -> PreparedMethod:
         "fp8_e4m3fn_block128x128_bf16",
         "fp8_e4m3fn_block128x128_fp32",
     )
+    row_fp8 = request.target.format in (
+        "fp8_e4m3fn_row_bf16",
+        "fp8_e4m3fn_row_fp32",
+    )
     if (
         request.target.format
         not in (
@@ -330,14 +334,12 @@ def import_encoded(request: PrepareRequest) -> PreparedMethod:
             "nvfp4_mul",
             "mxfp8",
             "fp8_e4m3fn_row_bf16",
+            "fp8_e4m3fn_row_fp32",
             "fp8_e4m3fn_block128x128_bf16",
             "fp8_e4m3fn_block128x128_fp32",
         )
         or len(request.target.shape) not in (2, 3)
-        or (
-            len(request.target.shape) == 3
-            and request.target.format == "fp8_e4m3fn_row_bf16"
-        )
+        or (len(request.target.shape) == 3 and row_fp8)
     ):
         raise ValueError("import_encoded requires an encoded matrix or bank target")
     _preflight(request, values=False)

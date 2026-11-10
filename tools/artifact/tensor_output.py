@@ -11,7 +11,7 @@ import torch
 
 from .codecs.direct import encode_direct
 from .codecs.fp8_block import validate_fp8_block_words
-from .codecs.fp8_row import encode_fp8_row_scaled
+from .codecs.fp8_row import encode_fp8_row_fp32, encode_fp8_row_scaled
 from .codecs.nvfp4 import matrix_scale_words, swizzle_nvfp4_scales
 from .codecs.mxfp8 import validate_mxfp8_words
 from .codecs._tensor_bytes import _exact_uint8_matrix
@@ -155,10 +155,16 @@ class TensorOutput:
         elif isinstance(self.format, Fp8RowFormat):
             g = row_scale_geometry(self.format, obj.shape)
             local = row_scale_geometry(self.format, (rows, k))
-            block = memoryview(encode_fp8_row_scaled(codes, scales, (rows, k)))
+            encode = (
+                encode_fp8_row_fp32
+                if self.format.scale_dtype == "fp32"
+                else encode_fp8_row_scaled
+            )
+            block = memoryview(encode(codes, scales, (rows, k)))
             self.write_bytes(row_begin * k, block[: local.code_plane_bytes])
             self.write_bytes(
-                g.scale_plane_offset + row_begin * 2, block[local.scale_plane_offset :]
+                g.scale_plane_offset + row_begin * self.format.scale_bytes,
+                block[local.scale_plane_offset :],
             )
         elif isinstance(self.format, Fp8BlockFormat):
             if row_begin % 128 or rows % 128:

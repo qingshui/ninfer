@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import math
 import struct
 from types import MappingProxyType
-from typing import TypeAlias
+from typing import Literal, TypeAlias
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,9 +47,14 @@ class Mxfp8Format:
 
 @dataclass(frozen=True, slots=True)
 class Fp8RowFormat:
-    """E4M3FN weights with one BF16 multiplier per logical row."""
+    """E4M3FN weights with one stored BF16 or FP32 multiplier per logical row."""
 
     name: str
+    scale_dtype: Literal["bf16", "fp32"]
+
+    @property
+    def scale_bytes(self) -> int:
+        return 2 if self.scale_dtype == "bf16" else 4
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,7 +101,8 @@ Q8_G32_FP16 = QuantFormat("q8_g32_fp16", 8, 32, -127, 127)
 NVFP4 = Nvfp4Format("nvfp4", 16)
 NVFP4_MUL = Nvfp4Format("nvfp4_mul", 16, "multiply")
 MXFP8 = Mxfp8Format("mxfp8")
-FP8_E4M3FN_ROW_BF16 = Fp8RowFormat("fp8_e4m3fn_row_bf16")
+FP8_E4M3FN_ROW_BF16 = Fp8RowFormat("fp8_e4m3fn_row_bf16", "bf16")
+FP8_E4M3FN_ROW_FP32 = Fp8RowFormat("fp8_e4m3fn_row_fp32", "fp32")
 FP8_E4M3FN_BLOCK128X128_BF16 = Fp8BlockFormat("fp8_e4m3fn_block128x128_bf16")
 FP8_E4M3FN_BLOCK128X128_FP32 = Fp8BlockFormat(
     "fp8_e4m3fn_block128x128_fp32", scale_format="fp32"
@@ -131,7 +137,9 @@ QUANT_FORMATS = MappingProxyType(
 )
 NVFP4_FORMATS = MappingProxyType({item.name: item for item in (NVFP4, NVFP4_MUL)})
 MXFP8_FORMATS = MappingProxyType({MXFP8.name: MXFP8})
-FP8_ROW_FORMATS = MappingProxyType({FP8_E4M3FN_ROW_BF16.name: FP8_E4M3FN_ROW_BF16})
+FP8_ROW_FORMATS = MappingProxyType(
+    {item.name: item for item in (FP8_E4M3FN_ROW_BF16, FP8_E4M3FN_ROW_FP32)}
+)
 FP8_BLOCK_FORMATS = MappingProxyType(
     {
         item.name: item
@@ -232,6 +240,7 @@ __all__ = [
     "NVFP4_MUL",
     "MXFP8",
     "FP8_E4M3FN_ROW_BF16",
+    "FP8_E4M3FN_ROW_FP32",
     "FP8_E4M3FN_BLOCK128X128_BF16",
     "FP8_E4M3FN_BLOCK128X128_FP32",
     "NF4_G16_E4M3FN",

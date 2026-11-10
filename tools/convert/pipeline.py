@@ -111,6 +111,7 @@ def convert(
             metadata=metadata,
             provenance=provenance,
             max_file_bytes=max_file_bytes,
+            reproducible_identity=True,
         ) as writer:
             for object_id, data in model.resources.items():
                 writer.write_object(object_id, data)
