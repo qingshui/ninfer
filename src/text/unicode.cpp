@@ -122,6 +122,30 @@ bool is_number(std::int32_t codepoint) noexcept {
     }
 }
 
+bool is_punctuation_or_symbol(std::int32_t codepoint) noexcept {
+    if (static_cast<std::uint32_t>(codepoint) < 0x80U) {
+        // Every printable ASCII character that is neither a letter nor a digit is P* or S*.
+        return codepoint > ' ' && codepoint < 0x7f && !is_letter(codepoint) &&
+               !is_number(codepoint);
+    }
+    switch (utf8proc_category(codepoint)) {
+    case UTF8PROC_CATEGORY_PC:
+    case UTF8PROC_CATEGORY_PD:
+    case UTF8PROC_CATEGORY_PS:
+    case UTF8PROC_CATEGORY_PE:
+    case UTF8PROC_CATEGORY_PI:
+    case UTF8PROC_CATEGORY_PF:
+    case UTF8PROC_CATEGORY_PO:
+    case UTF8PROC_CATEGORY_SM:
+    case UTF8PROC_CATEGORY_SC:
+    case UTF8PROC_CATEGORY_SK:
+    case UTF8PROC_CATEGORY_SO:
+        return true;
+    default:
+        return false;
+    }
+}
+
 bool is_whitespace(std::int32_t codepoint) noexcept {
     if (static_cast<std::uint32_t>(codepoint) < 0x80U) { return is_ascii_whitespace(codepoint); }
     if (codepoint == 0x85) return true; // NEXT LINE is White_Space but has category Cc.
