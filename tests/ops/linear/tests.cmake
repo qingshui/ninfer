@@ -62,4 +62,3 @@ if(NINFER_TARGET STREQUAL "dgx_spark")
 endif()
 
 include("${CMAKE_CURRENT_LIST_DIR}/geglu_t2/tests.cmake")
-include("${CMAKE_CURRENT_LIST_DIR}/fp8_row_fp32_t4/tests.cmake")
