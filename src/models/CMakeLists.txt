@@ -89,6 +89,7 @@ endif()
 include(qwen3_5/loading_sources.cmake)
 include(qwen4_exp/loading_sources.cmake)
 include(glm5next/loading_sources.cmake)
+include(spark2_5/loading_sources.cmake)
 include(common/qwen/sources.cmake)
 include(qwen3_5/execution_sources.cmake)
 include(qwen4_exp/execution_sources.cmake)
@@ -98,3 +99,9 @@ include(qwen3_5/session_sources.cmake)
 include(qwen4_exp/session_sources.cmake)
 
 include(glm5next/session_sources.cmake)
+
+# Spark2_5 frontend, execution, program and session sources are added by their own units.
+include(spark2_5/frontend_sources.cmake OPTIONAL)
+include(spark2_5/execution_sources.cmake OPTIONAL)
+include(spark2_5/program_sources.cmake OPTIONAL)
+include(spark2_5/session_sources.cmake OPTIONAL)

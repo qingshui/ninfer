@@ -122,6 +122,8 @@ ConstructedModel construct_model(EngineOptions& options) {
         auto built = detail::build_local_model<models::qwen3_5::Startup>(reader, options, start);
         return {std::move(built.instance), std::move(built.load), std::move(built.context_cost)};
     }
+    case models::Architecture::Spark2_5:
+        throw std::logic_error("Spark2_5 has no Engine construction route yet");
     }
     throw std::logic_error("architecture has no Engine construction route");
 }
