@@ -11,6 +11,7 @@ struct ModelDefinition::Impl {
     TextConfig config;
     LoadOptions options;
     ModelWeights weights;
+    FrontendResources resources;
     InstanceInfo info;
     std::vector<artifact::ParameterReference> references;
     std::vector<WeightParent> parents;
@@ -26,6 +27,8 @@ const TextConfig& ModelDefinition::config() const { return impl_->config; }
 const LoadOptions& ModelDefinition::options() const { return impl_->options; }
 
 const ModelWeights& ModelDefinition::weights() const { return impl_->weights; }
+
+const FrontendResources& ModelDefinition::resources() const { return impl_->resources; }
 
 const InstanceInfo& ModelDefinition::info() const { return impl_->info; }
 
@@ -63,6 +66,7 @@ std::shared_ptr<const ModelDefinition> read_definition(const artifact::Reader& r
     out->options     = options;
     out->config      = parse_text_config(reader);
     artifact::Binder binder(reader);
+    out->resources = bind_resources(binder, out->config.vocabulary);
     Bindings b(binder);
     out->weights.text = loading::bind_text(b, out->config);
 

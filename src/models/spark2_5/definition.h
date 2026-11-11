@@ -4,6 +4,7 @@
 #include "artifact/materializer.h"
 #include "models/load_options.h"
 #include "models/spark2_5/config.h"
+#include "models/spark2_5/frontend/resources.h"
 #include "models/spark2_5/weights.h"
 
 #include <memory>
@@ -25,6 +26,7 @@ public:
     [[nodiscard]] const TextConfig& config() const;
     [[nodiscard]] const LoadOptions& options() const;
     [[nodiscard]] const ModelWeights& weights() const;
+    [[nodiscard]] const FrontendResources& resources() const;
     [[nodiscard]] const InstanceInfo& info() const;
     [[nodiscard]] const artifact::ArtifactId& artifact_id() const;
     [[nodiscard]] const artifact::MaterializationStats& resource_stats() const;
