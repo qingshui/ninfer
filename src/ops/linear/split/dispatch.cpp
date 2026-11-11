@@ -52,6 +52,7 @@ const SplitShape& select(ProjectionProfile weights, const auto& rows) {
             &kBf16SplitN7296K2560,
             &kBf16SplitN640K2560,
 #endif
+            &kBf16SplitN3072K2048,
             &kBf16SplitN1152K2560ThreeOutput,
             &kBf16SplitN1664K2560,
             &kBf16SplitN13952K2560,
@@ -69,6 +70,10 @@ const SplitShape& select(ProjectionProfile weights, const auto& rows) {
     }
     case QType::FP8_E4M3FN_ROW_BF16: {
         const std::array shapes{&kFp8SplitN14336K5120, &kFp8SplitN16384K5120};
+        return match(shapes, weights, rows);
+    }
+    case QType::FP8_E4M3FN_ROW_FP32: {
+        const std::array shapes{&kFp8RowFp32SplitN3072K2048};
         return match(shapes, weights, rows);
     }
 #if NINFER_TARGET_SPARK

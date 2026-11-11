@@ -22,10 +22,11 @@
 
 namespace ninfer::ops::detail {
 
-template <class Schedule, bool FullTokens, class Epilogue, class Output, class RowPolicy>
+template <class Schedule, class Operands, bool FullTokens, class Epilogue, class Output,
+          class RowPolicy>
 __global__ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void fp8_a8_mma_kernel(
-    Fp8A8Operands operands, Output output, Epilogue epilogue, RowPolicy row_policy,
-    int token_offset, int count) {
+    Operands operands, Output output, Epilogue epilogue, RowPolicy row_policy, int token_offset,
+    int count) {
     constexpr bool PairRows                    = RowPolicy::kPaired;
     const auto* __restrict__ activation_codes  = operands.x;
     const auto* __restrict__ activation_scales = operands.x_scales;

@@ -5,7 +5,7 @@
 namespace ninfer::ops::detail {
 template <std::int32_t OutputRows, std::int32_t InputRows>
 struct Fp8Geometry {
-    static_assert(OutputRows > 0 && (OutputRows % 16) == 0);
+    static_assert(OutputRows > 0 && (OutputRows % 8) == 0);
     static_assert(InputRows > 0 && (InputRows % 32) == 0);
 
     static constexpr std::int32_t kOutputRows = OutputRows;
@@ -25,7 +25,9 @@ using Fp8N34816K5120             = Fp8Geometry<34816, 5120>;
 using Fp8N248320K5120            = Fp8Geometry<248320, 5120>;
 using Fp8N5120K6144              = Fp8Geometry<5120, 6144>;
 using Fp8N5120K17408             = Fp8Geometry<5120, 17408>;
+using Fp8Activation2048Geometry  = Fp8ActivationGeometry<2048>;
 using Fp8Activation5120Geometry  = Fp8ActivationGeometry<5120>;
+using Fp8Activation6656Geometry  = Fp8ActivationGeometry<6656>;
 using Fp8Activation6144Geometry  = Fp8ActivationGeometry<6144>;
 using Fp8Activation17408Geometry = Fp8ActivationGeometry<17408>;
 

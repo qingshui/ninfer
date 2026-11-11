@@ -19,6 +19,7 @@ constexpr std::array kFormats = {
     std::pair{QType::NVFP4_MUL, std::string_view{"nvfp4_mul"}},
     std::pair{QType::MXFP8, std::string_view{"mxfp8"}},
     std::pair{QType::FP8_E4M3FN_ROW_BF16, std::string_view{"fp8_e4m3fn_row_bf16"}},
+    std::pair{QType::FP8_E4M3FN_ROW_FP32, std::string_view{"fp8_e4m3fn_row_fp32"}},
     std::pair{QType::NF4_G16_E4M3FN, std::string_view{"nf4_g16_e4m3fn"}},
     std::pair{QType::FP8_E4M3FN_BLOCK128X128_BF16,
               std::string_view{"fp8_e4m3fn_block128x128_bf16"}},

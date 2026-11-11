@@ -87,11 +87,11 @@ inline constexpr int fp8_tma_scratch_bytes = [] {
     return (bytes + 127) / 128 * 128;
 }();
 
-template <class Schedule, bool FullTokens, class Output, class Epilogue, bool SplitK = false,
-          class RowPolicy = Fp8IdentityRows>
+template <class Schedule, class Operands, bool FullTokens, class Output, class Epilogue,
+          bool SplitK = false, class RowPolicy = Fp8IdentityRows>
 __global__
 __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void fp8_a8_tma_mma_kernel(
-    const __grid_constant__ Fp8TmaDescriptors descriptors, Fp8A8Operands operands, Output output,
+    const __grid_constant__ Fp8TmaDescriptors descriptors, Operands operands, Output output,
     Epilogue epilogue, RowPolicy row_policy, int token_offset, int count, Fp8TmaSplitKPlan plan,
     float* partials) {
     constexpr int BT = Schedule::kBlockTokens, BR = Schedule::kBlockRows;
@@ -205,8 +205,8 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void fp8_a8_tma
         operands.scales, row_begin, token_begin, operands.rows, token_offset + count, warp, lane);
 }
 
-template <class Schedule, class Output, class Epilogue, class RowPolicy>
-__global__ void fp8_a8_tma_split_k_reduce(Fp8A8Operands p, const float* partials, Output output,
+template <class Schedule, class Operands, class Output, class Epilogue, class RowPolicy>
+__global__ void fp8_a8_tma_split_k_reduce(Operands p, const float* partials, Output output,
                                           Epilogue epilogue, RowPolicy row_policy,
                                           Fp8TmaSplitKPlan plan, int token_offset, int count) {
     constexpr int BT = Schedule::kBlockTokens, BR = Schedule::kBlockRows;
@@ -238,8 +238,8 @@ __global__ void fp8_a8_tma_split_k_reduce(Fp8A8Operands p, const float* partials
                 }
                 const int parent  = row_policy.weight_row(row_begin, local_row, p.rows);
                 const float scale = p.x_scales[token];
-                sum.x             = sum.x * scale * __bfloat162float(p.scales[parent]);
-                sum.y             = sum.y * scale * __bfloat162float(p.scales[parent + 1]);
+                sum.x             = sum.x * scale * fp8_row_scale_value(p.scales[parent]);
+                sum.y             = sum.y * scale * fp8_row_scale_value(p.scales[parent + 1]);
                 return sum;
             };
             float2 value;
@@ -265,8 +265,9 @@ __global__ void fp8_a8_tma_split_k_reduce(Fp8A8Operands p, const float* partials
     }
 }
 
-template <class Schedule, class Output, class Epilogue, class RowPolicy = Fp8IdentityRows>
-void launch_fp8_a8_tma_mma(const Fp8A8Operands& p, Output output, Epilogue epilogue,
+template <class Schedule, class ScaleT, class Output, class Epilogue,
+          class RowPolicy = Fp8IdentityRows>
+void launch_fp8_a8_tma_mma(const Fp8A8OperandsT<ScaleT>& p, Output output, Epilogue epilogue,
                            cudaStream_t stream, float* partials = nullptr,
                            RowPolicy row_policy = {}) {
     validate_fp8_operands<Schedule>(p);
@@ -286,8 +287,9 @@ void launch_fp8_a8_tma_mma(const Fp8A8Operands& p, Output output, Epilogue epilo
             p.rows / Schedule::kBlockRows * common::div_up(count, Schedule::kBlockTokens);
         const auto plan   = fp8_tma_split_k_plan<Schedule>(blocks, p.k);
         const auto launch = [&]<bool Full, bool Split>() {
+            using Operands = Fp8A8OperandsT<ScaleT>;
             constexpr auto kernel =
-                fp8_a8_tma_mma_kernel<Schedule, Full, Output, Epilogue, Split, RowPolicy>;
+                fp8_a8_tma_mma_kernel<Schedule, Operands, Full, Output, Epilogue, Split, RowPolicy>;
             constexpr int bytes =
                 fp8_tma_scratch_bytes<Schedule, Epilogue> + Schedule::kBarrierBytes;
             const int dynamic = common::prepare_shared<bytes, kernel, true>();

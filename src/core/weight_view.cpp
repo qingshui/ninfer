@@ -194,13 +194,14 @@ WeightStorageGeometry weight_storage_geometry(QType format, QuantLayout layout,
         out.high_bytes         = mul(n, out.high_bytes_per_row);
         out.scale_offset       = add(out.high_offset, aligned(out.high_bytes, 256));
     } else if (layout == QuantLayout::RowScale) {
-        if (format != QType::FP8_E4M3FN_ROW_BF16) {
+        if (format != QType::FP8_E4M3FN_ROW_BF16 && format != QType::FP8_E4M3FN_ROW_FP32) {
             throw std::invalid_argument("RowScale requires row-scaled FP8");
         }
+        const bool fp32        = format == QType::FP8_E4M3FN_ROW_FP32;
         out.group_size         = k;
         out.code_bytes_per_row = k;
-        out.scale_row_bytes    = 2;
-        out.scale_word_bytes   = 2;
+        out.scale_word_bytes   = fp32 ? 4 : 2;
+        out.scale_row_bytes    = out.scale_word_bytes;
         out.code_bytes         = out.elements;
         out.scale_offset       = aligned(out.code_bytes, 256);
     } else if (layout == QuantLayout::RowGroupScale) {
@@ -517,10 +518,11 @@ Weight native_weight(const WeightView& view, float input_scale) {
         out.scale_nb[1] = static_cast<std::int64_t>(g.scale_row_bytes);
         out.scale_nb[2] = out.scale_nb[3] = out.scale_nb[1] * out.n;
     } else if (g.layout == QuantLayout::RowScale) {
-        out.scale_dtype = DType::BF16;
+        out.scale_dtype = g.scale_word_bytes == 4 ? DType::FP32 : DType::BF16;
         out.scale_ne[0] = out.n;
-        out.scale_nb[0] = 2;
-        out.scale_nb[1] = out.scale_nb[2] = out.scale_nb[3] = static_cast<std::int64_t>(out.n) * 2;
+        out.scale_nb[0] = static_cast<std::int64_t>(g.scale_word_bytes);
+        out.scale_nb[1] = out.scale_nb[2] = out.scale_nb[3] =
+            static_cast<std::int64_t>(out.n) * static_cast<std::int64_t>(g.scale_word_bytes);
     } else if (g.layout == QuantLayout::RowGroupScale) {
         out.scale_dtype = DType::U8;
         out.scale_ne[0] = dimension(g.padded_columns / g.group_size);

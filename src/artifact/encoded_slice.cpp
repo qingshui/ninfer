@@ -95,8 +95,9 @@ EncodedTensor slice_tensor(const Reader& reader, std::span<const std::uint64_t> 
                  s.rows, sk, dk);
             if (s.destination_column != 0 || s.columns != dk)
                 throw ArtifactError("row-scaled assembly requires complete destination rows");
-            copy(g.scale_offset + s.row * 2, d.scale_offset + s.destination_row * 2, s.rows * 2, 1,
-                 0, 0);
+            const auto word = g.scale_word_bytes;
+            copy(g.scale_offset + s.row * word, d.scale_offset + s.destination_row * word,
+                 s.rows * word, 1, 0, 0);
             continue;
         }
         const auto group = d.group_size;

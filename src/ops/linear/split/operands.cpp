@@ -24,7 +24,7 @@ void validate_weight(const Weight& w) {
     require(w.ndim == 2 && w.shape[0] == w.n && w.shape[1] == w.k && w.padded_shape[0] == w.n &&
                 w.padded_shape[1] == w.k,
             "invalid weight geometry");
-    if (w.qtype == QType::FP8_E4M3FN_ROW_BF16) {
+    if (w.qtype == QType::FP8_E4M3FN_ROW_BF16 || w.qtype == QType::FP8_E4M3FN_ROW_FP32) {
         (void)common::validate_fp8_weight(w, kOp);
         return;
     }
@@ -79,6 +79,9 @@ std::array<operand::Range, 4> weight_ranges(const Weight& w) {
         break;
     case QType::FP8_E4M3FN_ROW_BF16:
         scales = std::uint64_t(w.n) * 2;
+        break;
+    case QType::FP8_E4M3FN_ROW_FP32:
+        scales = std::uint64_t(w.n) * 4;
         break;
     case QType::MXFP8:
         scales = elements / 32;
