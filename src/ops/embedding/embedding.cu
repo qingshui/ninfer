@@ -352,6 +352,8 @@ void embedding(const Tensor& ids, const Weight& table, Tensor& out, CudaExecutio
         require_non_empty_tensors(ids, out);
         select_fp8(out)(ids, table, out, stream);
         break;
+    case QType::FP8_E4M3FN_ROW_FP32:
+        throw std::invalid_argument("embedding: unsupported table qtype fp8_e4m3fn_row_fp32");
     default:
         throw std::invalid_argument("embedding: unsupported table qtype");
     }
