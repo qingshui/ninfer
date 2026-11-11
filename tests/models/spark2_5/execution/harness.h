@@ -87,6 +87,32 @@ inline test::ReductionCriterion fixture_logits_criterion(ops::LinearPolicy polic
                                                 : test::ReductionCriterion{4.0e-2, 0.0, 6.0e-2};
 }
 
+// True when every 2-D weight (the linear projections and the embedding) is stored as BF16.
+inline bool linear_weights_are_bf16(const Loaded& loaded) {
+    for (const auto& parameter : loaded.definition->parameters()) {
+        if (parameter.shape.size() != 2) continue;
+        for (const auto& part : parameter.binding.parts)
+            if (loaded.reader->geometry(part.object).format != QType::BF16) return false;
+    }
+    return true;
+}
+
+// Model-level parity against the HF fp32 forward: every compared position must reach cosine_min,
+// and the share of positions with the same argmax must reach top1_min. `basis` names the case.
+struct HfParityCriterion {
+    double cosine_min;
+    double top1_min;
+    std::string basis;
+};
+
+// The activations of the reference are never quantized, so a w8a8 run or a quantized weight
+// representation adds error the reference does not contain and gets the looser bounds.
+inline HfParityCriterion hf_parity_criterion(const Loaded& loaded) {
+    if (loaded.policy == ops::LinearPolicy::A16Only && linear_weights_are_bf16(loaded))
+        return {0.999, 0.98, "bf16 weights, A16Only"};
+    return {0.99, 0.95, "quantized representation / w8a8"};
+}
+
 // KV and window state of one sequence (table row 0, ring record 0) plus the buffers of a chunk.
 class Rig {
 public:
