@@ -58,8 +58,10 @@ void tiled(const CausalAttentionOperands& p, Bf16KvReadView cache, const Bf16KvC
     };
     if (p.query_heads == 24)
         invoke.template operator()<CausalD256H24Kv4>();
-    else
+    else if (p.query_heads == 16)
         invoke.template operator()<CausalD256H16Kv2>();
+    else
+        invoke.template operator()<CausalD256H8Kv2>();
 }
 
 template <class Input, class Cache>
@@ -75,8 +77,10 @@ void execute_grouped(const Tensor& q, Input input, const Tensor& positions, floa
     const auto partial = storage.view();
     if (p.query_heads == 24)
         grouped_instance<CausalD256H24Kv4>(p, view, input, plan, partial, stream);
-    else
+    else if (p.query_heads == 16)
         grouped_instance<CausalD256H16Kv2>(p, view, input, plan, partial, stream);
+    else
+        grouped_instance<CausalD256H8Kv2>(p, view, input, plan, partial, stream);
 }
 } // namespace
 

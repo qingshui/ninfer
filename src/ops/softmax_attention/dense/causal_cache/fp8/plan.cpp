@@ -66,9 +66,9 @@ std::size_t tiled_workspace_bytes(int heads, int min_width, int max_width, int v
 Fp8KvCausalPlan select_fp8_kv_causal_plan(int heads, int width, int batch,
                                           CausalAttentionExecutionEnvelope envelope,
                                           int multiprocessor_count) {
-    if (multiprocessor_count <= 0 || (heads != 24 && heads != 16) || width < 1 || batch < 1 ||
-        batch > 8 || (batch > 1 && width > 16) || envelope.min_visible_keys == 0 ||
-        envelope.min_visible_keys > envelope.max_visible_keys ||
+    if (multiprocessor_count <= 0 || (heads != 24 && heads != 16 && heads != 8) || width < 1 ||
+        batch < 1 || batch > (heads == 8 ? 16 : 8) || (batch > 1 && width > 16) ||
+        envelope.min_visible_keys == 0 || envelope.min_visible_keys > envelope.max_visible_keys ||
         envelope.max_visible_keys > kCausalAttentionMaximumVisibleKeys)
         throw std::invalid_argument("FP8 attention: invalid plan inputs");
     constexpr int grouped_limit = Fp8KvCausalPlan::kTokenTile;
@@ -95,7 +95,7 @@ Fp8KvCausalPlan select_fp8_kv_causal_plan(int heads, int width, int batch,
             : sms;
     CausalKvPartition partition{1, causal_partition_target(budget, independent_tiles)};
     // Bound partial traffic by keeping enough KV work in each split.
-    partition.key_shift = (width == 1 ? 7 : 8) - (heads == 16 ? 1 : 0);
+    partition.key_shift = (width == 1 ? 7 : 8) - (heads <= 16 ? 1 : 0);
     partition.capacity  = partition.active(envelope.max_visible_keys);
     return {family, heads, width, batch, envelope, partition};
 }

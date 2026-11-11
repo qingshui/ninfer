@@ -13,7 +13,7 @@
 
 namespace ninfer::ops {
 
-inline constexpr std::uint32_t kCausalAttentionMaximumVisibleKeys = 262144;
+inline constexpr std::uint32_t kCausalAttentionMaximumVisibleKeys = 1048576;
 
 struct CausalAttentionExecutionEnvelope {
     std::uint32_t min_visible_keys = 0;
@@ -86,14 +86,16 @@ void packed_softmax_attention(const Tensor& q, const Tensor& k, const Tensor& v,
 /**
  * Append K/V for B independent rows and compute causal grouped-query attention.
  *
- * The registered profiles are [D,Hq,Hkv]=[256,24,4] (group 6) and [256,16,2] (group 8), with
- * scale=1/sqrt(256). q/out are contiguous BF16 [D,Hq,W,B], k/v are contiguous BF16
- * [D,Hkv,W,B], positions are contiguous device I32 [W,B], kv_table_rows is contiguous device I32
- * [B], and the cache is BF16, INT8-G64, FP8-E4M3FN-G128/UE8M0, NVFP4-G16, or K8V4. valid_columns is
- * either contiguous device I32 [B] or an empty Tensor meaning every row has W live columns. This
- * dense/masked topology is chosen by the caller and never inferred by copying device metadata to
- * the host. B=1 accepts every positive W in the current prompt/decode domain; B=2..8 accepts
- * W=1..16.
+ * The registered profiles are [D,Hq,Hkv]=[256,24,4] (group 6), [256,16,2] (group 8) and
+ * [256,8,2] (group 4), with scale=1/sqrt(256). q/out are contiguous BF16 [D,Hq,W,B], k/v are
+ * contiguous BF16 [D,Hkv,W,B], positions are contiguous device I32 [W,B], kv_table_rows is
+ * contiguous device I32 [B], and the cache is BF16, INT8-G64, FP8-E4M3FN-G128/UE8M0, NVFP4-G16, or
+ * K8V4. The [256,8,2] profile accepts only the BF16 and FP8-E4M3FN-G128/UE8M0 caches; the other
+ * formats are rejected when the Op plans the call. valid_columns is either contiguous device I32
+ * [B] or an empty Tensor meaning every row has W live columns. This dense/masked topology is
+ * chosen by the caller and never inferred by copying device metadata to the host. B=1 accepts
+ * every positive W in the current prompt/decode domain; B=2..8 accepts W=1..16, and B=2..16
+ * accepts W=1..16 for [256,8,2]. A cache may hold up to kCausalAttentionMaximumVisibleKeys rows.
  *
  * Let Vb be W for dense input or valid_columns[b] otherwise. For live column j<Vb with absolute
  * position p=positions[j,b], query head h attends cache rows [0,p] through table row
@@ -129,7 +131,7 @@ void causal_softmax_attention(const Tensor& q, const Tensor& k, const Tensor& v,
 /**
  * Read-only single-sequence causal attention over an already populated cache.
  *
- * q/out are contiguous BF16 [256,24|16,T], positions is contiguous sequential device I32 [T],
+ * q/out are contiguous BF16 [256,24|16|8,T], positions is contiguous sequential device I32 [T],
  * and cache geometry, visible rows, scale, numerical semantics, envelope, alias, and workspace
  * rules are the same as causal_softmax_attention. The Op accepts no new K/V and leaves every cache
  * byte unchanged; out is completely overwritten.
