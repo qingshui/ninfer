@@ -16,8 +16,10 @@ ExecutionShape shape(const execution::ModelProfile& p, const EngineOptions& o,
                      KvCacheVectorFormat index_format) {
     if (load_options(o) != p.options)
         throw std::invalid_argument("GLM5Next execution components differ from selected weights");
-    if (!o.max_context || o.max_context > p.config.text.max_context || !o.max_concurrency ||
-        o.max_concurrency > kMaximumConcurrency)
+    if (o.max_concurrency > kMaximumSupportedConcurrency)
+        throw std::invalid_argument("GLM5Next supports max_concurrency up to " +
+                                    std::to_string(kMaximumSupportedConcurrency));
+    if (!o.max_context || o.max_context > p.config.text.max_context || !o.max_concurrency)
         throw std::invalid_argument(
             "GLM5Next execution bounds differ from its model or batch contract");
     if ((p.mtp && !o.speculative.draft_tokens) || (!p.mtp && o.speculative.draft_tokens))
@@ -31,7 +33,7 @@ ExecutionShape shape(const execution::ModelProfile& p, const EngineOptions& o,
             o.max_concurrency,
             std::min(o.prefill_chunk ? o.prefill_chunk : 4096U, o.max_context),
             o.speculative.draft_tokens,
-            o.kv_cache,
+            resolve_kv_cache(o),
             index_format,
             o.purpose,
             o.context_cache.enabled,
@@ -103,7 +105,7 @@ ExecutionPlan plan_execution(std::shared_ptr<const execution::ModelProfile> prof
         execution::plan_workspace(*out.profile, out.shape, sm_count, o.vision_memory_budget_bytes);
     const auto& c = out.profile->config.text;
     LayoutBuilder b;
-    const auto storage = latent_storage(o.kv_cache);
+    const auto storage = latent_storage(resolve_kv_cache(o));
     out.main = plan_cache(b, c.mla, c.mla_layers, out.shape.max_context, out.shape.max_concurrency,
                           storage, index_format);
     if (out.profile->mtp)

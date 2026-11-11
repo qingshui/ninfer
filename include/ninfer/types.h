@@ -21,7 +21,7 @@ namespace ninfer {
 
 using TokenId = std::int32_t;
 
-inline constexpr std::uint32_t kMaximumConcurrency               = 8;
+inline constexpr std::uint32_t kMaximumConcurrency               = 16;
 inline constexpr std::size_t kMaximumContextCacheSessionKeyBytes = 256;
 inline constexpr std::size_t kMaximumExplicitPromptCacheMarkers  = 4;
 // Aggregate encoded image/video payload retained by one prompt, independent of item count.
@@ -168,7 +168,7 @@ struct EngineOptions {
     // Zero uses 4096 for Qwen4Exp or CPU expert offload, otherwise 1024.
     std::uint32_t prefill_chunk = 0;
     MoeOptions moe;
-    KvCacheStorage kv_cache = KvCacheStorage::BFloat16;
+    std::optional<KvCacheStorage> kv_cache; // Unset selects the model default at construction.
     SpeculativeOptions speculative;
     std::size_t media_cache_bytes = kDefaultMediaCacheBytes;
     std::size_t media_live_bytes  = kDefaultMediaLiveBytes;

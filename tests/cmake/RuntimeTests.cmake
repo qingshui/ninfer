@@ -51,3 +51,8 @@ ninfer_add_test(ninfer_prefill_flight_scheduling_test
 ninfer_add_test(ninfer_prefill_pack_pacing_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../runtime/test_prefill_pack_pacing.cpp"
   LIBRARIES ninfer_runtime_support)
+
+ninfer_add_test(ninfer_concurrency_limits_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../runtime/test_concurrency_limits.cpp"
+  LIBRARIES ninfer_engine ninfer_model_execution ninfer_model_loading ninfer_core ninfer::json)
+set_tests_properties(ninfer_concurrency_limits_test PROPERTIES SKIP_RETURN_CODE 77)

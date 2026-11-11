@@ -68,7 +68,7 @@ std::size_t body(const ModelProfile& p, const EngineOptions& options, int first,
                 scratch(ops::qsa_indexer_workspace_capacity_bytes(first, last, batch,
                                                                   {options.max_context}));
                 scratch(ops::qsa_sparse_gqa_workspace_capacity_bytes(
-                    options.kv_cache, dimension(p.local.qsa.query_heads),
+                    resolve_kv_cache(options), dimension(p.local.qsa.query_heads),
                     dimension(p.local.qsa.kv_heads), first, last, batch, {options.max_context},
                     sm_count));
                 scratch(linear(q.output, minimum, columns));

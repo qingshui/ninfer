@@ -251,7 +251,7 @@ private:
         description.max_context     = options.max_context;
         description.max_concurrency = options.max_concurrency;
         description.prefill_chunk   = options.prefill_chunk;
-        description.kv_cache        = options.kv_cache;
+        description.kv_cache        = *options.kv_cache;
         std::visit(
             [&](const auto& instance) {
                 description.context_token_capacity_estimate =

@@ -202,7 +202,7 @@ int main() {
     failures += check(server.at("engine").at("kv_cache") == "fp8", "KV type missing");
     options.launch.engine.kv_cache = ninfer::KvCacheStorage::Nvfp4Group16;
     engine_options.kv_cache        = options.launch.engine.kv_cache;
-    description.kv_cache           = options.launch.engine.kv_cache;
+    description.kv_cache           = options.launch.engine.kv_cache.value();
     const Json nvfp4_server        = Json::parse(format_server_start_json(
         "serve-test", 1000, options, engine_options, sampling_defaults, "deployment-alias",
         description, startup_report, snapshot, environment, std::uint64_t{123456}));
@@ -210,7 +210,7 @@ int main() {
         check(nvfp4_server.at("engine").at("kv_cache") == "nvfp4", "NVFP4 KV report name missing");
     options.launch.engine.kv_cache = ninfer::KvCacheStorage::Fp8KeyNvfp4Value;
     engine_options.kv_cache        = options.launch.engine.kv_cache;
-    description.kv_cache           = options.launch.engine.kv_cache;
+    description.kv_cache           = options.launch.engine.kv_cache.value();
     const Json k8v4_server         = Json::parse(format_server_start_json(
         "serve-test", 1000, options, engine_options, sampling_defaults, "deployment-alias",
         description, startup_report, snapshot, environment, std::uint64_t{123456}));

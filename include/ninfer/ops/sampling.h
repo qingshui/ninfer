@@ -93,7 +93,7 @@ void increment_token_counts(const Tensor& token_ids, Tensor& token_counts,
                             CudaExecutionView execution);
 
 // Adds the first valid_columns[b] IDs from I32 token_ids [T,B] to count slot slots[b] in
-// I32 token_counts [V,S]. T,V,S>0, B=1..8; valid_columns/slots are contiguous I32 [B].
+// I32 token_counts [V,S]. T,V,S>0, B=1..16; valid_columns/slots are contiguous I32 [B].
 // 0<=valid_columns[b]<=T; live rows have slots[b] in [0,S). IDs are in [0,V), and counts
 // remain representable in I32. A zero-length row reads neither IDs
 // nor its slot. Repeated IDs or slots add all occurrences atomically. Inputs are contiguous;

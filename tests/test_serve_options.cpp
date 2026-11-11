@@ -68,6 +68,9 @@ void test_resources_and_units() {
                 controls.launch.engine.context_capacity.mode ==
                     ninfer::ContextCapacityMode::Automatic,
             "unit, zero or automatic controls changed");
+    require(parse({"ninfer-serve", "model.ninfer", "--max-concurrency", "16"})
+                    .launch.engine.max_concurrency == 16,
+            "maximum engine concurrency was rejected");
     for (const auto& suffix :
          std::vector<std::vector<std::string>>{{"--host-cache-capacity", "18446744073709551616B"},
                                                {"--context-capacity", "0B"},
@@ -78,7 +81,7 @@ void test_resources_and_units() {
                                                {"--pending-timeout", "0.1ms"},
                                                {"--pending-timeout", "4294967296ms"},
                                                {"--media-live-capacity", "0B"},
-                                               {"--max-concurrency", "9"},
+                                               {"--max-concurrency", "17"},
                                                {"--checkpoint-interval", "0"},
                                                {"--port", "65536"},
                                                {"--top-k", "21"},

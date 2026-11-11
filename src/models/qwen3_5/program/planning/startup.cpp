@@ -603,8 +603,9 @@ void validate_target_options(const execution::ModelProfile& profile, DeviceConte
     if (options.prefill_chunk % kPrefillChunkAlignment != 0) {
         throw std::invalid_argument("prefill_chunk must be a nonzero multiple of 128");
     }
-    if (options.max_concurrency == 0 || options.max_concurrency > kMaximumConcurrency) {
-        throw std::invalid_argument("max_concurrency must be in [1,8]");
+    if (options.max_concurrency == 0 || options.max_concurrency > kMaximumSupportedConcurrency) {
+        throw std::invalid_argument("Qwen3.5 max_concurrency must be in [1," +
+                                    std::to_string(kMaximumSupportedConcurrency) + "]");
     }
     switch (options.speculative.backend) {
     case SpeculativeBackend::None:
@@ -727,7 +728,7 @@ make_sequence_planner_impl(std::shared_ptr<const execution::ModelProfile> profil
         .mixed_tokens               = mixed_tokens,
         .draft_window               = options.speculative.draft_tokens,
         .speculative_backend        = options.speculative.backend,
-        .kv_storage                 = options.kv_cache,
+        .kv_storage                 = resolve_kv_cache(options),
         .proposal_head              = options.speculative.proposal_head,
         .features                   = models::load_options(options),
         .gpu_timing                 = options.observability.gpu_timing,
