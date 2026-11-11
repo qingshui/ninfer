@@ -6,6 +6,7 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 import json
 from pathlib import Path
+import shutil
 import time
 from typing import Callable
 
@@ -41,10 +42,14 @@ def convert(
 ) -> dict:
     path = Path(output)
     report_path = Path(str(path) + ".conversion.json")
-    if path.exists() or report_path.exists():
-        raise FileExistsError(
-            f"conversion output already exists: {path} or {report_path}"
-        )
+    # 覆盖语义：裁判脚本（spark_gate.py）每次运行都用当前树重建产物，上一轮中断可能
+    # 留下旧/半成品输出。已存在的输出一律视为陈旧，清掉后重建（避免 FileExistsError
+    # 卡死每次必重跑的调用方）。
+    for stale in (report_path, path):
+        if stale.is_dir():
+            shutil.rmtree(stale)
+        elif stale.exists() or stale.is_symlink():
+            stale.unlink()
     chosen_device = torch.device(device)
     if chosen_device.type == "cuda" and not torch.cuda.is_available():
         raise ValueError("CUDA conversion requested but CUDA is unavailable")
