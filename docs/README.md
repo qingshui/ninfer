@@ -36,6 +36,7 @@ Published artifact downloads are listed in the [project README](../README.md).
 | [Qwen3.5](maintainer/qwen3_5-model.md) | Dense/MoE、Main/MTP/DFlash、Vision 与状态组合 |
 | [Qwen4Exp](maintainer/qwen4_exp-model.md) | Flash Next、HC/QSA/PLE、量化、TP/EP 与执行组合 |
 | [GLM5Next](maintainer/glm5next-model.md) | KDA/MLA/mHC、量化、ADP、MTP/Vision 与 Graph |
+| [Spark2_5](maintainer/spark2_5-model.md) | 架构事实、配置与绑定、KV 容量、转换与数值验证入口 |
 | [Speculative execution](maintainer/speculative-decoding.md) | MTP 对齐、ReplaySSM、DFlash 分布与接受前缀 |
 | [Expert cache](maintainer/expert-weight-cache.md) | 固定与流式缓存、CPU/GPU 分工、上传和消费寿命 |
 | [Observability](maintainer/observability.md) | 时间和资源口径、测量窗口、rank 统计与日志边界 |
