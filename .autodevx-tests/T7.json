@@ -1,0 +1,13 @@
+{
+  "task_id": "T7",
+  "refs": [
+    "F8",
+    "F5",
+    "F7"
+  ],
+  "files": {
+    "tests/models/spark2_5/test_t7_gate_serving.py": "2026-11-11T18:39:58",
+    "tests/models/spark2_5/test_t7_numerics_registration.py": "2026-11-11T18:39:58",
+    "tests/models/spark2_5/test_t7_serving.py": "2026-11-11T18:39:58"
+  }
+}
