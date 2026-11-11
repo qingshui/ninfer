@@ -1,17 +1,18 @@
 #include "models/spark2_5/config.h"
 
 #include "artifact/reader.h"
+#include "models/spark2_5/state/window_state.h"
 
 #include <cmath>
+#include <stdexcept>
 #include <string>
 
 namespace ninfer::models::spark2_5 {
 namespace {
-using artifact::ArtifactError;
 using artifact::Json;
 
 [[noreturn]] void fail(const std::string& field, const std::string& message) {
-    throw ArtifactError("Spark2_5 " + field + ": " + message);
+    throw std::invalid_argument("Spark2_5 " + field + ": " + message);
 }
 
 const Json& field(const Json& object, const std::string& name, const std::string& label) {
@@ -88,6 +89,10 @@ TextConfig parse_text_config(const Json& c) {
     if (out.heads % out.kv_heads)
         fail("num_attention_heads", "must be divisible by num_key_value_heads");
     out.sliding_window = extent(c, "sliding_window");
+    if (out.sliding_window <= 1) fail("sliding_window", "must exceed 1");
+    // The window ring holds exactly the positions a sliding layer attends.
+    if (out.sliding_window != kWindowCapacity)
+        fail("sliding_window", "must be " + std::to_string(kWindowCapacity));
     out.norm_epsilon   = positive_f32(field(c, "rms_norm_eps"), "rms_norm_eps");
     const auto& tied   = field(c, "tie_word_embeddings");
     if (!tied.is_boolean()) fail("tie_word_embeddings", "expected a boolean");

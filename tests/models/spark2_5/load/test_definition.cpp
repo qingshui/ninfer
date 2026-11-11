@@ -1,6 +1,9 @@
 // Binds a real Spark2_5 artifact (BF16 or FP8) named by NINFER_SPARK2_5_ARTIFACT.
 #include "models/spark2_5/definition.h"
 
+#include "artifact/binder.h"
+#include "models/common/bindings.h"
+
 #include <cstdlib>
 #include <iostream>
 #include <stdexcept>
@@ -56,6 +59,30 @@ void rejects_options(const artifact::Reader& reader) {
         } catch (const artifact::ArtifactError&) { rejected = true; }
         require(rejected, "unsupported component selection was accepted");
     }
+}
+
+// A binding the artifact cannot satisfy must be reported with the tensor's name.
+void names_failing_tensor(const artifact::Reader& reader) {
+    const auto reports = [&](const std::string& name, const std::string& label, auto&& declare) {
+        artifact::Binder binder(reader);
+        Bindings b(binder);
+        try {
+            declare(b);
+        } catch (const artifact::ArtifactError& error) {
+            require(std::string(error.what()).find(name) != std::string::npos,
+                    label + ": error does not name " + name + ": " + error.what());
+            return;
+        }
+        throw std::runtime_error(label + ": accepted a binding the artifact cannot satisfy");
+    };
+    const auto layer  = std::string("text/layers/0/");
+    const auto hidden = spark::parse_text_config(reader).hidden;
+    reports("text/not_a_tensor", "missing",
+            [](Bindings& b) { (void)b.direct("text/not_a_tensor", {4}); });
+    reports(layer + "attention/query", "shape",
+            [&](Bindings& b) { (void)b.parameter(layer + "attention/query", {3, 5}); });
+    reports(layer + "input_norm", "dtype",
+            [&](Bindings& b) { (void)b.direct(layer + "input_norm", {hidden}, QType::FP32); });
 }
 
 void binds(const artifact::Reader& reader) {
@@ -122,6 +149,7 @@ int main() {
         }
         artifact::Reader reader(path);
         binds(reader);
+        names_failing_tensor(reader);
         rejects_options(reader);
         std::cout << "PASS Spark2_5 definition binding\n";
         return 0;

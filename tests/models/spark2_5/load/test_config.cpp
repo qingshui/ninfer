@@ -9,7 +9,6 @@
 namespace {
 using namespace ninfer;
 namespace spark = models::spark2_5;
-using artifact::ArtifactError;
 using artifact::Json;
 
 void require(bool value, const std::string& message) {
@@ -50,7 +49,7 @@ void rejects(const std::string& label, const std::string& field,
     mutate(config);
     try {
         (void)spark::parse_text_config(config);
-    } catch (const ArtifactError& error) {
+    } catch (const std::invalid_argument& error) {
         require(std::string(error.what()).find(field) != std::string::npos,
                 label + ": error does not name " + field + ": " + error.what());
         return;
@@ -79,6 +78,15 @@ void accepts_valid_config() {
                 c.rope(S).rotary_dim == 256 && c.rope(S).theta == 1.0e4F,
             "rope tables differ");
 
+    // Fields outside the model's math (the FP8 checkpoint carries extras) do not change the result.
+    auto extra                 = valid();
+    extra["quantization_config"] = {{"quant_method", "fp8"}};
+    extra["rope"]["rope_type"]   = "default";
+    const auto e                 = spark::parse_text_config(extra);
+    require(e.full_rope.theta == c.full_rope.theta && e.sliding_rope.rotary_dim == 256 &&
+                e.layers.size() == c.layers.size() && e.sliding_window == c.sliding_window,
+            "extra fields changed the parsed config");
+
     auto only_full                 = valid();
     only_full["num_hidden_layers"] = 1;
     only_full["layer_types"]       = {"full_attention"};
@@ -98,6 +106,9 @@ void rejects_invalid_fields() {
             [](Json& c) { c["num_attention_heads"] = 8.5; });
     rejects("grouping", "num_attention_heads", [](Json& c) { c["num_key_value_heads"] = 3; });
     rejects("window", "sliding_window", [](Json& c) { c["sliding_window"] = -1; });
+    rejects("one-token window", "sliding_window", [](Json& c) { c["sliding_window"] = 1; });
+    rejects("narrow window", "sliding_window", [](Json& c) { c["sliding_window"] = 256; });
+    rejects("wide window", "sliding_window", [](Json& c) { c["sliding_window"] = 1024; });
     rejects("epsilon", "rms_norm_eps", [](Json& c) { c["rms_norm_eps"] = 0.0; });
     rejects("tie", "tie_word_embeddings", [](Json& c) { c["tie_word_embeddings"] = "yes"; });
     rejects("eos", "eos_token_id", [](Json& c) { c["eos_token_id"] = 131072; });
