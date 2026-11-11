@@ -341,6 +341,11 @@ struct Fp8WeightGeometry {
     std::uint64_t required_payload_bytes;
 };
 
+// Validates a row-scaled FP8 weight and returns its payload geometry. Accepts
+// QType::FP8_E4M3FN_ROW_BF16 and QType::FP8_E4M3FN_ROW_FP32. Codes form an [N,K] plane, followed
+// at a 256-byte aligned offset by N per-row scales: 2 bytes each (BF16) or 4 bytes each (FP32).
+// scale_plane_bytes and required_payload_bytes follow the scale word size. Throws
+// std::invalid_argument when the weight does not match that layout.
 Fp8WeightGeometry validate_fp8_weight(const Weight& weight, const char* operation);
 Fp8WeightGeometry validate_mxfp8_weight(const Weight& weight, const char* operation);
 Fp8WeightGeometry validate_fp8_block_fp32_weight(const Weight& weight, const char* operation);
