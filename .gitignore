@@ -83,3 +83,4 @@ id_rsa*
 .ssh/
 /plugins/
 /tools/bench/gate_last_result.json
+/log/autodevx.*
