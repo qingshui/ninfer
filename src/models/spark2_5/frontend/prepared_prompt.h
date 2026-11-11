@@ -1,6 +1,7 @@
 #pragma once
 
 #include "models/glm5next/frontend/output.h"
+#include "models/glm5next/prefix_identity.h"
 #include "models/spark2_5/frontend/frontend.h"
 
 namespace ninfer::models::spark2_5 {
@@ -16,6 +17,10 @@ struct PreparedPromptData : models::frontend::PromptData {
     // The tool-call framing is shared with GLM; reasoning markers are the same <think> pair.
     glm5next::PreparedOutput output;
     SamplingPreset sampling;
+
+    [[nodiscard]] glm5next::InputPrefixView prefix_view() const noexcept {
+        return {token_ids, {}, identity.execution_frontiers};
+    }
 };
 
 class PreparedPromptAccess {

@@ -6,6 +6,7 @@
 #include "models/qwen4_exp/config.h"
 #include "models/qwen4_exp/startup.h"
 #include "models/glm5next/config.h"
+#include "models/spark2_5/startup.h"
 #include "models/glm5next/startup.h"
 #include "runtime/engine/prepared_startup.inl"
 #if NINFER_ENABLE_DISTRIBUTED
@@ -122,8 +123,13 @@ ConstructedModel construct_model(EngineOptions& options) {
         auto built = detail::build_local_model<models::qwen3_5::Startup>(reader, options, start);
         return {std::move(built.instance), std::move(built.load), std::move(built.context_cost)};
     }
-    case models::Architecture::Spark2_5:
-        throw std::logic_error("Spark2_5 has no Engine construction route yet");
+    case models::Architecture::Spark2_5: {
+        if (options.deployment && options.deployment->ranks.size() > 1)
+            throw std::invalid_argument("Spark2_5 does not support multi-rank deployment");
+        options.kv_cache = models::spark2_5::resolve_kv_cache(options);
+        auto built = detail::build_local_model<models::spark2_5::Startup>(reader, options, start);
+        return {std::move(built.instance), std::move(built.load), std::move(built.context_cost)};
+    }
     }
     throw std::logic_error("architecture has no Engine construction route");
 }
