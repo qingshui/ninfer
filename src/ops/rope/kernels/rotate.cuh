@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/pdl.cuh"
 #include "ops/rope/kernels/phase.cuh"
 #include "ops/common/numeric/convert.cuh"
 
@@ -18,6 +19,11 @@ enum class RopeKernelMode : std::int32_t {
 };
 
 inline constexpr int kRopeMaxHalf = 128;
+
+// One warp per head: 8 query heads then 2 key heads of a D256 one-dimensional RoPE.
+inline constexpr int kRopeD256Kv2QHeads  = 8;
+inline constexpr int kRopeD256Kv2Heads   = 10;
+inline constexpr int kRopeD256Kv2Threads = kRopeD256Kv2Heads * 32;
 
 static __device__ __constant__ float kRopeR64Theta1e7Frequencies[32] = {
     1.000000000e+00F, 6.042963902e-01F, 3.651741273e-01F, 2.206734069e-01F, 1.333521432e-01F,
@@ -265,6 +271,61 @@ static __global__ void rope_generic_kernel(const std::int32_t* positions, std::i
             data[base + pair + half] = __float2bfloat16_rn(second * c + first * s);
         }
     }
+}
+
+// D256 RoPE for 8 query heads and 2 key heads. Each warp owns one head and each lane owns the
+// contiguous pairs [lane * Pairs, lane * Pairs + Pairs), so every rotation pair is read once with
+// a vector load before it is rotated and written back once. Frequency, angle and rotation use the
+// expressions of rope_generic_kernel. Dependent launches may start before the producer finishes:
+// only the theta-derived frequencies are computed ahead of the wait, and positions, q and k are
+// read after it.
+template <int Rotary, bool Dependent>
+__global__ void rope_d256_kv2_kernel(const std::int32_t* positions, __nv_bfloat16* q,
+                                     __nv_bfloat16* k, std::int32_t tokens,
+                                     std::int64_t q_token_stride, std::int64_t k_token_stride,
+                                     float theta) {
+    static_assert(Rotary == 64 || Rotary == 256);
+    constexpr int kHeadDim = 256;
+    constexpr int kHalf    = Rotary / 2;
+    constexpr int kPairs   = kHalf / 32;
+    using Pairs            = common::Bf16Vector<kPairs>;
+
+    const int token = static_cast<int>(blockIdx.x);
+    const int lane  = static_cast<int>(threadIdx.x) & 31;
+    const int warp  = static_cast<int>(threadIdx.x) >> 5;
+
+    float frequency[kPairs];
+#pragma unroll
+    for (int j = 0; j < kPairs; ++j) {
+        const int pair       = lane * kPairs + j;
+        const float exponent = -2.0F * static_cast<float>(pair) / static_cast<float>(Rotary);
+        frequency[j]         = powf(theta, exponent);
+    }
+    if constexpr (Dependent) { pdl::wait_for_dependencies(); }
+    if (token >= tokens) { return; }
+
+    const bool is_q             = warp < kRopeD256Kv2QHeads;
+    const int head              = is_q ? warp : warp - kRopeD256Kv2QHeads;
+    __nv_bfloat16* data         = is_q ? q : k;
+    const std::int64_t stride_t = is_q ? q_token_stride : k_token_stride;
+    __nv_bfloat16* first_ptr    = data + static_cast<std::int64_t>(token) * stride_t +
+                               static_cast<std::int64_t>(head) * kHeadDim + lane * kPairs;
+    const Pairs first_in  = Pairs::load(first_ptr);
+    const Pairs second_in = Pairs::load(first_ptr + kHalf);
+
+    const float position = static_cast<float>(positions[token]);
+    Pairs first_out, second_out;
+#pragma unroll
+    for (int j = 0; j < kPairs; ++j) {
+        float s, c;
+        sincosf(position * frequency[j], &s, &c);
+        const float first  = __bfloat162float(first_in.word[j]);
+        const float second = __bfloat162float(second_in.word[j]);
+        first_out.word[j]  = __float2bfloat16_rn(first * c - second * s);
+        second_out.word[j] = __float2bfloat16_rn(second * c + first * s);
+    }
+    first_out.store(first_ptr);
+    second_out.store(first_ptr + kHalf);
 }
 
 } // namespace ninfer::ops::detail
