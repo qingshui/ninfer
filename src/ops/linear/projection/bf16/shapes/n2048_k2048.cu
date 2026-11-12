@@ -1,4 +1,5 @@
 #include "ops/linear/projection/bf16/bf16_shapes.h"
+#include "core/platform.h"
 #include "ops/common/cuda/memory.cuh"
 #include "ops/linear/projection/bf16/bf16_launch.cuh"
 
@@ -24,6 +25,14 @@ using S6 = Bf16ScheduleInstance<
 using S7 = Bf16ScheduleInstance<
     Bf16A16TmaMmaSchedule<128, 64, 64, 32, 32, 2, 2, Bf16MmaRaster::TokenFast, 1>, kK>;
 using S8 = Bf16ScheduleInstance<Bf16A16TmaMmaSchedule<128, 128, 64, 64, 32, 3, 1>, kK>;
+#if NINFER_TARGET_RTX5090
+// 170 SMs, one CTA each: 128-token tiles take three waves while 16 * ceil(T / 128) <= 510
+// (T <= 3968). A full 4096-token chunk then spills a fourth, nearly empty wave. 136-token tiles
+// keep three waves through T = 4216 (16 * ceil(T / 136) <= 510) at the cost of two pipeline stages.
+constexpr std::int32_t kWaveFitTokensBegin = 3968;
+constexpr std::int32_t kWaveFitTokensEnd   = 4216;
+using S9 = Bf16ScheduleInstance<Bf16A16TmaMmaSchedule<128, 136, 64, 16, 136, 2, 1>, kK>;
+#endif
 } // namespace
 
 Bf16Launch select_bf16_n2048_k2048(std::int32_t tokens) {
@@ -35,6 +44,10 @@ Bf16Launch select_bf16_n2048_k2048(std::int32_t tokens) {
     if (tokens <= 96) return launch_bf16_tma_mma<S5>;
     if (tokens <= 128) return launch_bf16_mma<S6>;
     if (tokens <= 512) return launch_bf16_tma_mma<S7>;
+#if NINFER_TARGET_RTX5090
+    if (tokens > kWaveFitTokensBegin && tokens <= kWaveFitTokensEnd)
+        return launch_bf16_tma_mma<S9>;
+#endif
     return launch_bf16_tma_mma<S8>;
 }
 } // namespace ninfer::ops::detail
