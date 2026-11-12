@@ -41,7 +41,7 @@ void launch_a16(const Tensor& x, const Weight& weight, std::span<const Tensor> o
                                                            LinearIdentityEpilogue{}, stream);
         return;
     }
-    if (tokens <= 16) return sliced<Fp8SlicedInstance<16, 4, 1>>(x, weight, outputs, stream);
+    if (tokens <= 16) return sliced<Fp8SlicedInstance<16, 4, 2>>(x, weight, outputs, stream);
     if (tokens <= 32) return sliced<Fp8SlicedInstance<32, 4, 1>>(x, weight, outputs, stream);
     if (tokens <= 64)
         return mma<Fp8A16MmaSchedule<32, 64, 128, 16, 16, 1, 3>>(x, weight, outputs, stream);
