@@ -31,6 +31,21 @@ SWA 窗口以 `modeling_spark` 为准。Spec 字面写的 `[i-510, i]` 与 HF �
 - BF16 产物所有 Use 为 `A16Only`，不进入 FP8 a8 kernel。FP8 产物的 qkv/out/gate_up/down 为
   `AllowA8` w8a8，`g_proj` 与 `lm_head` 按产物实际表示绑定。
 
+## 产物表示
+
+表示由 `tools/convert/official_recipes.py` 中的 recipe 决定，运行时按产物实际表示绑定。
+
+| recipe | 投影权重 | embedding / 输出头 |
+|---|---|---|
+| `spark_x2_6_17b_bf16` | BF16 原字，`A16Only` | Q8（tied，共享） |
+| `spark_x2_6_17b_fp8` | 发布的 row-scaled FP8 字与 FP32 scale，`AllowA8`（`g_proj` 除外） | Q8（tied，共享） |
+
+`fp8_row_fp32_maxabs` 方法与注册保留在 converter 中，可供 recipe 把 BF16 投影量化为
+FP8 row + FP32 scale。改用该表示属于 F8 授权的调优面。改动 recipe 时必须同时更新
+`tests/convert/test_spark2_5_real.py` 的投影断言（改为独立宿主参考量化对拍）和
+`test_execution.cpp` 的 `hf_case` 契约，使 HF 对拍判据切换到量化档。
+`tests/ops/linear/projection/cases_q8.cpp` 覆盖 N131072×K2048 的 Q8 输出头形状。
+
 ## KV 与容量
 
 - SWA 层每流每层使用 512 槽 ring（不超过 511 + 一个 chunk）。
