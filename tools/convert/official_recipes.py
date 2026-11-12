@@ -6,7 +6,6 @@ from .methods import (
     AuxiliaryValue,
     cast_direct,
     fp8_row_maxabs,
-    fp8_row_fp32_maxabs,
     fp8_block_maxabs,
     grouped_absmax,
     import_encoded,
@@ -191,9 +190,9 @@ def qwen3_8_27b_nvfp4(model, recipe, sources):
 def _spark_recipe(model, recipe, fp8_source):
     """Spark2.5 tuning surface: representation per projection role and tied head.
 
-    Both variants run the projections as FP8 row-scaled w8a8 (the FP8 checkpoint imports its
-    published words, the BF16 checkpoint is quantized per channel with FP32 scales) and store
-    the tied embedding/head as Q8. Only ``attention/gate`` stays BF16.
+    The FP8 checkpoint imports its published row-scaled FP8 words (w8a8). The BF16 checkpoint
+    keeps its projection weights as BF16 words (A16 path); a BF16 recipe does not requantize
+    source values. The tied embedding/head is stored as Q8 in both variants.
     """
     if model.config.get("architectures") != ["Spark2_5ForCausalLM"]:
         raise ValueError("this official recipe requires Spark2.5 mathematics")
@@ -203,24 +202,18 @@ def _spark_recipe(model, recipe, fp8_source):
             continue
         if name == "text/token_embedding":
             _assign(recipe, name, Q8)
-        elif parameter.projection and not name.endswith(
-            ("/attention/gate", "text/output_head")
+        elif (
+            fp8_source is not None
+            and parameter.projection
+            and not name.endswith(("/attention/gate", "text/output_head"))
         ):
-            if fp8_source is not None:
-                recipe.assign(
-                    name,
-                    format=FP8_FP32,
-                    method=import_encoded,
-                    source=model.source(name, fp8_source, FP8_FP32),
-                    activation_policy="AllowA8",
-                )
-            else:
-                recipe.assign(
-                    name,
-                    format=FP8_FP32,
-                    method=fp8_row_fp32_maxabs,
-                    activation_policy="AllowA8",
-                )
+            recipe.assign(
+                name,
+                format=FP8_FP32,
+                method=import_encoded,
+                source=model.source(name, fp8_source, FP8_FP32),
+                activation_policy="AllowA8",
+            )
         elif parameter.projection:
             recipe.assign(
                 name, format="bf16", method=cast_direct, activation_policy="A16Only"
