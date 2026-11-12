@@ -8,6 +8,8 @@ using ScaleType = float;
 using Gemv      = Fp8A16GemvSchedule<4, 2, 8, 4, Fp8CodeCache::Default, 2, 4>;
 using Tma64x128 = Fp8A8TmaMmaSchedule<64, 128, 128, 2, 4, 2, 1>;
 using Tma64x256 = Fp8A8TmaMmaSchedule<64, 256, 128, 2, 4, 2, 1>;
+// 64 row tiles split in K across 128 CTAs, so every SM streams weights with deep TMA stages.
+using DecodeSplit = Fp8A8TmaSplitKSchedule<Fp8A8TmaMmaSchedule<16, 32, 128, 1, 2, 6, 2>, 170, 2, 4>;
 
 template <class Schedule>
 void sliced(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t stream) {
@@ -33,6 +35,8 @@ void launch_a16(const Tensor& x, const Weight& weight, Tensor& out, cudaStream_t
 
 void launch_a8(const Tensor& x, const Weight& weight, Tensor& out, Fp8A8Workspace scratch,
                cudaStream_t stream) {
+    if (x.ne[1] <= 16)
+        return launch_fp8_a8_tma<Geometry, DecodeSplit, ScaleType>(x, weight, out, scratch, stream);
     if (x.ne[1] <= 32)
         return launch_fp8_a8<Geometry, Fp8A8T32R32K128, ScaleType>(x, weight, out, scratch, stream);
     if (x.ne[1] <= 96)
@@ -43,8 +47,13 @@ void launch_a8(const Tensor& x, const Weight& weight, Tensor& out, Fp8A8Workspac
     launch_fp8_a8_tma<Geometry, Tma64x256, ScaleType>(x, weight, out, scratch, stream);
 }
 
-bool uses_a8(std::int32_t, std::int32_t max_tokens) { return max_tokens >= 17; }
+bool uses_a8(std::int32_t, std::int32_t max_tokens) { return max_tokens >= 5; }
+
+std::size_t partial_capacity_bytes(std::int32_t max_tokens) {
+    return max_tokens >= 5 ? DecodeSplit::kPartialBytes : 0;
+}
 } // namespace
 
-const Fp8LinearShape kFp8RowFp32N2048K6656{2048, 6656, launch_a16, launch_a8, uses_a8};
+const Fp8LinearShape kFp8RowFp32N2048K6656{2048,      6656,    launch_a16,
+                                           launch_a8, uses_a8, partial_capacity_bytes};
 } // namespace ninfer::ops::detail
