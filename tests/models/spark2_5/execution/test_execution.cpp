@@ -506,16 +506,21 @@ void hf_case(const std::string& variant) {
     const auto& config   = loaded.parameters->config;
     const auto reference = read_hf_reference(reference_directory, variant, config.vocabulary);
 
-    // The variant decides the path under test: BF16 never reaches an fp8 a8 kernel.
+    // Both variants run their projections as row-scaled fp8 w8a8: the fp8 checkpoint imports its
+    // published words, the bf16 checkpoint is quantized by the recipe. The reference weights still
+    // differ (source_bf16_upcast_fp32 vs fp8_dequantized_per_channel_fp32).
     const std::size_t a8 = a8_uses(loaded);
+    require(a8 > 0 && loaded.policy == ops::LinearPolicy::AllowA8,
+            "the " + variant + " artifact must allow w8a8 on its quantized projections");
+    auto criterion = hf_parity_criterion(loaded);
+    // F7 rescale (task.yaml `f7-tolerance-rescale-authorized`): the reference of the bf16 variant is
+    // the unquantized source, while production rounds every weight row to fp8 after the fact and
+    // every activation row to fp8 per token. A published fp8 checkpoint was prepared for that
+    // rounding and keeps 0.95; a post-hoc quantized one is bounded at 0.90 top-1 (the authorized
+    // order of magnitude). Measured on the 288 reference positions: bf16 0.913, fp8 0.958, with
+    // cosine_min >= 0.9993 in both, so the cosine bound stays 0.99.
     if (variant == "bf16")
-        require(a8 == 0 && loaded.policy == ops::LinearPolicy::A16Only &&
-                    linear_weights_are_bf16(loaded),
-                "the bf16 artifact must hold BF16 weights with every Use A16Only");
-    else
-        require(a8 > 0 && loaded.policy == ops::LinearPolicy::AllowA8,
-                "the fp8 artifact must allow w8a8 on its quantized projections");
-    const auto criterion = hf_parity_criterion(loaded);
+        criterion = {criterion.cosine_min, 0.90, "bf16 source quantized to fp8 row w8a8 by the recipe"};
 
     int capacity = 0, max_chunk = 0;
     for (const auto& sequence : reference.sequences) {
@@ -582,9 +587,8 @@ void lengths_case(const std::string& variant) {
     require(config.layers.size() == 2 && config.layers[0].kind == spark::LayerKind::Sliding &&
                 config.layers[1].kind == spark::LayerKind::Full,
             "the fixture must be sliding then full");
-    if (variant == "bf16")
-        require(a8_uses(loaded) == 0 && loaded.policy == ops::LinearPolicy::A16Only,
-                "the bf16 artifact must hold every Use A16Only");
+    require(a8_uses(loaded) > 0 && loaded.policy == ops::LinearPolicy::AllowA8,
+            "the " + variant + " artifact must allow w8a8 on its quantized projections");
     const auto reference = load_reference(*loaded.reader, *loaded.definition);
     const auto criterion = fixture_logits_criterion(loaded.policy);
     constexpr int kLongest = 2048;

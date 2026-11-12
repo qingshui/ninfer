@@ -28,8 +28,9 @@ SWA 窗口以 `modeling_spark` 为准。Spec 字面写的 `[i-510, i]` 与 HF �
 - 权重缺失或 dtype/shape 不匹配时，异常信息含张量名。
 - tied 产物的 `output_head` 借用 embedding payload。
 - 物化后的设备权重字节通过 observations 的 `device_weights_bytes` 报告（`/metrics` 的 weights/device）。
-- BF16 产物所有 Use 为 `A16Only`，不进入 FP8 a8 kernel。FP8 产物的 qkv/out/gate_up/down 为
-  `AllowA8` w8a8，`g_proj` 与 `lm_head` 按产物实际表示绑定。
+- 两个变体的 qkv/out/gate_up/down 均为 FP8 row + FP32 scale 的 `AllowA8` w8a8（BF16 产物由
+  recipe 对 BF16 源按 maxabs 量化，FP8 产物导入发布字），`g_proj` 与 `lm_head` 按产物实际
+  表示绑定。
 
 ## 产物表示
 
@@ -37,13 +38,13 @@ SWA 窗口以 `modeling_spark` 为准。Spec 字面写的 `[i-510, i]` 与 HF �
 
 | recipe | 投影权重 | embedding / 输出头 |
 |---|---|---|
-| `spark_x2_6_17b_bf16` | BF16 原字，`A16Only` | Q8（tied，共享） |
+| `spark_x2_6_17b_bf16` | FP8 row + FP32 scale（由 BF16 源按 maxabs 量化），`AllowA8`（`g_proj` 除外，其为 BF16 + `A16Only`） | Q8（tied，共享） |
 | `spark_x2_6_17b_fp8` | 发布的 row-scaled FP8 字与 FP32 scale，`AllowA8`（`g_proj` 除外） | Q8（tied，共享） |
 
-`fp8_row_fp32_maxabs` 方法与注册保留在 converter 中，可供 recipe 把 BF16 投影量化为
-FP8 row + FP32 scale。改用该表示属于 F8 授权的调优面。改动 recipe 时必须同时更新
-`tests/convert/test_spark2_5_real.py` 的投影断言（改为独立宿主参考量化对拍）和
-`test_execution.cpp` 的 `hf_case` 契约，使 HF 对拍判据切换到量化档。
+BF16 recipe 使用 `fp8_row_fp32_maxabs`：`scale = amax / 448`，`code = RNE_e4m3fn(x / scale)`，
+全零行 scale 取 1、code 取 0。`tests/convert/test_spark2_5_real.py` 以独立宿主参考对 codes 与
+FP32 scale 逐位对拍；`test_execution.cpp` 的 `hf_case` 与 `lengths_case` 要求 `AllowA8`，HF 对拍
+判据随之使用量化档。
 `tests/ops/linear/projection/cases_q8.cpp` 覆盖 N131072×K2048 的 Q8 输出头形状。
 
 ## KV 与容量
@@ -79,6 +80,11 @@ HF 对拍判据由 `hf_parity_criterion` 给出，判定依据写入输出行的
 |---|---|---|
 | BF16 且 A16Only | 0.999 | 0.98 |
 | 量化表示或 AllowA8 | 0.99 | 0.95 |
+| `hf --variant bf16`（BF16 源经 recipe 量化为 FP8 row + `AllowA8`） | 0.99 | 0.90 |
+
+bf16 变体的参考是未量化的源权重，生产路径对权重做事后 FP8 行量化，对激活逐 token 做 FP8 量化；
+发布的 FP8 checkpoint 针对该舍入准备，保持 0.95。F7 重定标裁决给出的 top-1 量级为 90%。
+实测 288 个参考位置：bf16 cosine_min 0.99929、top-1 0.913；fp8 cosine_min 0.99952、top-1 0.958。
 
 阈值是假设值，量化表示下按 Op 规范放宽，依据见 `basis`。
 

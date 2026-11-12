@@ -1,7 +1,9 @@
 // Independent FP64 reference of the Spark2_5 text model (modeling_spark.py semantics).
 //
 // Weights are read from the artifact objects and decoded here: BF16 words directly, and
-// fp8_e4m3fn_row_fp32 as code * row scale (the scale applied in FP64 after the dot product).
+// fp8_e4m3fn_row_fp32 as code * row scale (the scale applied in FP64 after the dot product), and
+// q8_g32_fp16 (the tied embedding / head) as int8 code * its group's FP16 scale, folded into the
+// element; that product has at most 18 significant bits and is exact in binary32.
 // Activations are never rounded: no BF16 stages, no activation quantization, no FP8 compute.
 #pragma once
 
@@ -63,6 +65,14 @@ inline double decode_e4m3(std::uint8_t code) {
     return sign ? -magnitude : magnitude;
 }
 
+inline double decode_fp16(std::uint16_t word) {
+    const int sign = word >> 15, exponent = (word >> 10) & 31, mantissa = word & 1023;
+    require(exponent != 31, "an FP16 scale is not finite");
+    const double magnitude = exponent == 0 ? std::ldexp(mantissa / 1024.0, -14)
+                                           : std::ldexp(1.0 + mantissa / 1024.0, exponent - 15);
+    return sign ? -magnitude : magnitude;
+}
+
 // A weight matrix [rows, cols] as the exact code of every element and an optional row scale.
 struct Matrix {
     std::int64_t rows = 0, cols = 0;
@@ -116,6 +126,25 @@ public:
                     float scale;
                     std::memcpy(&scale, bytes.data() + g.scale_offset + 4 * object_row, 4);
                     out.matrix.scale.push_back(scale);
+                }
+            } else if (g.format == QType::Q8_G32_FP16 && g.layout == QuantLayout::RowSplit) {
+                const auto columns = static_cast<std::uint64_t>(out.matrix.cols);
+                require(first % columns == 0 && count % columns == 0 && g.group_size == 32 &&
+                            g.shape.back() == columns && columns % 32 == 0,
+                        reference.name + ": part is not whole Q8 rows");
+                for (std::uint64_t r = 0; r < count / columns; ++r) {
+                    const auto object_row = first / columns + r;
+                    for (std::uint64_t c = 0; c < columns; ++c) {
+                        std::uint16_t scale_word;
+                        std::memcpy(&scale_word,
+                                    bytes.data() + g.scale_offset + g.scale_row_bytes * object_row +
+                                        2 * (c / 32),
+                                    2);
+                        const auto code = static_cast<std::int8_t>(
+                            bytes[object_row * g.code_bytes_per_row + c]);
+                        out.matrix.code[filled + r * columns + c] =
+                            static_cast<float>(code * decode_fp16(scale_word));
+                    }
                 }
             } else {
                 throw std::runtime_error(reference.name + ": the reference does not decode this format");

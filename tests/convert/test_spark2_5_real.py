@@ -110,6 +110,23 @@ def _source_rows(root, tensor, rows):
     return weight[rows].view(torch.uint8), scale.reshape(-1)[rows]
 
 
+def _reference_row_fp8_fp32(bf16_rows):
+    """Independent row quantization: scale = amax / 448, code = RNE_e4m3fn(x / scale).
+
+    Both steps are single binary32 divisions (a tensor divisor, so no reciprocal
+    multiplication). All-zero rows store scale 1 and zero codes.
+    """
+    rows = bf16_rows.float()
+    amax = rows.abs().amax(dim=1)
+    zero = amax == 0
+    scale = amax / torch.full_like(amax, 448.0)
+    scale = torch.where(zero, torch.ones_like(scale), scale)
+    codes = (rows / scale[:, None]).clamp(-448.0, 448.0).to(torch.float8_e4m3fn)
+    codes = codes.view(torch.uint8)
+    codes[zero] = 0
+    return codes, scale
+
+
 def test_config_matches_the_checkpoint(sampled):
     _, root, config, _, _, _ = sampled
     source = json.loads((root / "config.json").read_text())
@@ -140,11 +157,12 @@ def test_sampled_layer_matches_raw_source_words(sampled, layer):
         actual = _read(artifact, placement, shapes, p + role)
         expected = _source_rows(root, tensor, rows)
         if variant == "bf16":
-            assert torch.equal(actual, expected), role
-        else:
-            assert torch.equal(actual[0], expected[0]), role
-            # FP32 scales must survive bit for bit.
-            assert torch.equal(actual[1].view(torch.int32), expected[1].view(torch.int32))
+            # The BF16 checkpoint is quantized by the recipe: compare against an
+            # independent host reference (FP32 division, E4M3FN RNE), not source words.
+            expected = _reference_row_fp8_fp32(expected)
+        assert torch.equal(actual[0], expected[0]), role
+        # FP32 scales must match bit for bit.
+        assert torch.equal(actual[1].view(torch.int32), expected[1].view(torch.int32)), role
     direct = {
         "attention/gate": sp + "self_attn.g_proj.weight",
         "input_norm": sp + "input_layernorm.weight",
