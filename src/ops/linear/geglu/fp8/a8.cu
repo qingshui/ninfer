@@ -8,7 +8,7 @@ namespace {
 constexpr int kK            = 2048;
 constexpr int kIntermediate = 6656;
 using Tma64x128             = Fp8A8TmaMmaSchedule<64, 128, 128, 2, 4, 2, 1>;
-using Tma64x256             = Fp8A8TmaMmaSchedule<64, 256, 128, 2, 4, 2, 1>;
+using Tma128x128            = Fp8A8TmaMmaSchedule<128, 128, 128, 4, 4, 2, 1, Fp8MmaRaster::RowFast>;
 } // namespace
 
 void launch_fp8_row_fp32_geglu_a8(const Tensor& x, const Weight& weight, Tensor& out,
@@ -31,6 +31,6 @@ void launch_fp8_row_fp32_geglu_a8(const Tensor& x, const Weight& weight, Tensor&
     if (x.ne[1] <= 32) return launch.template operator()<Fp8A8T32R128K128>();
     if (x.ne[1] <= 64) return launch.template operator()<Fp8A8T64R128K256>();
     if (x.ne[1] <= 128) return launch.template operator()<Tma64x128>();
-    launch.template operator()<Tma64x256>();
+    launch.template operator()<Tma128x128>();
 }
 } // namespace ninfer::ops::detail

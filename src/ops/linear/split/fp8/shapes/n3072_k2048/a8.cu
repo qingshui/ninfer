@@ -4,8 +4,8 @@
 
 namespace ninfer::ops::detail::linear_split::fp8_n3072_k2048 {
 namespace {
-using Tma64x128 = Fp8A8TmaMmaSchedule<64, 128, 128, 2, 4, 2, 1>;
-using Tma64x256 = Fp8A8TmaMmaSchedule<64, 256, 128, 2, 4, 2, 1>;
+using Tma64x128  = Fp8A8TmaMmaSchedule<64, 128, 128, 2, 4, 2, 1>;
+using Tma128x128 = Fp8A8TmaMmaSchedule<128, 128, 128, 4, 4, 2, 1, Fp8MmaRaster::RowFast>;
 } // namespace
 
 void launch_a8(const Tensor& x, const Weight& weight, std::span<const Tensor> outputs,
@@ -26,6 +26,6 @@ void launch_a8(const Tensor& x, const Weight& weight, std::span<const Tensor> ou
     if (x.ne[1] <= 32) return launch.template operator()<Fp8A8T32R32K128>();
     if (x.ne[1] <= 96) return launch.template operator()<Fp8A8T32R128K128>();
     if (x.ne[1] <= 128) return launch.template operator()<Tma64x128>();
-    launch.template operator()<Tma64x256>();
+    launch.template operator()<Tma128x128>();
 }
 } // namespace ninfer::ops::detail::linear_split::fp8_n3072_k2048
