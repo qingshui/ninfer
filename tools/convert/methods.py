@@ -26,7 +26,7 @@ from tools.artifact.schema import TensorSpec
 from tools.artifact.tensor_output import TensorOutput
 
 from .quantization.fp8_block import quantize_blocks
-from .quantization.fp8_row import quantize_bf16_rows
+from .quantization.fp8_row import quantize_bf16_rows, quantize_rows_fp32_scale
 from .quantization.groupwise import quantize_matrix
 from .quantization.stored_scale import quantize_stored_scale
 from .sources.logical import EncodedRows, LogicalSource
@@ -274,6 +274,29 @@ def fp8_row_maxabs(request: PrepareRequest) -> PreparedMethod:
     return request.job(produce=produce)
 
 
+def fp8_row_fp32_maxabs(request: PrepareRequest) -> PreparedMethod:
+    """Quantize FP32 inputs to FP8 codes with FP32 row scales (``amax / 448``)."""
+    if request.target.format != "fp8_e4m3fn_row_fp32" or len(request.target.shape) != 2:
+        raise ValueError(
+            "fp8_row_fp32_maxabs requires the FP32 row-scaled FP8 matrix format"
+        )
+    _preflight(request)
+    n, k = request.target.shape
+    chunk = request.chunk_rows(k * 4)
+
+    def produce(output):
+        for begin, end, values in request.read_chunks(request.values, n * k, chunk * k):
+            values = (
+                values.reshape((end - begin) // k, k)
+                .to(device=request.device)
+                .to(torch.float32)
+            )
+            encoded = quantize_rows_fp32_scale(values)
+            output.write_codes(begin // k, encoded.codes, encoded.scales)
+
+    return request.job(produce=produce)
+
+
 def fp8_block_maxabs(request: PrepareRequest) -> PreparedMethod:
     """Encode independent 128-by-128 blocks with BF16 scales and E4M3FN codes."""
     if request.target.format != "fp8_e4m3fn_block128x128_bf16" or len(
@@ -467,6 +490,7 @@ METHODS: dict[str, Method] = {
     "cast_direct": cast_direct,
     "grouped_absmax": grouped_absmax,
     "fp8_row_maxabs": fp8_row_maxabs,
+    "fp8_row_fp32_maxabs": fp8_row_fp32_maxabs,
     "fp8_block_maxabs": fp8_block_maxabs,
     "import_encoded": import_encoded,
     "stored_scale_mse": stored_scale_mse,

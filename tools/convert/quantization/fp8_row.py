@@ -138,6 +138,53 @@ def quantize_fp32_rows(weight: torch.Tensor) -> RowScaledFp8Words:
     return RowScaledFp8Words(codes, signed_scales.view(torch.bfloat16))
 
 
+def quantize_rows_fp32_scale(weight: torch.Tensor) -> RowScaledFp8Words:
+    """Quantize FP32 rows to E4M3FN codes and FP32 row scales.
+
+    ``scale = amax / 448`` and ``code = RNE_e4m3fn(clamp(x / scale, +-448))`` are each one
+    binary32 division. All-zero rows store scale 1 and zero codes. The host (NumPy) and
+    CUDA paths round identically, so the result does not depend on ``weight.device``.
+    """
+
+    if weight.dtype != torch.float32 or weight.dim() != 2:
+        raise TypeError("FP8 quantization source must be a rank-two FP32 tensor")
+    if any(dim <= 0 for dim in weight.shape):
+        raise ValueError("FP8 quantization source dimensions must be positive")
+    if weight.is_cuda:
+        values = weight.detach()
+        if not bool(torch.isfinite(values).all()):
+            raise ValueError("FP8 quantization source contains NaN or infinity")
+        maximum = values.abs().amax(dim=1)
+        zero = maximum == 0
+        # A tensor divisor keeps this a true binary32 division; a Python scalar would
+        # be lowered to a multiplication by the reciprocal.
+        scales = maximum / torch.full_like(maximum, 448.0)
+        if bool((~zero & ~(scales > 0)).any()) or not bool(torch.isfinite(scales).all()):
+            raise ValueError("FP8 quantization row scale is not finite and positive")
+        scales = torch.where(zero, torch.ones_like(scales), scales)
+        normalized = values / scales[:, None]
+        codes = (
+            normalized.clamp(-448.0, 448.0).to(torch.float8_e4m3fn).view(torch.uint8)
+        )
+        codes[zero] = 0
+        return RowScaledFp8Words(codes, scales)
+    host = weight.detach().to(device="cpu", dtype=torch.float32).numpy()
+    if not np.isfinite(host).all():
+        raise ValueError("FP8 quantization source contains NaN or infinity")
+    max_abs = np.max(np.abs(host), axis=1)
+    zero_rows = max_abs == np.float32(0.0)
+    raw_scale = max_abs / _E4M3FN_MAX
+    if (~zero_rows & ~(raw_scale > np.float32(0.0))).any() or not np.isfinite(
+        raw_scale
+    ).all():
+        raise ValueError("FP8 quantization row scale is not finite and positive")
+    scale32 = np.where(zero_rows, np.float32(1.0), raw_scale).astype(np.float32)
+    normalized = (host / scale32[:, None]).astype(np.float32)
+    codes = _round_e4m3fn_rne(np.clip(normalized, -_E4M3FN_MAX, _E4M3FN_MAX))
+    codes[zero_rows] = 0
+    return RowScaledFp8Words(torch.from_numpy(codes.copy()), torch.from_numpy(scale32))
+
+
 def quantize_bf16_rows(weight: torch.Tensor) -> RowScaledFp8Words:
     """Quantize BF16 ``[N,K]`` values to E4M3FN codes and BF16 row scales."""
 

@@ -40,7 +40,8 @@ void require_shared(const artifact::ParameterReference& parameter,
 
 TextWeights bind_text(Bindings& b, const TextConfig& c) {
     TextWeights out;
-    out.token_embedding = b.direct("text/token_embedding", {c.vocabulary, c.hidden});
+    // The embedding is a gather table; the Embedding Op owns the supported table formats.
+    out.token_embedding = b.parameter("text/token_embedding", {c.vocabulary, c.hidden});
     out.output_head =
         b.parameter("text/output_head", {c.vocabulary, c.hidden}, {"text/final_hidden"});
     if (c.tie_word_embeddings)
