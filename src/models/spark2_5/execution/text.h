@@ -69,11 +69,21 @@ void sliding_attention(const TextExecutionView&, std::uint32_t sliding_layer, co
                        const Tensor& k, const Tensor& v, const TextInputs&, Tensor& out,
                        const AfterAttend& after_attend);
 
+// Which columns of `hidden` the caller reads after forward_text.
+//   AllColumns   every column holds the final-norm output.
+//   LastColumn   only the last token's column of a single-row traversal (t = T-1, b = 0) is
+//                defined; the other columns are unspecified. Attention state still advances for
+//                every live column. The Op may serve it by computing less, or by writing all
+//                columns, so the caller must not read the others.
+enum class TextOutput { AllColumns, LastColumn };
+
 // Embeds ids, runs every layer with a BF16 residual and writes the final-norm output into
 // `hidden`, contiguous BF16 [hidden, T*B] (the column of row b, token t is t + T*b). Attention
 // state is advanced for the live columns. `envelope` bounds the keys visible to full layers.
+// A `probe` observes complete layers, so a traversal with a probe writes every column.
 void forward_text(TextExecutionView, const TextInputs&, ops::CausalAttentionExecutionEnvelope,
-                  Tensor& hidden, AttentionProbe* probe = nullptr);
+                  Tensor& hidden, AttentionProbe* probe = nullptr,
+                  TextOutput output = TextOutput::AllColumns);
 
 // logits[:, c] = head * hidden[:, c]; hidden is BF16 [hidden, N] and logits BF16 [vocabulary, N].
 void output_logits(const Parameters&, const Tensor& hidden, Tensor& logits, MemoryArena&,

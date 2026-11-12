@@ -115,10 +115,11 @@ void RankProgramImpl::upload_inputs(std::uint32_t columns) {
 }
 
 void RankProgramImpl::run_text(std::int32_t tokens, std::int32_t batch,
-                               ops::CausalAttentionExecutionEnvelope envelope, Tensor hidden) {
+                               ops::CausalAttentionExecutionEnvelope envelope, Tensor hidden,
+                               TextOutput output) {
     TextExecutionView view{parameters, resources.workspace, cuda, resources.kv,
                            resources.states.window()};
-    forward_text(view, inputs(tokens, batch), envelope, hidden);
+    forward_text(view, inputs(tokens, batch), envelope, hidden, nullptr, output);
 }
 
 void RankProgramImpl::decode_round(std::int32_t batch,
@@ -128,7 +129,7 @@ void RankProgramImpl::decode_round(std::int32_t batch,
     const auto width  = dimension(parameters.config.hidden);
     auto hidden       = resources.packed(io.hidden, {width, batch});
     timer.begin_target(captured);
-    run_text(1, batch, envelope, hidden);
+    run_text(1, batch, envelope, hidden, TextOutput::AllColumns);
     ops::scatter(hidden, resources.states.sample_hidden(row(io.destination_offsets, batch)), cuda);
     timer.end_target(captured);
     if (head) project_head(hidden);
@@ -227,7 +228,11 @@ void RankProgramImpl::forward() {
     } else {
         f.timed_prefill = prefill_timer.has_value();
         if (f.timed_prefill) prefill_timer->start();
-        run_text(dimension(f.tokens), 1, {1, shape.max_context}, f.hidden);
+        // Scoring reads the hidden of every target column; the other flights keep only the last.
+        const auto output = std::holds_alternative<ScoreWork>(work.operation)
+                                ? TextOutput::AllColumns
+                                : TextOutput::LastColumn;
+        run_text(dimension(f.tokens), 1, {1, shape.max_context}, f.hidden, output);
         auto last = f.hidden.slice(1, f.tokens - 1, 1);
         auto kept = resources.states.sample_hidden(rows[0].states.at(kRank).destination);
         copy_bytes_async({kept.data, kept.bytes(), cuda.device()},

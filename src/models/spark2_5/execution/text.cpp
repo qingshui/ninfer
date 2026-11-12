@@ -143,6 +143,78 @@ void mlp_block(const TextExecutionView& view, std::uint32_t layer, const Extents
     ops::linear(product, mlp.down.weight, roots.branch, mlp.down.policy, work, view.execution);
 }
 
+// The last full-attention layer when only the last column of the traversal is consumed. Keys and
+// values still cover every column, so the projection, rotary embedding and cache append run at
+// full width; everything downstream of attention (query attend, gate, out_proj, MLP, final norm)
+// runs on the last column alone. Single row (B == 1) and T > 1. Reads `roots.normalized` and
+// `roots.residual` as the layer's input and writes the final-norm output of the last column.
+void last_layer_last_column(const TextExecutionView& view, std::uint32_t layer, const TextInputs& in,
+                            const Extents& e, ops::CausalAttentionExecutionEnvelope envelope,
+                            workspace::Roots& roots, Tensor& hidden) {
+    const auto& p      = view.parameters;
+    const auto& c      = p.config;
+    const auto& state  = c.layers[layer];
+    const auto& weight = p.layers[layer].attention;
+    auto& work         = view.workspace;
+    const auto cuda    = view.execution;
+    const auto d = kAttentionHeadDim, qh = kQueryHeads, kvh = kKvHeads;
+    const auto tail = e.columns - 1;
+    workspace::Roots last{roots.residual.slice(1, tail, 1), roots.normalized.slice(1, tail, 1),
+                          roots.branch.slice(1, tail, 1)};
+    {
+        auto scope = work.scope();
+        const auto query_width = dimension(c.query_width()), kv_width = dimension(c.kv_width());
+        auto query = work.alloc(DType::BF16, {query_width, e.columns});
+        auto key   = work.alloc(DType::BF16, {kv_width, e.columns});
+        auto value = work.alloc(DType::BF16, {kv_width, e.columns});
+        auto gate  = work.alloc(DType::BF16, {dimension(c.heads), 1});
+        auto out   = work.alloc(DType::BF16, {query_width, 1});
+        {
+            auto scratch = work.scope();
+            const std::array outputs{query, key, value};
+            ops::linear_split(roots.normalized, weight.qkv, outputs, work, cuda);
+        }
+        {
+            auto scratch = work.scope();
+            ops::linear(last.normalized, weight.gate.weight, gate, weight.gate.policy, work, cuda);
+        }
+        {
+            const auto& rope = c.rope(state.kind);
+            auto rq          = query.view({d, qh, e.columns});
+            auto rk          = key.view({d, kvh, e.columns});
+            ops::rope(in.positions.view({e.columns}), dimension(rope.rotary_dim), rope.theta, rq,
+                      rk, cuda);
+        }
+        const auto k = key.view({d, kvh, e.tokens, e.batch});
+        const auto v = value.view({d, kvh, e.tokens, e.batch});
+        ops::kv_cache_append_prefix(k, v, in.positions, in.valid_columns, in.kv_table_rows,
+                                    {0, std::uint32_t(e.tokens)},
+                                    view.cache.batch_layer_view(state.state_index), cuda);
+        // Dense width-1 attend: the call re-appends the last K/V row it already finds in the
+        // cache, then attends over positions [0, position of the last column].
+        const auto q1 = query.view({d, qh, e.tokens, e.batch}).slice(2, tail, 1);
+        const auto k1 = k.slice(2, tail, 1);
+        const auto v1 = v.slice(2, tail, 1);
+        auto o1       = out.view({d, qh, 1, 1});
+        {
+            auto scratch = work.scope();
+            ops::causal_softmax_attention(
+                q1, k1, v1, in.positions.slice(0, tail, 1), Tensor{}, in.kv_table_rows, kGeometry,
+                attention_scale(), view.cache.batch_layer_view(state.state_index), envelope, work,
+                o1, cuda);
+        }
+        ops::headwise_sigmoid_mul(gate, out, cuda);
+        auto scratch = work.scope();
+        ops::linear(out, weight.output.weight, last.branch, weight.output.policy, work, cuda);
+    }
+    ops::residual_add_rmsnorm(last.residual, last.branch, p.layers[layer].post_attention_norm,
+                              c.norm_epsilon, last.residual, last.normalized, cuda);
+    mlp_block(view, layer, Extents{1, 1, 1}, last);
+    auto target = hidden.view({dimension(c.hidden), e.columns}).slice(1, tail, 1);
+    ops::residual_add_rmsnorm(last.residual, last.branch, p.final_norm, c.norm_epsilon,
+                              last.residual, target, cuda);
+}
+
 } // namespace
 
 void sliding_attention(const TextExecutionView& view, std::uint32_t sliding_layer, const Tensor& q,
@@ -169,7 +241,7 @@ void sliding_attention(const TextExecutionView& view, std::uint32_t sliding_laye
 
 void forward_text(TextExecutionView view, const TextInputs& in,
                   ops::CausalAttentionExecutionEnvelope envelope, Tensor& hidden,
-                  AttentionProbe* probe) {
+                  AttentionProbe* probe, TextOutput output) {
     const auto& p   = view.parameters;
     const auto& c   = p.config;
     const auto e    = validate(c, in, hidden);
@@ -182,7 +254,12 @@ void forward_text(TextExecutionView view, const TextInputs& in,
     ops::embedding(in.ids.view({e.columns}), p.token_embedding, residual, cuda);
     ops::rmsnorm(residual, p.layers.front().input_norm, c.norm_epsilon, false, normalized, cuda);
     const auto count = static_cast<std::uint32_t>(p.layers.size());
-    for (std::uint32_t i = 0; i < count; ++i) {
+    // The narrow tail needs a dense single-row traversal, a full-attention last layer and no
+    // observer; otherwise every column is written, which also satisfies LastColumn.
+    const bool narrow = output == TextOutput::LastColumn && !probe && e.batch == 1 &&
+                        e.tokens > 1 && c.layers[count - 1].kind == LayerKind::Full;
+    const auto wide = narrow ? count - 1 : count;
+    for (std::uint32_t i = 0; i < wide; ++i) {
         const auto& block = p.layers[i];
         attention_block(view, i, in, e, envelope, roots, probe);
         ops::residual_add_rmsnorm(residual, roots.branch, block.post_attention_norm, c.norm_epsilon,
@@ -194,6 +271,7 @@ void forward_text(TextExecutionView view, const TextInputs& in,
                                   last ? p.final_norm : p.layers[i + 1].input_norm, c.norm_epsilon,
                                   residual, target, cuda);
     }
+    if (narrow) last_layer_last_column(view, count - 1, in, e, envelope, roots, hidden);
 }
 
 void output_logits(const Parameters& p, const Tensor& hidden, Tensor& logits, MemoryArena& work,

@@ -85,8 +85,9 @@ public:
     void upload_inputs(std::uint32_t columns);
     void upload_sampling();
     // One traversal of the batch bound to the persistent inputs, then the hidden hand-off.
+    // `output` states which hidden columns the caller reads afterwards.
     void run_text(std::int32_t tokens, std::int32_t batch,
-                  ops::CausalAttentionExecutionEnvelope, Tensor hidden);
+                  ops::CausalAttentionExecutionEnvelope, Tensor hidden, TextOutput output);
     // A decode round of `batch` single-token rows: traversal, hidden hand-off and head. With
     // `captured` the stream timers are recorded as graph nodes.
     void decode_round(std::int32_t batch, ops::CausalAttentionExecutionEnvelope, bool captured,
