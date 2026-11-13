@@ -52,26 +52,34 @@ TextInputs RankProgramImpl::inputs(std::int32_t tokens, std::int32_t batch) {
 void RankProgramImpl::prepare_inputs(std::span<const WorkRow> rows, std::uint32_t width) {
     auto& f        = *compute;
     const auto& io = resources.plan.persistent.buffers;
+    // Resolve each ingress region once; the per-token loop below only touches raw pointers.
     const auto i32 = [&](const TensorRegion& r) {
         return static_cast<std::int32_t*>(host_tensor(r).data);
     };
-    const auto i64 = [&](const TensorRegion& r) {
-        return static_cast<std::int64_t*>(host_tensor(r).data);
-    };
+    auto* const ids_out       = i32(io.ids);
+    auto* const positions_out = i32(io.positions);
+    auto* const valid_columns = i32(io.valid_columns);
+    auto* const kv_rows       = i32(io.kv_rows);
+    auto* const sampling_pos  = i32(io.sampling_positions);
+    auto* const count_slots   = i32(io.count_slots);
+    auto* const destinations  = static_cast<std::int64_t*>(host_tensor(io.destination_offsets).data);
     f.visible = 1;
     for (std::size_t b = 0; b < rows.size(); ++b) {
         const auto& r      = rows[b];
         const auto count   = r.ids.size();
-        i32(io.valid_columns)[b]       = count;
-        i32(io.kv_rows)[b]             = r.main_table.index;
-        i64(io.destination_offsets)[b] = r.states.at(kRank).destination;
-        i32(io.sampling_positions)[b]  = r.sampling_position;
-        i32(io.count_slots)[b]         = r.member.residency.lane.value;
-        for (std::uint32_t t = 0; t < width; ++t) {
-            i32(io.ids)[b * width + t] = t < count ? r.ids[t] : 0;
-            i32(io.positions)[b * width + t] =
-                r.main_frontier + std::min<std::size_t>(t, count ? count - 1 : 0);
-        }
+        valid_columns[b]   = count;
+        kv_rows[b]         = r.main_table.index;
+        destinations[b]    = r.states.at(kRank).destination;
+        sampling_pos[b]    = r.sampling_position;
+        count_slots[b]     = r.member.residency.lane.value;
+        auto* const ids_row = ids_out + b * width;
+        auto* const pos_row = positions_out + b * width;
+        const auto valid    = std::min<std::size_t>(count, width);
+        std::copy_n(r.ids.data(), valid, ids_row);
+        std::fill(ids_row + valid, ids_row + width, 0);
+        const auto last = count ? count - 1 : 0;
+        for (std::uint32_t t = 0; t < width; ++t)
+            pos_row[t] = static_cast<std::int32_t>(r.main_frontier + std::min<std::size_t>(t, last));
         f.visible = std::max<std::uint32_t>(f.visible, r.main_frontier + count);
     }
     if (io.sampling) {

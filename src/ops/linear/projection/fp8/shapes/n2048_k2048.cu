@@ -3,11 +3,13 @@
 
 namespace ninfer::ops::detail {
 namespace {
-using Geometry  = Fp8Geometry<2048, 2048>;
-using ScaleType = float;
-using Gemv      = Fp8A16GemvSchedule<4, 2, 8, 4, Fp8CodeCache::Default, 2, 4>;
-using Tma64x128 = Fp8A8TmaMmaSchedule<64, 128, 128, 2, 4, 2, 1>;
-using Tma64x256 = Fp8A8TmaMmaSchedule<64, 256, 128, 2, 4, 2, 1>;
+using Geometry   = Fp8Geometry<2048, 2048>;
+using ScaleType  = float;
+using Gemv       = Fp8A16GemvSchedule<4, 2, 8, 4, Fp8CodeCache::Default, 2, 4>;
+using Tma64x128  = Fp8A8TmaMmaSchedule<64, 128, 128, 2, 4, 2, 1>;
+using Tma128x128 = Fp8A8TmaMmaSchedule<128, 128, 128, 4, 4, 2, 1, Fp8MmaRaster::RowFast>;
+// Full waves write directly; an underfilled final wave (<= 85 tiles) is split in K.
+using PrefillSplit = Fp8A8TmaSplitKSchedule<Tma128x128, 170, 16, 16>;
 
 template <class Schedule>
 void sliced(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t stream) {
@@ -40,11 +42,16 @@ void launch_a8(const Tensor& x, const Weight& weight, Tensor& out, Fp8A8Workspac
                                                                     stream);
     if (x.ne[1] <= 128)
         return launch_fp8_a8_tma<Geometry, Tma64x128, ScaleType>(x, weight, out, scratch, stream);
-    launch_fp8_a8_tma<Geometry, Tma64x256, ScaleType>(x, weight, out, scratch, stream);
+    launch_fp8_a8_tma<Geometry, PrefillSplit, ScaleType>(x, weight, out, scratch, stream);
 }
 
 bool uses_a8(std::int32_t, std::int32_t max_tokens) { return max_tokens >= 17; }
+
+std::size_t partial_capacity_bytes(std::int32_t max_tokens) {
+    return max_tokens > 128 ? PrefillSplit::kPartialBytes : 0;
+}
 } // namespace
 
-const Fp8LinearShape kFp8RowFp32N2048K2048{2048, 2048, launch_a16, launch_a8, uses_a8};
+const Fp8LinearShape kFp8RowFp32N2048K2048{2048,      2048,    launch_a16,
+                                           launch_a8, uses_a8, partial_capacity_bytes};
 } // namespace ninfer::ops::detail

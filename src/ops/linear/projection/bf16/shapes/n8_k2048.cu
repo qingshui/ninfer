@@ -11,8 +11,8 @@ using S0         = Bf16ScheduleInstance<
                         Bf16PhaseOrder::Sequential, 1, 1, 1, 4>,
     kK>;
 using S1 = Bf16ScheduleInstance<
-    Bf16A16SimtSchedule<4, 4, 8, 8, 4, 2, Bf16SimtActivationAccess::DirectStream,
-                        Bf16WeightCache::Default, Bf16PhaseOrder::Sequential, 1, 1, 1, 2, 4>,
+    Bf16A16SimtSchedule<8, 8, 4, 8, 4, 1, Bf16SimtActivationAccess::DirectStream,
+                        Bf16WeightCache::Default, Bf16PhaseOrder::Sequential, 1, 1, 1, 2, 1>,
     kK>;
 } // namespace
 
