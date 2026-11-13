@@ -240,6 +240,9 @@ void launch_route(const Tensor& x, const Weight& control, const ExpertRoutes& ro
     if (control.k == 2560) {
         launch_route_shape<SwiGLUH2560I640E512K10>(x, control, routes, shared, plan, storage, hints,
                                                    execution);
+    } else if (control.k == 3072) {
+        launch_route_shape<SwiGLUH3072I1024E256K8>(x, control, routes, shared, plan, storage, hints,
+                                                   execution);
     } else {
         launch_route_shape<SwiGLUH2048I512E256K8>(x, control, routes, shared, plan, storage, hints,
                                                   execution);

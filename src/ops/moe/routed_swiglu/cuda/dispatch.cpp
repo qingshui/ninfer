@@ -30,6 +30,13 @@ const ShapePolicy& shape_dispatch(const RoutedSwiGLUProfile& profile) {
     case QType::FP8_E4M3FN_BLOCK128X128_BF16:
         return fp8_h2560_i640_e512_k10();
     case QType::NVFP4:
+        if (profile.ffn.hidden == 3072) {
+#if !NINFER_TARGET_SPARK
+            return nvfp4_h3072_i1024_e256_k8();
+#else
+            throw std::invalid_argument("unsupported MoE expert geometry on this target");
+#endif
+        }
         return nvfp4_h2560_i640_e512_k10();
     case QType::Q5_G64_FP16:
         return q4_q5_h2048_i512_e256_k8();

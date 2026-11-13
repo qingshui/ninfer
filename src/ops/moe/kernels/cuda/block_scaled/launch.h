@@ -22,6 +22,9 @@ struct Plan {
     // belonging to one expert. The entry policy owns the maximum slice size.
     QType format     = QType::NVFP4;
     int intermediate = kIntermediate;
+    // Geometry selects the compiled shape instance; defaults keep the registered
+    // 2560/640/512/10 profile. Shape policies set all four fields together.
+    int hidden = kHidden, experts = kExperts, top_k = kTopK;
     int gate_columns = 0, down_columns = 0;
     bool vector                = false;
     bool atomic_output         = false;

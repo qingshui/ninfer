@@ -14,10 +14,11 @@ __device__ __forceinline__ bool selected(ExpertSubsetKind kind, const int* mask,
     return kind == ExpertSubsetKind::All || mask[e] == (kind == ExpertSubsetKind::MaskOnes);
 }
 
+template <class Shape>
 __global__ void count_assignments(const int* ids, ExpertSubsetKind kind, const int* mask,
                                   int* counts, int assignments) {
-    __shared__ int histogram[kExperts];
-    for (int e = threadIdx.x; e < kExperts; e += blockDim.x) { histogram[e] = 0; }
+    __shared__ int histogram[Shape::experts];
+    for (int e = threadIdx.x; e < Shape::experts; e += blockDim.x) { histogram[e] = 0; }
     __syncthreads();
     const int a = blockIdx.x * blockDim.x + threadIdx.x;
     if (a < assignments) {
@@ -25,20 +26,21 @@ __global__ void count_assignments(const int* ids, ExpertSubsetKind kind, const i
         if (selected(kind, mask, e)) { atomicAdd(histogram + e, 1); }
     }
     __syncthreads();
-    for (int e = threadIdx.x; e < kExperts; e += blockDim.x) {
+    for (int e = threadIdx.x; e < Shape::experts; e += blockDim.x) {
         if (histogram[e]) { atomicAdd(counts + e, histogram[e]); }
     }
 }
 
+template <class Shape>
 __global__ void scan_assignments(Groups g, int columns) {
-    __shared__ int scan[kExperts];
+    __shared__ int scan[Shape::experts];
     const int e     = threadIdx.x;
     const int count = g.counts[e];
-    publish_load_range<kExperts>(g.load_range, count);
+    publish_load_range<Shape::experts>(g.load_range, count);
     scan[e] = count;
     __syncthreads();
 #pragma unroll
-    for (int delta = 1; delta < kExperts; delta *= 2) {
+    for (int delta = 1; delta < Shape::experts; delta *= 2) {
         const int preceding = e >= delta ? scan[e - delta] : 0;
         __syncthreads();
         scan[e] += preceding;
@@ -46,13 +48,13 @@ __global__ void scan_assignments(Groups g, int columns) {
     }
     g.offsets[e] = e ? scan[e - 1] : 0;
     g.cursors[e] = g.offsets[e];
-    if (e == kExperts - 1) { g.offsets[kExperts] = scan[e]; }
+    if (e == Shape::experts - 1) { g.offsets[Shape::experts] = scan[e]; }
     __syncthreads();
     const int jobs = (count + columns - 1) / columns;
     scan[e]        = jobs;
     __syncthreads();
 #pragma unroll
-    for (int delta = 1; delta < kExperts; delta *= 2) {
+    for (int delta = 1; delta < Shape::experts; delta *= 2) {
         const int preceding = e >= delta ? scan[e - delta] : 0;
         __syncthreads();
         scan[e] += preceding;
@@ -63,14 +65,17 @@ __global__ void scan_assignments(Groups g, int columns) {
         g.job_experts[first + j] = e;
         g.job_columns[first + j] = j * columns;
     }
-    if (e == kExperts - 1) { *g.jobs = scan[e]; }
+    if (e == Shape::experts - 1) { *g.jobs = scan[e]; }
 }
 
+template <class Shape>
 __device__ __forceinline__ bool fully_covered_groups(Groups groups, int assignments) {
-    const int tokens = assignments / kTopK;
-    return groups.load_range && groups.load_range[0] == tokens && groups.load_range[1] == tokens;
+    const int tokens = assignments / Shape::top_k;
+    return groups.load_range && groups.load_range[0] == tokens &&
+           groups.load_range[1] == tokens;
 }
 
+template <class Shape>
 __global__ void index_assignments(const int* ids, ExpertSubsetKind kind, const int* mask, Groups g,
                                   int assignments) {
     const int a = blockIdx.x * blockDim.x + threadIdx.x;
@@ -80,29 +85,31 @@ __global__ void index_assignments(const int* ids, ExpertSubsetKind kind, const i
         if (g.inverse) { g.inverse[a] = -1; }
         return;
     }
-    const int packed      = fully_covered_groups(g, assignments) ? g.offsets[expert] + a / kTopK
-                                                                 : atomicAdd(g.cursors + expert, 1);
+    const int packed = fully_covered_groups<Shape>(g, assignments)
+                           ? g.offsets[expert] + a / Shape::top_k
+                           : atomicAdd(g.cursors + expert, 1);
     g.assignments[packed] = a;
     if (g.inverse) { g.inverse[a] = packed; }
 }
 
+template <class Shape>
 __global__ void group_small(const int* ids, ExpertSubsetKind kind, const int* mask, Groups g,
                             int assignments, int columns) {
-    __shared__ int counts[kExperts], ranks[640], scan[kExperts];
+    __shared__ int counts[Shape::experts], ranks[Shape::top_k * 64], scan[Shape::experts];
     const int tid = threadIdx.x;
     counts[tid]   = 0;
     __syncthreads();
-    for (int a = tid; a < assignments; a += kExperts) {
+    for (int a = tid; a < assignments; a += Shape::experts) {
         const int e = ids[a];
         ranks[a]    = selected(kind, mask, e) ? atomicAdd(counts + e, 1) : -1;
     }
     __syncthreads();
     const int count = counts[tid];
-    publish_load_range<kExperts>(g.load_range, count);
+    publish_load_range<Shape::experts>(g.load_range, count);
     scan[tid] = count;
     __syncthreads();
 #pragma unroll
-    for (int delta = 1; delta < kExperts; delta *= 2) {
+    for (int delta = 1; delta < Shape::experts; delta *= 2) {
         const int preceding = tid >= delta ? scan[tid - delta] : 0;
         __syncthreads();
         scan[tid] += preceding;
@@ -110,13 +117,13 @@ __global__ void group_small(const int* ids, ExpertSubsetKind kind, const int* ma
     }
     const int begin = tid ? scan[tid - 1] : 0;
     g.offsets[tid]  = begin;
-    if (tid == kExperts - 1) { g.offsets[kExperts] = scan[tid]; }
+    if (tid == Shape::experts - 1) { g.offsets[Shape::experts] = scan[tid]; }
     const int jobs = (count + columns - 1) / columns;
     __syncthreads();
     scan[tid] = jobs;
     __syncthreads();
 #pragma unroll
-    for (int delta = 1; delta < kExperts; delta *= 2) {
+    for (int delta = 1; delta < Shape::experts; delta *= 2) {
         const int preceding = tid >= delta ? scan[tid - delta] : 0;
         __syncthreads();
         scan[tid] += preceding;
@@ -127,22 +134,22 @@ __global__ void group_small(const int* ids, ExpertSubsetKind kind, const int* ma
         g.job_experts[first + j] = tid;
         g.job_columns[first + j] = j * columns;
     }
-    if (tid == kExperts - 1) { *g.jobs = scan[tid]; }
-    const bool ordered = fully_covered_groups(g, assignments);
-    for (int a = tid; a < assignments; a += kExperts) {
-        const int packed =
-            ranks[a] >= 0 ? g.offsets[ids[a]] + (ordered ? a / kTopK : ranks[a]) : -1;
+    if (tid == Shape::experts - 1) { *g.jobs = scan[tid]; }
+    const bool ordered = fully_covered_groups<Shape>(g, assignments);
+    for (int a = tid; a < assignments; a += Shape::experts) {
+        const int packed = ranks[a] >= 0 ? g.offsets[ids[a]] + (ordered ? a / Shape::top_k : ranks[a])
+                                         : -1;
         if (g.inverse) { g.inverse[a] = packed; }
         if (packed >= 0) { g.assignments[packed] = a; }
     }
 }
 
-template <class Output>
+template <class Shape, class Output>
 __global__ void reduce(Storage storage, const float* coefficients, Output output, int elements) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < elements) {
-        output.store(i, output.initial(i) +
-                            routed_value(i / kHidden, i % kHidden, storage, coefficients));
+        output.store(i, output.initial(i) + routed_value<Shape>(i / Shape::hidden, i % Shape::hidden,
+                                                                storage, coefficients));
     }
 }
 
@@ -225,10 +232,11 @@ void launch_column_jobs(Groups groups, int tokens, int columns, bool preserve_ba
     CUDA_CHECK(cudaGetLastError());
 }
 
-void launch(const Tensor& x, const CudaSwiGLUExperts& experts, const ExpertRoutes& routes,
-            ExpertSubset subset, const ScaledSwiGLUTerm* shared, MoeEpilogue mode,
-            Tensor& destination, const Plan& plan, const Storage& s, CudaExecutionView execution,
-            Preparation prepared) {
+template <class Shape>
+void launch_shape(const Tensor& x, const CudaSwiGLUExperts& experts, const ExpertRoutes& routes,
+                  ExpertSubset subset, const ScaledSwiGLUTerm* shared, MoeEpilogue mode,
+                  Tensor& destination, const Plan& plan, const Storage& s,
+                  CudaExecutionView execution, Preparation prepared) {
     const auto stream = execution.stream();
     if (subset.kind != ExpertSubsetKind::None && plan.vector) {
         if (plan.format == QType::NVFP4) {
@@ -240,7 +248,7 @@ void launch(const Tensor& x, const CudaSwiGLUExperts& experts, const ExpertRoute
         }
         if (!shared) { return; }
     } else if (subset.kind != ExpertSubsetKind::None) {
-        const int assignments = x.ne[1] * kTopK;
+        const int assignments = x.ne[1] * Shape::top_k;
         const auto* ids       = static_cast<const int*>(routes.ids.data);
         const auto* mask      = static_cast<const int*>(subset.mask.data);
         if (plan.format == QType::NVFP4) {
@@ -249,19 +257,20 @@ void launch(const Tensor& x, const CudaSwiGLUExperts& experts, const ExpertRoute
             fp8::launch_input(x, experts, s, execution, !prepared.route_counts);
         }
         if (plan.single_block_grouping) {
-            group_small<<<1, kExperts, 0, stream>>>(ids, subset.kind, mask, s.groups, assignments,
-                                                    plan.job_columns());
+            group_small<Shape><<<1, Shape::experts, 0, stream>>>(ids, subset.kind, mask, s.groups,
+                                                                assignments, plan.job_columns());
             CUDA_CHECK(cudaGetLastError());
         } else {
             if (!prepared.route_counts) {
-                count_assignments<<<(assignments + 255) / 256, 256, 0, stream>>>(
+                count_assignments<Shape><<<(assignments + 255) / 256, 256, 0, stream>>>(
                     ids, subset.kind, mask, s.groups.counts, assignments);
                 CUDA_CHECK(cudaGetLastError());
             }
-            scan_assignments<<<1, kExperts, 0, stream>>>(s.groups, plan.job_columns());
+            scan_assignments<Shape><<<1, Shape::experts, 0, stream>>>(s.groups,
+                                                                     plan.job_columns());
             CUDA_CHECK(cudaGetLastError());
-            index_assignments<<<(assignments + 255) / 256, 256, 0, stream>>>(ids, subset.kind, mask,
-                                                                             s.groups, assignments);
+            index_assignments<Shape><<<(assignments + 255) / 256, 256, 0, stream>>>(
+                ids, subset.kind, mask, s.groups, assignments);
             CUDA_CHECK(cudaGetLastError());
         }
         if (plan.format == QType::NVFP4) {
@@ -275,11 +284,24 @@ void launch(const Tensor& x, const CudaSwiGLUExperts& experts, const ExpertRoute
                       prepared.shared_activation);
     } else {
         with_output(destination, mode, [&](auto output) {
-            const int elements = x.ne[1] * kHidden;
-            reduce<<<(elements + 255) / 256, 256, 0, stream>>>(
+            const int elements = x.ne[1] * Shape::hidden;
+            reduce<Shape><<<(elements + 255) / 256, 256, 0, stream>>>(
                 s, static_cast<const float*>(routes.coefficients.data), output, elements);
         });
         CUDA_CHECK(cudaGetLastError());
     }
+}
+
+void launch(const Tensor& x, const CudaSwiGLUExperts& experts, const ExpertRoutes& routes,
+            ExpertSubset subset, const ScaledSwiGLUTerm* shared, MoeEpilogue mode,
+            Tensor& destination, const Plan& plan, const Storage& s, CudaExecutionView execution,
+            Preparation prepared) {
+    if (plan.hidden == 3072) {
+        launch_shape<SwiGLUH3072I1024E256K8>(x, experts, routes, subset, shared, mode,
+                                              destination, plan, s, execution, prepared);
+        return;
+    }
+    launch_shape<SwiGLUH2560I640E512K10>(x, experts, routes, subset, shared, mode, destination,
+                                         plan, s, execution, prepared);
 }
 } // namespace ninfer::ops::detail::moe_cuda::block_scaled

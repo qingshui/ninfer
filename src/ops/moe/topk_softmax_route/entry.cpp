@@ -8,7 +8,8 @@ namespace ninfer::ops {
 namespace {
 detail::moe_cuda::routing::RouterPlan select(const RouteProfile& profile, int tokens) {
     return profile.hidden == 2560 ? detail::moe_route::select_h2560_e512_k10(tokens)
-                                  : detail::moe_route::select_h2048_e256_k8(tokens);
+           : profile.hidden == 3072 ? detail::moe_route::select_h3072_e256_k8(tokens)
+                                    : detail::moe_route::select_h2048_e256_k8(tokens);
 }
 
 std::size_t route_bytes(const RouteProfile& profile, int tokens) {

@@ -13,6 +13,7 @@ struct SwiGLUShape {
 
 using SwiGLUH2048I512E256K8  = SwiGLUShape<2048, 512, 256, 8>;
 using SwiGLUH2560I640E512K10 = SwiGLUShape<2560, 640, 512, 10>;
+using SwiGLUH3072I1024E256K8 = SwiGLUShape<3072, 1024, 256, 8>;
 
 enum class ExpertImplementation { GroupwiseInt, BlockScaled };
 

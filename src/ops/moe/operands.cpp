@@ -4,6 +4,7 @@
 #include <array>
 #include <cmath>
 #include <stdexcept>
+#include <string>
 
 namespace ninfer::ops::detail {
 namespace {
@@ -25,9 +26,15 @@ MatrixBytes matrix_bytes(QType type, QuantLayout layout, int rows, int columns) 
 } // namespace
 
 void validate_route_profile(const RouteProfile& p) {
-    require((p.hidden == 2048 && p.experts == 256 && p.top_k == 8) ||
-                (p.hidden == 2560 && p.experts == 512 && p.top_k == 10),
-            "topk softmax route: unsupported geometry");
+    const bool registered = (p.hidden == 2048 && p.experts == 256 && p.top_k == 8) ||
+                            (p.hidden == 2560 && p.experts == 512 && p.top_k == 10) ||
+                            (p.hidden == 3072 && p.experts == 256 && p.top_k == 8);
+    if (!registered) {
+        throw std::invalid_argument("topk softmax route: unsupported geometry hidden=" +
+                                    std::to_string(p.hidden) + " experts=" +
+                                    std::to_string(p.experts) + " top_k=" +
+                                    std::to_string(p.top_k));
+    }
 }
 
 void validate_expert_profile(const RoutedSwiGLUProfile& p) {
@@ -59,6 +66,21 @@ void validate_expert_profile(const RoutedSwiGLUProfile& p) {
     require(!p.ffn.clamp_limit, "routed SwiGLU: clamped profile is not registered");
     validate_route_profile({p.ffn.hidden, p.experts, p.top_k});
     const auto& f = p.ffn;
+    if (f.hidden == 3072) {
+        const bool nvfp4 = f.gate_up_type == QType::NVFP4 &&
+                           f.gate_up_layout == QuantLayout::BlockScaleK16M128x4 &&
+                           f.gate_up_policy == LinearPolicy::AllowA4;
+        if (!(f.intermediate == 1024 && p.experts == 256 && nvfp4 &&
+              f.down_type == f.gate_up_type && f.down_layout == f.gate_up_layout &&
+              f.down_policy == f.gate_up_policy)) {
+            throw std::invalid_argument("routed SwiGLU: unsupported NVFP4 profile hidden=" +
+                                        std::to_string(f.hidden) + " intermediate=" +
+                                        std::to_string(f.intermediate) + " experts=" +
+                                        std::to_string(p.experts) + " top_k=" +
+                                        std::to_string(p.top_k));
+        }
+        return;
+    }
     if (f.hidden == 2560) {
         const bool nvfp4 = f.gate_up_type == QType::NVFP4 &&
                            f.gate_up_layout == QuantLayout::BlockScaleK16M128x4 &&
@@ -90,6 +112,26 @@ void validate_expert_profile(const RoutedSwiGLUProfile& p) {
 
 void validate_shared_profile(const SwiGLUProfile& p, int hidden) {
     require(!p.clamp_limit, "shared SwiGLU: clamped profile is not registered");
+    if (hidden == 3072) {
+        const bool nvfp4 = p.intermediate == 1024 && p.gate_up_type == QType::NVFP4 &&
+                           p.down_type == QType::NVFP4 &&
+                           p.gate_up_layout == QuantLayout::BlockScaleK16M128x4 &&
+                           p.down_layout == QuantLayout::BlockScaleK16M128x4 &&
+                           p.gate_up_policy == LinearPolicy::AllowA4 &&
+                           p.down_policy == LinearPolicy::AllowA4;
+        const bool bf16 = p.intermediate == 1024 && p.gate_up_type == QType::BF16 &&
+                          p.down_type == QType::BF16 &&
+                          p.gate_up_layout == QuantLayout::Contiguous &&
+                          p.down_layout == QuantLayout::Contiguous &&
+                          p.gate_up_policy == LinearPolicy::A16Only &&
+                          p.down_policy == LinearPolicy::A16Only;
+        if (!(p.hidden == hidden && (nvfp4 || bf16))) {
+            throw std::invalid_argument("shared SwiGLU: unsupported profile hidden=" +
+                                        std::to_string(p.hidden) + " intermediate=" +
+                                        std::to_string(p.intermediate));
+        }
+        return;
+    }
     if (hidden == 2560) {
         require(p.hidden == hidden && (p.intermediate == 320 || p.intermediate == 640) &&
                     p.gate_up_type == QType::BF16 && p.down_type == QType::BF16 &&
