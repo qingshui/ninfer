@@ -16,6 +16,20 @@ __device__ __forceinline__ float2 decode_nvfp4_e2m1x2(std::uint8_t storage) {
     return static_cast<float2>(value);
 }
 
+// Single E2M1 nibble: magnitude {0, 0.5, 1, 1.5, 2, 3, 4, 6} with bit 3 as sign.
+__device__ __forceinline__ float decode_e2m1(std::uint32_t nibble) {
+    constexpr float kMagnitudes[8] = {0.0F, 0.5F, 1.0F, 1.5F, 2.0F, 3.0F, 4.0F, 6.0F};
+    const float magnitude          = kMagnitudes[nibble & 7];
+    return (nibble & 8) ? -magnitude : magnitude;
+}
+
+// Unsigned E4M3 (bias 7, three mantissa bits): the NVFP4 block scale format.
+__device__ __forceinline__ float decode_ue4m3(std::uint8_t storage) {
+    const int e = storage >> 3, m = storage & 7;
+    if (e == 0) return static_cast<float>(m) * 0x1p-9F;
+    return (1.0F + static_cast<float>(m) * 0.125F) * exp2f(static_cast<float>(e - 7));
+}
+
 __device__ __forceinline__ unsigned nvfp4_pair_bf16_scaled(std::uint8_t code, unsigned scale_bits) {
 #if __CUDACC_VER_MAJOR__ > 13 || (__CUDACC_VER_MAJOR__ == 13 && __CUDACC_VER_MINOR__ >= 2)
     // PTX 9.2 exposes native pair widening. E2M1 times a finite E4M3 scale needs

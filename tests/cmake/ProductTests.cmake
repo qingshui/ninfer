@@ -74,6 +74,14 @@ if(TARGET ninfer-serve)
     SKIP_RETURN_CODE 77 RUN_SERIAL TRUE LABELS "gpu;real" TIMEOUT 150)
 endif()
 
+# Product binaries must start on their own build target and exit 0 for --help.
+if(TARGET ninfer AND TARGET ninfer-serve AND TARGET ninfer-perplexity)
+  add_test(NAME ninfer_apps_help_test
+    COMMAND ${Python3_EXECUTABLE} -B "${CMAKE_CURRENT_LIST_DIR}/../test_apps_help.py"
+      $<TARGET_FILE:ninfer> $<TARGET_FILE:ninfer-serve> $<TARGET_FILE:ninfer-perplexity>)
+  set_tests_properties(ninfer_apps_help_test PROPERTIES TIMEOUT 120)
+endif()
+
 ninfer_add_test(ninfer_tool_streaming_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_tool_streaming.cpp"
   LIBRARIES ninfer_serve ninfer_model_execution ninfer::json)
