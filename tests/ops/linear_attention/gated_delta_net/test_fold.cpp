@@ -13,6 +13,7 @@
 #include "core/linear_attention_state.h"
 #include "core/weight.h"
 #include "ops/input_projection_test_common.h"
+#include "ops/linear_attention/gated_delta_net/replay/launch.h"
 #include "ops/op_tester.h"
 #include "ops/state_fixture.h"
 
@@ -873,12 +874,38 @@ int run_record_fold_rounds(bool q8 = false, bool local = false) {
 
 int main(int argc, char** argv) {
     OpSuite suite;
+    // The 122B record geometry routes to its own fold instance; unregistered head counts
+    // are rejected instead of falling back to a nearest-shape instance.
+    suite.add("gdn_fold/routing", [] {
+        GdnReplayRecordSpec spec{};
+        spec.layers          = 36;
+        spec.record_capacity = kRecordCapacity;
+        spec.width           = 16;
+        spec.conv_channels   = 12288;
+        spec.qk_heads        = 16;
+        spec.value_heads     = 64;
+        spec.key_dim         = kStateDim;
+        spec.value_dim       = kStateDim;
+        namespace replay     = ninfer::ops::detail::gated_delta_net;
+        int failed           = 0;
+        if (replay::select_fold_geometry(spec) != replay::FoldGeometryId::Layers36Heads64) {
+            std::cerr << "gdn fold routing missed the 122B geometry\n";
+            ++failed;
+        }
+        spec.value_heads = 80;
+        try {
+            (void)replay::select_fold_geometry(spec);
+        } catch (const std::invalid_argument&) { return failed; }
+        std::cerr << "gdn fold routing accepted unregistered heads (16,80)\n";
+        return failed + 1;
+    });
     for (int prefix : {3, 11})
         suite.add("gdn_fold/device/l36/h24/w16/a" + std::to_string(prefix), [=] {
             return run_case({36, 24, 5120}, 16, 1, {prefix}, 5101U, true, true, true);
         });
     for (const FoldProfile profile :
-         {FoldProfile{48, 48, 10240}, {30, 32, 8192}, {36, 48, 10240}, {36, 24, 5120}})
+         {FoldProfile{48, 48, 10240}, {30, 32, 8192}, {36, 48, 10240}, {36, 24, 5120},
+          {36, 64, 12288}})
         for (bool captured : {false, true}) {
             const auto id = "gdn_fold/device/l" + std::to_string(profile.layers) + "/h" +
                             std::to_string(profile.value_heads) + (captured ? "/graph" : "/eager");
@@ -926,7 +953,12 @@ int main(int argc, char** argv) {
     add({30, 32, 8192}, 2, 3, {0, 1, 2}, 1889U);
     add({30, 32, 8192}, 2, 1, {1}, 1891U, false, false, 1);
     add({36, 48, 10240}, 5, 3, {0, 1, 5}, 1893U, false, false, 3);
-    for (const FoldProfile profile : {FoldProfile{36, 48, 10240}, {36, 24, 5120}})
+    add({36, 64, 12288}, 2, 1, {2}, 1901U, true);
+    add({36, 64, 12288}, 5, 4, {0, 1, 3, 5}, 1911U);
+    add({36, 64, 12288}, 16, 8, {0, 1, 2, 3, 4, 5, 6, 7}, 1921U, true);
+    add({36, 64, 12288}, 16, 1, {16}, 1931U, true);
+    add({36, 64, 12288}, 16, 1, {0}, 1941U, true);
+    for (const FoldProfile profile : {FoldProfile{36, 48, 10240}, {36, 24, 5120}, {36, 64, 12288}})
         suite.add("gdn_fold/device/l36/h" + std::to_string(profile.value_heads) + "/sparse/graph",
                   [=] { return run_case(profile, 16, 4, {0, 0, 0, 16}, 5200U, true, true, true); });
     suite.add("gdn_fold/device/l36/h48/zero/graph", [] {

@@ -85,7 +85,7 @@ struct GdnRecurrenceRecords {
  * q/k are BF16 [128,Hq,T,B], v/out BF16 [128,Hv,T,B], and g/beta FP32 [Hv,T,B].
  * initial_state selects dense FP32 [128,128,Hv] fields using device I64 [B] record byte offsets.
  * Every selected field is 16-byte aligned and in bounds. B=1..8, T=2..16; (Hq,Hv) is one of
- * (16,32), (16,48), (8,24). scale is 1/sqrt(128).
+ * (16,32), (16,48), (16,64), (8,24). scale is 1/sqrt(128).
  *
  * valid_columns is empty for dense rows or device I32 [B] with values in [1,T]. Each valid
  * transition copies raw k, v and {g,beta} into the corresponding record fields. Invalid record

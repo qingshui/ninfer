@@ -42,7 +42,8 @@ inline constexpr std::array kProfiles{
 #if NINFER_TARGET_SPARK
     Profile{24, 2560},
 #endif
-    Profile{48, 5120}, Profile{48, 5120, Storage::Pair}, Profile{32, 2048}, Profile{48, 2560}};
+    Profile{48, 5120}, Profile{48, 5120, Storage::Pair}, Profile{32, 2048}, Profile{48, 2560},
+    Profile{64, 3072}};
 
 struct Case {
     int columns;

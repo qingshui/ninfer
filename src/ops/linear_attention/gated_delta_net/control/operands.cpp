@@ -56,7 +56,8 @@ Geometry describe_profile(const ProjectionProfile& weights) {
     const auto& a = weights.first;
     require(valid_linear_policy(a.policy), "invalid activation permission");
     if (!weights.second) {
-        bool supported = (a.n == 96 && (a.k == 5120 || a.k == 2560)) || (a.n == 64 && a.k == 2048);
+        bool supported = (a.n == 96 && (a.k == 5120 || a.k == 2560)) || (a.n == 64 && a.k == 2048) ||
+                          (a.n == 128 && a.k == 3072);
 #if NINFER_TARGET_SPARK
         supported = supported || (a.n == 48 && a.k == 2560);
 #endif

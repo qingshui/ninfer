@@ -52,7 +52,7 @@ void gdn_control(const Tensor& a, const Tensor& b, const Tensor& a_log, const Te
  *
  * Supported domain:
  *   x is contiguous BF16 [K,M]; a_log/dt_bias are FP32 [H]; outputs are FP32 [H,M].
- *   Combined contiguous BF16 parents [2H,K] admit (H,K)=(48,5120),(32,2048),(48,2560).
+ *   Combined contiguous BF16 parents [2H,K] admit (H,K)=(48,5120),(32,2048),(48,2560),(64,3072).
  *   DGX Spark additionally admits (H,K)=(24,2560).
  *   Rows [0,H) are A and [H,2H) are B. Paired BF16 parents [H,K] admit (48,5120).
  *   BF16 x and weight backing must be 16-byte aligned; FP32 backing must be 4-byte aligned.
@@ -92,7 +92,7 @@ gdn_control_proj_workspace_capacity_bytes(const ProjectionProfile& weights, std:
  *   beta[h,m] = sigmoid(b[h,m]).
  *
  * Supported domain:
- *   Projection operands/effects follow gdn_control_proj for (H,K)=(48,5120),(32,2048).
+ *   Projection operands/effects follow gdn_control_proj for (H,K)=(48,5120),(32,2048),(64,3072).
  *   norm_weight is contiguous BF16 [K], normalized is BF16 [K,M]; both are 16-byte aligned.
  *   eps is positive and finite.
  *

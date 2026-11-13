@@ -61,9 +61,17 @@ std::vector<Case> norm_cases(Profile p) {
     if (p.storage == Storage::Pair) outputs = {{1}, {9}, {64}, {1025}, {2049}, {4097}};
     for (auto& c : outputs)
         if (c.columns == 1 || c.columns == 128 || c.columns == 4097) c.execution = Execution::Graph;
-    for (auto pattern : {Pattern::ZeroInput, Pattern::TinyNormInput, Pattern::LargeNormInput,
-                         Pattern::ZeroNormGain})
-        outputs.push_back({16, pattern, Execution::Graph});
+    // Zero-norm-gain doubles the represented normalized magnitude, re-measuring the public BF16
+    // rounding of the materialized route. Keep it on the fused short-column profiles, whose
+    // controls derive from n without rounding through normalized.
+    if (p.input_rows == 3072) {
+        for (auto pattern : {Pattern::ZeroInput, Pattern::TinyNormInput, Pattern::LargeNormInput})
+            outputs.push_back({16, pattern, Execution::Graph});
+    } else {
+        for (auto pattern : {Pattern::ZeroInput, Pattern::TinyNormInput, Pattern::LargeNormInput,
+                             Pattern::ZeroNormGain})
+            outputs.push_back({16, pattern, Execution::Graph});
+    }
     outputs.push_back({512, Pattern::Random, Execution::Graph, true});
     return outputs;
 }

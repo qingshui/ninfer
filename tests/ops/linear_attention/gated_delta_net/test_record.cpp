@@ -314,6 +314,45 @@ int run_case(std::int32_t value_heads, std::int32_t width, std::int32_t batch,
 
 } // namespace
 
+namespace {
+
+// Unregistered replay geometries are rejected before any device work.
+int reject_unregistered_heads() {
+    constexpr std::int32_t kQkHeads = 16, kValueHeads = 80, kWidth = 2, kBatch = 1;
+    const std::size_t qk_elements     = std::size_t(kStateDim) * kQkHeads * kWidth * kBatch;
+    const std::size_t value_elements  = std::size_t(kStateDim) * kValueHeads * kWidth * kBatch;
+    const std::size_t gate_elements    = std::size_t(kValueHeads) * kWidth * kBatch;
+    DeviceBuffer q                    = to_device(std::vector<std::uint16_t>(qk_elements, 0));
+    DeviceBuffer k                    = to_device(std::vector<std::uint16_t>(qk_elements, 0));
+    DeviceBuffer v                    = to_device(std::vector<std::uint16_t>(value_elements, 0));
+    DeviceBuffer g                    = to_device(std::vector<float>(gate_elements, -0.1F));
+    DeviceBuffer beta                 = to_device(std::vector<float>(gate_elements, 0.5F));
+    DeviceBuffer key                  = to_device(std::vector<std::uint16_t>(qk_elements, 0));
+    DeviceBuffer value                = to_device(std::vector<std::uint16_t>(value_elements, 0));
+    DeviceBuffer gate                 = to_device(std::vector<std::uint32_t>(gate_elements * 2, 0));
+    DeviceBuffer out                  = to_device(std::vector<std::uint16_t>(value_elements, 0));
+    Tensor q_tensor(q.span(), DType::BF16, {kStateDim, kQkHeads, kWidth, kBatch});
+    Tensor k_tensor(k.span(), DType::BF16, {kStateDim, kQkHeads, kWidth, kBatch});
+    Tensor v_tensor(v.span(), DType::BF16, {kStateDim, kValueHeads, kWidth, kBatch});
+    Tensor g_tensor(g.span(), DType::FP32, {kValueHeads, kWidth, kBatch});
+    Tensor beta_tensor(beta.span(), DType::FP32, {kValueHeads, kWidth, kBatch});
+    Tensor key_tensor(key.span(), DType::BF16, {kStateDim, kQkHeads, kWidth, kBatch});
+    Tensor value_tensor(value.span(), DType::BF16, {kStateDim, kValueHeads, kWidth, kBatch});
+    Tensor gate_tensor(gate.span(), DType::FP32, {2, kValueHeads, kWidth, kBatch});
+    Tensor out_tensor(out.span(), DType::BF16, {kStateDim, kValueHeads, kWidth, kBatch});
+    try {
+        ops::gated_delta_net_replay_record(q_tensor, k_tensor, v_tensor, g_tensor, beta_tensor,
+                                            1.0F / std::sqrt(128.0F), ConstStateFieldView{},
+                                            Tensor{},
+                                            {key_tensor, value_tensor, gate_tensor}, out_tensor,
+                                            cuda_environment().context.execution_view());
+    } catch (const std::invalid_argument&) { return 0; }
+    std::cerr << "gdn replay record accepted unregistered heads (16,80)\n";
+    return 1;
+}
+
+} // namespace
+
 int main(int argc, char** argv) {
     OpSuite suite;
     const auto add = [&](int heads, int width, int batch, std::vector<int> valid, unsigned seed) {
@@ -323,6 +362,7 @@ int main(int argc, char** argv) {
                   [=] { return run_case(heads, width, batch, valid, seed); },
                   {{"execution", width == 2 || width == 9 || width == 16 ? "graph" : "eager"}});
     };
+    suite.add("gdn_record/reject/h80", [] { return reject_unregistered_heads(); });
     add(32, 2, 1, {}, 1701U);
     add(32, 16, 1, {7}, 1711U);
     add(32, 6, 8, {6, 5, 4, 3, 2, 1, 6, 2}, 1721U);
@@ -333,6 +373,11 @@ int main(int argc, char** argv) {
         add(48, width, 8, valid, 1760U + width);
     }
     add(48, 5, 3, {5, 3, 1}, 1791U);
+
+    add(64, 2, 1, {}, 1911U);
+    add(64, 16, 1, {7}, 1921U);
+    add(64, 6, 8, {6, 5, 4, 3, 2, 1, 6, 2}, 1931U);
+    add(64, 5, 3, {5, 3, 1}, 1941U);
 
     for (int b = 1; b <= 8; ++b)
         for (int t = 2; t <= 16; ++t) {

@@ -24,6 +24,10 @@ constexpr std::array kN64K2048{
     Route{1, 127, mma(64, 16)},    Route{128, 1024, mma(64, 8)},   Route{1025, 2048, mma(64, 4)},
     Route{2049, 4096, mma(64, 2)}, Route{4097, kLast, mma(64, 1)},
 };
+constexpr std::array kN128K3072{
+    Route{1, 127, mma(64, 16)},    Route{128, 1024, mma(64, 8)},   Route{1025, 2048, mma(64, 4)},
+    Route{2049, 4096, mma(64, 2)}, Route{4097, kLast, mma(64, 1)},
+};
 
 // Materialized norm+control owns its tuning independently of control projection.
 constexpr std::array kNormN96K5120{
@@ -35,19 +39,25 @@ constexpr std::array kNormN64K2048{
     Route{1, 127, mma(64, 16)},    Route{128, 1024, mma(64, 8)},   Route{1025, 2048, mma(64, 4)},
     Route{2049, 4096, mma(64, 2)}, Route{4097, kLast, mma(64, 1)},
 };
+constexpr std::array kNormN128K3072{
+    Route{1, 127, mma(64, 16)},    Route{128, 1024, mma(64, 8)},   Route{1025, 2048, mma(64, 4)},
+    Route{2049, 4096, mma(64, 2)}, Route{4097, kLast, mma(64, 1)},
+};
 
 
-static_assert(closed(kN96K5120) && closed(kN64K2048) && closed(kNormN96K5120) &&
-              closed(kNormN64K2048));
+static_assert(closed(kN96K5120) && closed(kN64K2048) && closed(kN128K3072) &&
+              closed(kNormN96K5120) && closed(kNormN64K2048) && closed(kNormN128K3072));
 
 std::span<const Route> routes(Geometry geometry, bool norm = false) {
     if (norm) {
         if (geometry.heads == 48 && geometry.input_rows == 5120) return kNormN96K5120;
         if (geometry.heads == 32 && geometry.input_rows == 2048) return kNormN64K2048;
+        if (geometry.heads == 64 && geometry.input_rows == 3072) return kNormN128K3072;
         throw std::invalid_argument("gdn_control: unsupported norm geometry");
     }
     if (geometry.heads == 48 && geometry.input_rows == 5120) return kN96K5120;
     if (geometry.heads == 32 && geometry.input_rows == 2048) return kN64K2048;
+    if (geometry.heads == 64 && geometry.input_rows == 3072) return kN128K3072;
     if (geometry.heads == 48 && geometry.input_rows == 2560) return routes_n96_k2560();
 #if NINFER_TARGET_SPARK
     if (geometry.heads == 24 && geometry.input_rows == 2560) return routes_n48_k2560();

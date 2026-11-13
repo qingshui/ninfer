@@ -703,6 +703,81 @@ int graph_case(Case c, int batch, bool pooled) {
     return failures;
 }
 
+struct SplitRunResult {
+    std::vector<double> last_token;
+    std::vector<double> final_state;
+};
+
+// Prefill 128 plus one decode step must reproduce the one-shot 129-token tail of the same
+// represented inputs within the shared GDN tolerance, including the final SSM state.
+SplitRunResult run_split(const Case& test_case, const gdn_ref::Inputs& in, bool split) {
+    const float scale    = 1.0F / std::sqrt(static_cast<float>(kStateDim));
+    const int tokens     = test_case.tokens;
+    const int max_call   = split ? tokens - 1 : tokens;
+    DeviceInputs device(in);
+    GuardedDeviceBuffer state(in.state.size() * sizeof(float));
+    GuardedDeviceBuffer out(in.v.size() * sizeof(std::uint16_t));
+    state.copy_from_host(in.state.data(), state.bytes());
+    out.fill(0xff);
+    Tensor q(device.q.span(), DType::BF16, {kStateDim, test_case.qk_heads, tokens});
+    Tensor k(device.k.span(), DType::BF16, {kStateDim, test_case.qk_heads, tokens});
+    Tensor v(device.v.span(), DType::BF16, {kStateDim, test_case.value_heads, tokens});
+    Tensor g(device.g.span(), DType::FP32, {test_case.value_heads, tokens});
+    Tensor beta(device.beta.span(), DType::FP32, {test_case.value_heads, tokens});
+    Tensor ssm_state(state.span(), DType::FP32, {kStateDim, kStateDim, test_case.value_heads});
+    Tensor output(out.span(), DType::BF16, {kStateDim, test_case.value_heads, tokens});
+    const auto workspace_bytes =
+        ops::gated_delta_net_workspace_capacity_bytes(test_case.qk_heads, test_case.value_heads,
+                                                      1, max_call);
+    GuardedDeviceBuffer scratch(std::max<std::size_t>(workspace_bytes, 256));
+    MemoryArena workspace(scratch.span());
+    const auto device_execution = cuda_environment().default_execution;
+    if (!split) {
+        ops::gated_delta_net(q, k, v, g, beta, scale, test_case.normalize_qk, workspace, ssm_state,
+                             output, device_execution);
+    } else {
+        int begin = 0;
+        for (int length : {tokens - 1, 1}) {
+            Tensor qs = q.slice(2, begin, length), ks = k.slice(2, begin, length);
+            Tensor vs = v.slice(2, begin, length), gs = g.slice(1, begin, length);
+            Tensor bs = beta.slice(1, begin, length), os = output.slice(2, begin, length);
+            ops::gated_delta_net(qs, ks, vs, gs, bs, scale, test_case.normalize_qk, workspace,
+                                 ssm_state, os, device_execution);
+            begin += length;
+        }
+    }
+    cuda_synchronize();
+    if (workspace.used() != 0) throw std::logic_error("split run leaked workspace");
+    return {from_device_bf16(static_cast<const std::uint16_t*>(out.data()) +
+                                 static_cast<std::size_t>(tokens - 1) * test_case.value_heads *
+                                     kStateDim,
+                             test_case.value_heads * kStateDim),
+            read_f32(state.data(), in.state.size())};
+}
+
+int split_vs_single_shot_case() {
+    const Case test_case{"122b split", 16, 64, 129, true};
+    const gdn_ref::Inputs in = make_inputs(test_case, 15429U);
+    const auto one_shot      = run_split(test_case, in, false);
+    const auto split         = run_split(test_case, in, true);
+    int failures             = 0;
+    const auto compare       = [&](const std::string& what, const std::vector<double>& got,
+                                   const std::vector<double>& expected) {
+        if (got.size() != expected.size()) throw std::logic_error("GDN split comparison size");
+        const auto stats = compute_reduction_stats(got.data(), expected.data(), got.size());
+        if (stats.first_non_finite >= 0 || stats.relative_l2 > 1.0e-2) {
+            std::cerr << "GDN 122b split vs one-shot " << what
+                      << ": rel_l2=" << stats.relative_l2 << " non_finite="
+                      << stats.first_non_finite << '\n';
+            ++failures;
+        }
+        return failures;
+    };
+    compare("last token", split.last_token, one_shot.last_token);
+    compare("final state", split.final_state, one_shot.final_state);
+    return failures;
+}
+
 int contract_rejection_cases() {
     DeviceBuffer q_buffer(ninfer::test::cuda_environment().context.device(),
                           kStateDim * 8 * sizeof(std::uint16_t));
@@ -828,6 +903,17 @@ int main(int argc, char** argv) {
     add({"27b recurrent", 16, 48, 1, true}, 12001U, InputPattern::Ordinary, true);
     add({"27b recurrent", 16, 48, 7, false}, 12007U);
     add({"35b recurrent", 16, 32, 15, true}, 12015U);
+    // Qwen3.5-122B GDN geometry: 16 Q/K heads, 64 value heads, per-token normalization.
+    add({"122b recurrent", 16, 64, 257, true}, 15001U, InputPattern::Ordinary, true);
+    add({"122b recurrent", 16, 64, 257, false}, 15201U, InputPattern::Ordinary, false);
+    add({"122b decode", 16, 64, 16, true}, 15016U, InputPattern::Ordinary, true,
+        {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1});
+    add({"122b single-shot", 16, 64, 129, true}, 15129U, InputPattern::Ordinary, true);
+    // Same seed as the single-shot case: identical inputs, so the committed decode token must
+    // match the one-shot 129-token prefix within the shared reference tolerance.
+    add({"122b prefill continuation", 16, 64, 129, true}, 15129U, InputPattern::Ordinary, true,
+        {128, 1});
+    suite.add("gdn/122b split-vs-single-shot", [] { return split_vs_single_shot_case(); });
 
     struct Geometry {
         const char* name;

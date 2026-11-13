@@ -2,6 +2,7 @@
 #include "cuda_fixture.h"
 #include "core/buffer.h"
 #include "core/decode_graph.h"
+#include "ops/linear_attention/gated_delta_net/control/plan.h"
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -10,6 +11,60 @@ using namespace ninfer::test;
 namespace control = ninfer::test::gdn_control;
 
 namespace {
+
+// Registered geometries expose complete projection and norm route tables; unregistered
+// geometries are rejected instead of falling back to a nearest-shape guess.
+int routing_contract() {
+    namespace gdn_control = ninfer::ops::detail::gdn_control;
+    int failed            = 0;
+    const gdn_control::Geometry registered{64, 3072};
+    for (int columns : {1, 127, 128, 1024, 1025, 2048, 2049, 4096, 4097, 8192}) {
+        try {
+            const gdn_control::Plan projection = gdn_control::select_projection_plan(registered,
+                                                                                     columns);
+            const gdn_control::NormPlan norm   = gdn_control::select_norm_plan(registered, columns);
+            if (projection.kernel != gdn_control::Kernel::Mma || projection.tile_cols != 64 ||
+                (projection.split_k != 16 && projection.split_k != 8 && projection.split_k != 4 &&
+                 projection.split_k != 2 && projection.split_k != 1)) {
+                std::cerr << "gdn_control routing returned an unexpected projection plan at M="
+                          << columns << '\n';
+                ++failed;
+            }
+            if (norm.kernel != gdn_control::NormKernel::Materialized ||
+                norm.projection.kernel != projection.kernel ||
+                norm.projection.split_k != projection.split_k) {
+                std::cerr << "gdn_control routing returned an unexpected norm plan at M="
+                          << columns << '\n';
+                ++failed;
+            }
+        } catch (const std::exception& error) {
+            std::cerr << "gdn_control routing rejected the registered 64x3072 geometry at M="
+                      << columns << ": " << error.what() << '\n';
+            ++failed;
+        }
+    }
+    for (const gdn_control::Geometry unregistered :
+         {gdn_control::Geometry{80, 3072}, gdn_control::Geometry{64, 2048},
+          gdn_control::Geometry{48, 3072}}) {
+        bool projection_rejected = false;
+        try {
+            (void)gdn_control::select_projection_plan(unregistered, 8);
+        } catch (const std::invalid_argument&) { projection_rejected = true; }
+        if (!projection_rejected) {
+            std::cerr << "gdn_control projection routing accepted an unregistered geometry\n";
+            ++failed;
+        }
+        bool norm_rejected = false;
+        try {
+            (void)gdn_control::select_norm_plan(unregistered, 8);
+        } catch (const std::invalid_argument&) { norm_rejected = true; }
+        if (!norm_rejected) {
+            std::cerr << "gdn_control norm routing accepted an unregistered geometry\n";
+            ++failed;
+        }
+    }
+    return failed;
+}
 
 int run(int columns, bool edges, bool captured, CudaExecutionView execution) {
     const auto count = std::size_t(48) * columns;
@@ -135,6 +190,7 @@ int run(int columns, bool edges, bool captured, CudaExecutionView execution) {
 } // namespace
 
 void add_control_cases(ninfer::test::OpSuite& suite) {
+    suite.add("gdn_control/routing", [] { return routing_contract(); });
     for (int columns : {1, 7, 128, 4096}) {
         const bool graph = columns == 1 || columns == 128;
         suite.add(
