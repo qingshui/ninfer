@@ -2,6 +2,7 @@
 
 #cmakedefine01 NINFER_TARGET_RTX5090
 #cmakedefine01 NINFER_TARGET_SPARK
+#cmakedefine01 NINFER_TARGET_B200
 
 // Capabilities belong to each target; consumers should use the capability they need.
 #if NINFER_TARGET_RTX5090
@@ -9,5 +10,11 @@
 #    define NINFER_EXPERT_OFFLOAD 1
 #elif NINFER_TARGET_SPARK
 #    define NINFER_SHARED_PHYSICAL_MEMORY 1
+#    define NINFER_EXPERT_OFFLOAD 0
+#elif NINFER_TARGET_B200
+// Discrete GPU on x86_64: no unified CPU/GPU physical memory.
+// 180 GB HBM3e holds the 122B NVFP4 weights (~61 GB) plus KV cache without
+// host-resident experts, unlike the 32 GB RTX 5090.
+#    define NINFER_SHARED_PHYSICAL_MEMORY 0
 #    define NINFER_EXPERT_OFFLOAD 0
 #endif

@@ -70,6 +70,32 @@
         "NINFER_BUILD_ENGINE": "OFF",
         "NINFER_BUILD_APPS": "OFF"
       }
+    },
+    {
+      "name": "b200-release",
+      "displayName": "B200 product binaries",
+      "inherits": "product",
+      "cacheVariables": {
+        "NINFER_TARGET": "b200"
+      }
+    },
+    {
+      "name": "b200-dev",
+      "displayName": "B200 products, tests and benchmarks",
+      "inherits": "b200-release",
+      "cacheVariables": {
+        "BUILD_TESTING": "ON",
+        "NINFER_BUILD_BENCHMARKS": "ON"
+      }
+    },
+    {
+      "name": "b200-ops",
+      "displayName": "B200 Core, Artifact and Ops development",
+      "inherits": "b200-dev",
+      "cacheVariables": {
+        "NINFER_BUILD_ENGINE": "OFF",
+        "NINFER_BUILD_APPS": "OFF"
+      }
     }
   ],
   "buildPresets": [
@@ -96,6 +122,18 @@
     {
       "name": "dgx-spark-dev",
       "configurePreset": "dgx-spark-dev"
+    },
+    {
+      "name": "b200-release",
+      "configurePreset": "b200-release"
+    },
+    {
+      "name": "b200-dev",
+      "configurePreset": "b200-dev"
+    },
+    {
+      "name": "b200-ops",
+      "configurePreset": "b200-ops"
     }
   ],
   "testPresets": [
@@ -123,6 +161,20 @@
     {
       "name": "dgx-spark-dev",
       "configurePreset": "dgx-spark-dev",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "b200-dev",
+      "configurePreset": "b200-dev",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "b200-ops",
+      "configurePreset": "b200-ops",
       "output": {
         "outputOnFailure": true
       }
