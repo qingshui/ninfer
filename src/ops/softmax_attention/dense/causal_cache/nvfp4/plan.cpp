@@ -15,17 +15,30 @@ inline constexpr bool causal_query_tiles_underfill_sms(int independent_tiles,
 }
 
 constexpr int kGroupedPrefillMaxWidth = 192;
+
+// One grouped CTA packs rows = tokens * group; the kernels cover at most 64 rows.
+constexpr int grouped_token_limit(int heads) {
+    return Nvfp4KvCausalPlan::kTokenTile < 64 / (heads == 24 ? 6 : heads == 32 ? 16 : 8)
+               ? Nvfp4KvCausalPlan::kTokenTile
+               : 64 / (heads == 24 ? 6 : heads == 32 ? 16 : 8);
+}
+
+// The Hq=32, Hkv=2 service profile carries the full concurrent decode pool.
+constexpr int plan_batch_limit(int heads) {
+    return heads == 32 ? 520 : 8;
+}
 } // namespace
 
 Nvfp4KvCausalPlan select_nvfp4_kv_causal_plan(int heads, int width, int batch,
                                               CausalAttentionExecutionEnvelope envelope,
                                               int multiprocessor_count) {
-    if (multiprocessor_count <= 0 || (heads != 24 && heads != 16) || width < 1 || batch < 1 ||
-        batch > 8 || (batch > 1 && width > 16) || envelope.min_visible_keys == 0 ||
+    if (multiprocessor_count <= 0 || (heads != 32 && heads != 24 && heads != 16) || width < 1 ||
+        batch < 1 || batch > plan_batch_limit(heads) || (batch > 1 && width > 16) ||
+        envelope.min_visible_keys == 0 ||
         envelope.min_visible_keys > envelope.max_visible_keys ||
         envelope.max_visible_keys > kCausalAttentionMaximumVisibleKeys)
         throw std::invalid_argument("NVFP4 attention: invalid plan inputs");
-    constexpr int grouped_limit = Nvfp4KvCausalPlan::kTokenTile;
+    const int grouped_limit = grouped_token_limit(heads);
     const auto family           = width <= grouped_limit ? Nvfp4KvFamily::Grouped
                                   : width <= kGroupedPrefillMaxWidth ? Nvfp4KvFamily::ParallelGrouped
                                                                      : Nvfp4KvFamily::Tiled;
@@ -33,9 +46,9 @@ Nvfp4KvCausalPlan select_nvfp4_kv_causal_plan(int heads, int width, int batch,
         family == Nvfp4KvFamily::ParallelGrouped ? (width + grouped_limit - 1) / grouped_limit : 1;
     const int independent_tiles = batch * (heads == 24 ? 4 : 2) * tiles;
     const int query_tile        = family == Nvfp4KvFamily::ParallelGrouped && width <= 16
-                                      ? (width + 1) / 2
+                                      ? std::min((width + 1) / 2, grouped_limit)
                                       : std::min(width, grouped_limit);
-    const int row_tiles         = (query_tile * (heads == 24 ? 6 : 8) + 15) / 16;
+    const int row_tiles         = (query_tile * (heads == 32 ? 16 : heads == 24 ? 6 : 8) + 15) / 16;
     const std::int64_t sms      = multiprocessor_count;
     const auto budget =
         row_tiles <= 2 || causal_query_tiles_underfill_sms(independent_tiles, multiprocessor_count)

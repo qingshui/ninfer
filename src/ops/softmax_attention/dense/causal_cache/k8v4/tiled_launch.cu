@@ -17,7 +17,9 @@ void k8v4_kv_tiled_attention(const CausalAttentionOperands& p, K8V4KvReadView ca
         launch_causal_tiled_merge<G, true>(p, cache.valid_columns, partition, partial.view(),
                                            stream);
     };
-    if (p.query_heads == 24)
+    if (p.query_heads == 32)
+        invoke.template operator()<CausalD256H32Kv2>();
+    else if (p.query_heads == 24)
         invoke.template operator()<CausalD256H24Kv4>();
     else
         invoke.template operator()<CausalD256H16Kv2>();

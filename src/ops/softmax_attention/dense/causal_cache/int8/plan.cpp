@@ -15,17 +15,30 @@ inline constexpr bool causal_query_tiles_underfill_sms(int independent_tiles,
 }
 
 constexpr int kGroupedPrefillMaxWidth = 256;
+
+// One grouped CTA packs rows = tokens * group; the kernels cover at most 64 rows.
+constexpr int grouped_token_limit(int heads) {
+    return Int8KvCausalPlan::kTokenTile < 64 / (heads == 24 ? 6 : heads == 32 ? 16 : 8)
+               ? Int8KvCausalPlan::kTokenTile
+               : 64 / (heads == 24 ? 6 : heads == 32 ? 16 : 8);
+}
+
+// The Hq=32, Hkv=2 service profile carries the full concurrent decode pool.
+constexpr int plan_batch_limit(int heads) {
+    return heads == 32 ? 520 : 8;
+}
 } // namespace
 
 Int8KvCausalPlan select_int8_kv_causal_plan(int heads, int width, int batch,
                                             CausalAttentionExecutionEnvelope envelope,
                                             int multiprocessor_count) {
-    if (multiprocessor_count <= 0 || (heads != 24 && heads != 16) || width < 1 || batch < 1 ||
-        batch > 8 || (batch > 1 && width > 16) || envelope.min_visible_keys == 0 ||
+    if (multiprocessor_count <= 0 || (heads != 32 && heads != 24 && heads != 16) || width < 1 ||
+        batch < 1 || batch > plan_batch_limit(heads) || (batch > 1 && width > 16) ||
+        envelope.min_visible_keys == 0 ||
         envelope.min_visible_keys > envelope.max_visible_keys ||
         envelope.max_visible_keys > kCausalAttentionMaximumVisibleKeys)
         throw std::invalid_argument("INT8 attention: invalid plan inputs");
-    constexpr int grouped_limit = Int8KvCausalPlan::kTokenTile;
+    const int grouped_limit           = grouped_token_limit(heads);
     const auto family           = width <= grouped_limit             ? Int8KvFamily::Grouped
                                   : width <= kGroupedPrefillMaxWidth ? Int8KvFamily::ParallelGrouped
                                                                      : Int8KvFamily::Tiled;

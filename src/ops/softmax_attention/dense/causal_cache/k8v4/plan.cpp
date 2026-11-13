@@ -17,6 +17,18 @@ inline constexpr bool causal_query_tiles_underfill_sms(int independent_tiles,
 
 constexpr int kGroupedPrefillMaxWidth = 80;
 
+// One grouped CTA packs rows = tokens * group; the kernels cover at most 64 rows.
+constexpr int grouped_token_limit(int heads) {
+    return K8V4KvCausalPlan::kTokenTile < 64 / (heads == 24 ? 6 : heads == 32 ? 16 : 8)
+               ? K8V4KvCausalPlan::kTokenTile
+               : 64 / (heads == 24 ? 6 : heads == 32 ? 16 : 8);
+}
+
+// The Hq=32, Hkv=2 service profile carries the full concurrent decode pool.
+constexpr int plan_batch_limit(int heads) {
+    return heads == 32 ? 520 : 8;
+}
+
 // Minimize waves per KV partition, retaining fewer partitions on a tie.
 // The bound limits FP32 partial traffic; live rows cap the count at
 // ceil(visible_keys / 512). Count changes work and storage, never kernel topology.
@@ -66,12 +78,13 @@ std::size_t tiled_workspace_bytes(int heads, int min_width, int max_width, int v
 K8V4KvCausalPlan select_k8v4_kv_causal_plan(int heads, int width, int batch,
                                             CausalAttentionExecutionEnvelope envelope,
                                             int multiprocessor_count) {
-    if (multiprocessor_count <= 0 || (heads != 24 && heads != 16) || width < 1 || batch < 1 ||
-        batch > 8 || (batch > 1 && width > 16) || envelope.min_visible_keys == 0 ||
+    if (multiprocessor_count <= 0 || (heads != 32 && heads != 24 && heads != 16) || width < 1 ||
+        batch < 1 || batch > plan_batch_limit(heads) || (batch > 1 && width > 16) ||
+        envelope.min_visible_keys == 0 ||
         envelope.min_visible_keys > envelope.max_visible_keys ||
         envelope.max_visible_keys > kCausalAttentionMaximumVisibleKeys)
         throw std::invalid_argument("K8V4 attention: invalid plan inputs");
-    constexpr int grouped_limit = K8V4KvCausalPlan::kTokenTile;
+    const int grouped_limit = grouped_token_limit(heads);
     const auto family           = width <= grouped_limit             ? K8V4KvFamily::Grouped
                                   : width <= kGroupedPrefillMaxWidth ? K8V4KvFamily::ParallelGrouped
                                                                      : K8V4KvFamily::Tiled;
@@ -87,7 +100,7 @@ K8V4KvCausalPlan select_k8v4_kv_causal_plan(int heads, int width, int batch,
     const int tiles =
         family == K8V4KvFamily::ParallelGrouped ? (width + grouped_limit - 1) / grouped_limit : 1;
     const int query_tile        = family == K8V4KvFamily::ParallelGrouped && width <= 16
-                                      ? (width + 1) / 2
+                                      ? std::min((width + 1) / 2, grouped_limit)
                                       : std::min(width, grouped_limit);
     const int independent_tiles = batch * (heads == 24 ? 4 : 2) * tiles;
     // Decode budgets two CTAs per SM; wider queries start with one and double the

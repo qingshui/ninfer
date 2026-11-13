@@ -30,14 +30,19 @@ constexpr std::int32_t kMaximumVerifyTokens = 16;
 constexpr std::int32_t kMaximumBatchSize    = 8;
 // The Hq=8, Hkv=2 profile serves wider verification batches.
 constexpr std::int32_t kMaximumWideBatchSize = 16;
+// The Hq=32, Hkv=2 service profile carries the full concurrent decode pool
+// (130 concurrent requests x 4 completion sequences each = 520 rows).
+constexpr std::int32_t kMaximumServiceBatchSize = 520;
 
 std::int32_t maximum_batch_size(AttentionHeadGeometry geometry) {
+    if (geometry.query_heads == 32) return kMaximumServiceBatchSize;
     return geometry.query_heads == 8 ? kMaximumWideBatchSize : kMaximumBatchSize;
 }
 
 void require_causal_geometry(AttentionHeadGeometry geometry, const char* op) {
     if (!valid_attention_head_geometry(geometry) || geometry.head_dim != kHeadDim ||
-        !((geometry.query_heads == 24 && geometry.kv_heads == 4) ||
+        !((geometry.query_heads == 32 && geometry.kv_heads == 2) ||
+          (geometry.query_heads == 24 && geometry.kv_heads == 4) ||
           (geometry.query_heads == 16 && geometry.kv_heads == 2) ||
           (geometry.query_heads == 8 && geometry.kv_heads == 2))) {
         throw std::invalid_argument(std::string(op) + ": unsupported head geometry");

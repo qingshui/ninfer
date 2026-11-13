@@ -33,20 +33,22 @@ void grouped(const CausalAttentionOperands& p, Fp8KvCacheView<Writable> cache, I
 template <class G, class Input, bool Writable>
 void grouped_instance(const CausalAttentionOperands& p, Fp8KvCacheView<Writable> cache, Input input,
                       CausalKvPartition partition, CausalPartialView partial, cudaStream_t stream) {
-    switch (p.width) {
+    // One grouped CTA covers tokens * G::GroupSize rows; wider groups cap the tile.
+    constexpr int kMaxGroupedTokens = 64 / G::GroupSize;
 #define NINFER_FP8_GROUPED(T)                                                                      \
-    case T:                                                                                        \
-        return grouped<G, T>(p, cache, input, partition, partial, stream)
-        NINFER_FP8_GROUPED(1);
-        NINFER_FP8_GROUPED(2);
-        NINFER_FP8_GROUPED(3);
-        NINFER_FP8_GROUPED(4);
-        NINFER_FP8_GROUPED(5);
-        NINFER_FP8_GROUPED(6);
-        NINFER_FP8_GROUPED(7);
-        NINFER_FP8_GROUPED(8);
-#undef NINFER_FP8_GROUPED
+    if (p.width == T) {                                                                            \
+        if constexpr (T <= kMaxGroupedTokens)                                                      \
+            return grouped<G, T>(p, cache, input, partition, partial, stream);                     \
     }
+    NINFER_FP8_GROUPED(1);
+    NINFER_FP8_GROUPED(2);
+    NINFER_FP8_GROUPED(3);
+    NINFER_FP8_GROUPED(4);
+    NINFER_FP8_GROUPED(5);
+    NINFER_FP8_GROUPED(6);
+    NINFER_FP8_GROUPED(7);
+    NINFER_FP8_GROUPED(8);
+#undef NINFER_FP8_GROUPED
     throw std::logic_error("FP8 grouped plan exceeds the selected token tile");
 }
 
@@ -61,7 +63,9 @@ void execute_grouped(const Tensor& q, const Tensor& positions, float scale, Cach
     const auto partial = allocate_causal_partials(workspace, plan.query_heads, plan.width,
                                                   plan.partition.capacity, plan.batch);
     const auto p = make_causal_operands(q, positions, out, scale, plan.envelope.max_visible_keys);
-    if (plan.query_heads == 24)
+    if (plan.query_heads == 32)
+        grouped_instance<CausalD256H32Kv2>(p, view, input, plan.partition, partial.view(), stream);
+    else if (plan.query_heads == 24)
         grouped_instance<CausalD256H24Kv4>(p, view, input, plan.partition, partial.view(), stream);
     else if (plan.query_heads == 16)
         grouped_instance<CausalD256H16Kv2>(p, view, input, plan.partition, partial.view(), stream);
@@ -93,22 +97,34 @@ void parallel_grouped(const CausalAttentionOperands& p, Fp8KvReadView cache,
     }
 }
 
+template <class G>
 void execute_parallel(const CausalAttentionOperands& p, Fp8KvReadView cache,
                       const Fp8KvCausalPlan& plan, MemoryArena& workspace, cudaStream_t stream) {
     auto scope         = workspace.scope();
     const auto partial = allocate_causal_partials(workspace, plan.query_heads, plan.width,
                                                   plan.partition.capacity, plan.batch);
-    if (plan.query_heads == 24)
-        parallel_grouped<CausalD256H24Kv4, Fp8KvCausalPlan::kTokenTile>(p, cache, plan.partition,
-                                                                        partial.view(), stream);
-    else if (plan.query_heads == 16)
-        parallel_grouped<CausalD256H16Kv2, Fp8KvCausalPlan::kTokenTile>(p, cache, plan.partition,
-                                                                        partial.view(), stream);
-    else
-        parallel_grouped<CausalD256H8Kv2, Fp8KvCausalPlan::kTokenTile>(p, cache, plan.partition,
-                                                                       partial.view(), stream);
+    // Parallel query tiles keep the grouped kernel's 64-row CTA budget.
+    constexpr int kParallelTokens =
+        Fp8KvCausalPlan::kTokenTile < 64 / G::GroupSize ? Fp8KvCausalPlan::kTokenTile
+                                                        : 64 / G::GroupSize;
+    parallel_grouped<G, kParallelTokens>(p, cache, plan.partition, partial.view(), stream);
 }
 
+} // namespace
+
+namespace {
+void execute_parallel_dispatch(const CausalAttentionOperands& p, Fp8KvReadView cache,
+                               const Fp8KvCausalPlan& plan, MemoryArena& workspace,
+                               cudaStream_t stream) {
+    if (plan.query_heads == 32)
+        execute_parallel<CausalD256H32Kv2>(p, cache, plan, workspace, stream);
+    else if (plan.query_heads == 24)
+        execute_parallel<CausalD256H24Kv4>(p, cache, plan, workspace, stream);
+    else if (plan.query_heads == 16)
+        execute_parallel<CausalD256H16Kv2>(p, cache, plan, workspace, stream);
+    else
+        execute_parallel<CausalD256H8Kv2>(p, cache, plan, workspace, stream);
+}
 } // namespace
 
 void fp8_kv_append_attention(const Tensor& q, const Tensor& k, const Tensor& v,
@@ -128,7 +144,7 @@ void fp8_kv_append_attention(const Tensor& q, const Tensor& k, const Tensor& v,
         if (plan.family == Fp8KvFamily::Tiled)
             fp8_kv_tiled_attention(p, view, plan.partition, workspace, stream);
         else
-            execute_parallel(p, view, plan, workspace, stream);
+            execute_parallel_dispatch(p, view, plan, workspace, stream);
     } else {
         execute_grouped(q, positions, scale, cache, &valid, &rows,
                         CausalAppendInput{static_cast<const __nv_bfloat16*>(k.data),
@@ -151,9 +167,9 @@ void fp8_kv_cached_attention(const Tensor& q, const Tensor& positions, float sca
             make_quantized_causal_cache_view<Fp8KvCacheView<false>>(view), plan.partition,
             workspace, stream);
     else if (plan.family == Fp8KvFamily::ParallelGrouped)
-        execute_parallel(make_causal_operands(q, positions, out, scale, envelope.max_visible_keys),
-                         make_quantized_causal_cache_view<Fp8KvCacheView<false>>(view), plan,
-                         workspace, stream);
+        execute_parallel_dispatch(
+            make_causal_operands(q, positions, out, scale, envelope.max_visible_keys),
+            make_quantized_causal_cache_view<Fp8KvCacheView<false>>(view), plan, workspace, stream);
     else
         execute_grouped(q, positions, scale, view, nullptr, nullptr, CausalCachedInput{}, plan,
                         workspace, out, stream);

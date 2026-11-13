@@ -17,6 +17,18 @@ inline constexpr bool causal_query_tiles_underfill_sms(int independent_tiles,
 
 constexpr int kGroupedPrefillMaxWidth = 80;
 
+// One grouped CTA packs rows = tokens * group; the kernels cover at most 64 rows.
+constexpr int grouped_token_limit(int heads) {
+    return Fp8KvCausalPlan::kTokenTile < 64 / (heads == 24 ? 6 : heads == 32 ? 16 : 8)
+               ? Fp8KvCausalPlan::kTokenTile
+               : 64 / (heads == 24 ? 6 : heads == 32 ? 16 : 8);
+}
+
+// The Hq=32, Hkv=2 service profile carries the full concurrent decode pool.
+constexpr int plan_batch_limit(int heads) {
+    return heads == 32 ? 520 : heads == 8 ? 16 : 8;
+}
+
 // Minimize waves per KV partition, retaining fewer partitions on a tie.
 // The bound limits FP32 partial traffic; live rows cap the count at
 // ceil(visible_keys / 512). Count changes work and storage, never kernel topology.
@@ -66,13 +78,13 @@ std::size_t tiled_workspace_bytes(int heads, int min_width, int max_width, int v
 Fp8KvCausalPlan select_fp8_kv_causal_plan(int heads, int width, int batch,
                                           CausalAttentionExecutionEnvelope envelope,
                                           int multiprocessor_count) {
-    if (multiprocessor_count <= 0 || (heads != 24 && heads != 16 && heads != 8) || width < 1 ||
-        batch < 1 || batch > (heads == 8 ? 16 : 8) || (batch > 1 && width > 16) ||
+    if (multiprocessor_count <= 0 || (heads != 32 && heads != 24 && heads != 16 && heads != 8) ||
+        width < 1 || batch < 1 || batch > plan_batch_limit(heads) || (batch > 1 && width > 16) ||
         envelope.min_visible_keys == 0 || envelope.min_visible_keys > envelope.max_visible_keys ||
         envelope.max_visible_keys > kCausalAttentionMaximumVisibleKeys)
         throw std::invalid_argument("FP8 attention: invalid plan inputs");
-    constexpr int grouped_limit = Fp8KvCausalPlan::kTokenTile;
-    const auto family           = width <= grouped_limit             ? Fp8KvFamily::Grouped
+    const int token_tile         = grouped_token_limit(heads);
+    const auto family            = width <= token_tile ? Fp8KvFamily::Grouped
                                   : width <= kGroupedPrefillMaxWidth ? Fp8KvFamily::ParallelGrouped
                                                                      : Fp8KvFamily::Tiled;
     if (family == Fp8KvFamily::Tiled)
@@ -84,7 +96,7 @@ Fp8KvCausalPlan select_fp8_kv_causal_plan(int heads, int width, int batch,
             envelope,
             select_tiled_partition(heads, width, envelope.max_visible_keys, multiprocessor_count)};
     const int tiles =
-        family == Fp8KvFamily::ParallelGrouped ? (width + grouped_limit - 1) / grouped_limit : 1;
+        family == Fp8KvFamily::ParallelGrouped ? (width + token_tile - 1) / token_tile : 1;
     const int independent_tiles = batch * (heads == 24 ? 4 : 2) * tiles;
     // Decode budgets two CTAs per SM; wider queries start with one and double the
     // budget if complete query-tile groups would leave over 10% of the SMs idle.

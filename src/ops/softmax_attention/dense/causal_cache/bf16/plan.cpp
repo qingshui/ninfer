@@ -8,6 +8,10 @@ namespace ninfer::ops::detail {
 namespace {
 constexpr int kGroupedPrefillMaxWidth = 256;
 constexpr int kTiledQueryRows          = 64;
+// The Hq=32, Hkv=2 service profile carries the full concurrent decode pool.
+constexpr int plan_batch_limit(int heads) {
+    return heads == 32 ? 520 : heads == 8 ? 16 : 8;
+}
 
 // The tiled kernel has no KV split: one CTA per 64-query tile and head walks every visible key.
 // With few CTAs and a long history the GPU idles, while the grouped route splits the key range.
@@ -24,9 +28,9 @@ int grouped_prefill_max_width(int heads, int batch, int multiprocessor_count) {
 Bf16KvCausalPlan select_bf16_kv_causal_plan(int heads, int width, int batch,
                                             CausalAttentionExecutionEnvelope envelope,
                                             int multiprocessor_count) {
-    if (multiprocessor_count <= 0 || (heads != 24 && heads != 16 && heads != 8) || width < 1 ||
-        batch < 1 || batch > (heads == 8 ? 16 : 8) || (batch > 1 && width > 16) ||
-        envelope.min_visible_keys == 0 ||
+    if (multiprocessor_count <= 0 || (heads != 32 && heads != 24 && heads != 16 && heads != 8) ||
+        width < 1 || batch < 1 || batch > plan_batch_limit(heads) ||
+        (batch > 1 && width > 16) || envelope.min_visible_keys == 0 ||
         envelope.min_visible_keys > envelope.max_visible_keys ||
         envelope.max_visible_keys > kCausalAttentionMaximumVisibleKeys)
         throw std::invalid_argument("BF16 attention: invalid plan inputs");

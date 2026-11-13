@@ -405,6 +405,42 @@ void add_small_prefill_cases(OpSuite& suite, KvCacheStorage storage) {
     }
 }
 
+// The Hq=32, Hkv=2 service profile: production context boundaries and the concurrent
+// decode pool (130 requests x 4 completion sequences = 520 rows) under every KV dtype.
+void add_service_profile_cases(OpSuite& suite, KvCacheStorage storage) {
+    constexpr Geometry service{"d256-h32-kv2", 32, 2};
+    // Single-sequence context boundaries: one page, page-adjacent, and the serving cap.
+    add_cached_case(suite, service, storage, {1, 0, 1, 2151u}, MappingPattern::Identity);
+    add_cached_case(suite, service, storage, {1, 254, 255, 2152u}, MappingPattern::Identity);
+    add_cached_case(suite, service, storage, {1, 255, 256, 2153u}, MappingPattern::Fragmented);
+    add_cached_case(suite, service, storage, {1, 2041, 2042, 2154u}, MappingPattern::Fragmented);
+    add_append_case(suite, service, storage, {1, 2041, 2042, 2155u}, MappingPattern::Fragmented);
+    add_append_case(suite, service, storage, {16, 2026, 2042, 2156u}, MappingPattern::Fragmented);
+
+    // Concurrent decode pool rows at W=1. B=130 mixes the context boundaries with the
+    // 2042-key serving cap; B=520 carries the complete pool over short histories.
+    const auto add_pool = [&](int batch, std::span<const int> context_pool,
+                              std::uint32_t seed) {
+        BatchAttentionCase c;
+        c.width    = 1;
+        c.mapping  = MappingPattern::Fragmented;
+        c.seed     = seed;
+        c.contexts.reserve(batch);
+        c.valid_columns.reserve(batch);
+        c.table_rows.reserve(batch);
+        for (int row = 0; row < batch; ++row) {
+            c.contexts.push_back(context_pool[row % context_pool.size()]);
+            c.valid_columns.push_back(1);
+            c.table_rows.push_back(row);
+        }
+        add_batch_case(suite, service, storage, c);
+    };
+    constexpr int service_contexts[]{1, 255, 256, 2042, 61, 127};
+    add_pool(130, service_contexts, 2161u);
+    constexpr int pool_contexts[]{1, 61, 127, 255};
+    add_pool(520, pool_contexts, 2162u);
+}
+
 void add_storage_cases(OpSuite& suite, KvCacheStorage storage) {
     suite.add(std::string("causal_capacity/") + cache_name(storage),
               [=] {
@@ -438,6 +474,7 @@ void add_storage_cases(OpSuite& suite, KvCacheStorage storage) {
     add_verify_width_cases(suite, storage);
     add_numerical_profile_cases(suite, storage);
     add_small_prefill_cases(suite, storage);
+    add_service_profile_cases(suite, storage);
 }
 } // namespace
 

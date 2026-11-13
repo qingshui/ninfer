@@ -34,10 +34,13 @@ template <class G, class Input, bool Writable>
 void grouped_instance(const CausalAttentionOperands& p, Nvfp4KvCacheView<Writable> cache,
                       Input input, CausalKvPartition partition, CausalPartialView partial,
                       cudaStream_t stream) {
-    switch (p.width) {
+    // One grouped CTA covers tokens * G::GroupSize rows; wider groups cap the tile.
+    constexpr int kMaxGroupedTokens = 64 / G::GroupSize;
 #define NINFER_NVFP4_GROUPED(T)                                                                    \
-    case T:                                                                                        \
-        return grouped<G, T>(p, cache, input, partition, partial, stream)
+    if (p.width == T) {                                                                           \
+        if constexpr (T <= kMaxGroupedTokens)                                                      \
+            return grouped<G, T>(p, cache, input, partition, partial, stream);                     \
+    }
         NINFER_NVFP4_GROUPED(1);
         NINFER_NVFP4_GROUPED(2);
         NINFER_NVFP4_GROUPED(3);
@@ -47,7 +50,6 @@ void grouped_instance(const CausalAttentionOperands& p, Nvfp4KvCacheView<Writabl
         NINFER_NVFP4_GROUPED(7);
         NINFER_NVFP4_GROUPED(8);
 #undef NINFER_NVFP4_GROUPED
-    }
     throw std::logic_error("NVFP4 grouped plan exceeds the selected token tile");
 }
 
@@ -62,7 +64,9 @@ void execute_grouped(const Tensor& q, const Tensor& positions, float scale, Cach
     const auto partial = allocate_causal_partials(workspace, plan.query_heads, plan.width,
                                                   plan.partition.capacity, plan.batch);
     const auto p = make_causal_operands(q, positions, out, scale, plan.envelope.max_visible_keys);
-    if (plan.query_heads == 24)
+    if (plan.query_heads == 32)
+        grouped_instance<CausalD256H32Kv2>(p, view, input, plan.partition, partial.view(), stream);
+    else if (plan.query_heads == 24)
         grouped_instance<CausalD256H24Kv4>(p, view, input, plan.partition, partial.view(), stream);
     else
         grouped_instance<CausalD256H16Kv2>(p, view, input, plan.partition, partial.view(), stream);
@@ -101,7 +105,11 @@ void execute_parallel(const CausalAttentionOperands& p, Nvfp4KvReadView cache,
         switch (plan.query_tile) {
 #define NINFER_NVFP4_PARALLEL(T)                                                                   \
     case T:                                                                                        \
-        return parallel_grouped<G, T>(p, cache, plan.partition, partial.view(), stream)
+        if constexpr (T * G::GroupSize <= 64)                                                       \
+            return parallel_grouped<G, T>(p, cache, plan.partition, partial.view(), stream);       \
+        break
+            NINFER_NVFP4_PARALLEL(3);
+            NINFER_NVFP4_PARALLEL(4);
             NINFER_NVFP4_PARALLEL(5);
             NINFER_NVFP4_PARALLEL(6);
             NINFER_NVFP4_PARALLEL(7);
@@ -110,7 +118,9 @@ void execute_parallel(const CausalAttentionOperands& p, Nvfp4KvReadView cache,
         }
         throw std::logic_error("NVFP4 parallel plan exceeds its query tiles");
     };
-    if (plan.query_heads == 24)
+    if (plan.query_heads == 32)
+        invoke.template operator()<CausalD256H32Kv2>();
+    else if (plan.query_heads == 24)
         invoke.template operator()<CausalD256H24Kv4>();
     else
         invoke.template operator()<CausalD256H16Kv2>();

@@ -20,6 +20,7 @@ struct CausalGeometry : AttentionHeadMapping<QueryHeads, KVHeads> {
     static constexpr int kHeadDim = HeadDim;
 };
 
+using CausalD256H32Kv2 = CausalGeometry<256, 32, 2>;
 using CausalD256H24Kv4 = CausalGeometry<256, 24, 4>;
 using CausalD256H16Kv2 = CausalGeometry<256, 16, 2>;
 using CausalD256H8Kv2  = CausalGeometry<256, 8, 2>;

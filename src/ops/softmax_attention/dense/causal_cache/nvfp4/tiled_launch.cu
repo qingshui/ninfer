@@ -6,7 +6,9 @@
 namespace ninfer::ops::detail {
 void nvfp4_kv_tiled_attention(const CausalAttentionOperands& p, Nvfp4KvReadView cache,
                               cudaStream_t stream) {
-    if (p.query_heads == 24)
+    if (p.query_heads == 32)
+        launch_nvfp4_kv_tiled_mma<CausalD256H32Kv2, Nvfp4KvTiledInstance>(p, cache, stream);
+    else if (p.query_heads == 24)
         launch_nvfp4_kv_tiled_mma<CausalD256H24Kv4, Nvfp4KvTiledInstance>(p, cache, stream);
     else
         launch_nvfp4_kv_tiled_mma<CausalD256H16Kv2, Nvfp4KvTiledInstance>(p, cache, stream);
