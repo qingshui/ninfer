@@ -106,3 +106,22 @@ CUDA_VISIBLE_DEVICES=5 ctest --test-dir build/rtx5090-release -R 'ninfer_spark2_
 ```
 
 HF 对拍和 real 用例标签为 `gpu;real`，耗时长，不进入 `test_command`。
+
+## 性能门槛（gate）
+
+`tools/bench/spark_gate.py` 是 spark-x2.6-1.7b 任务的独立裁判：一次调用覆盖 BF16 与 FP8 两个
+变体，各自从当前树重建 `.ninfer`、启动 ninfer-serve（Anthropic `/v1/messages`，贪心、thinking
+关闭、512 输出 token、带 nonce 的 prompt），对照 `tools/bench/baselines_spark17b.json` 冻结的
+sglang 基线计算比值。裁判脚本与基线文件锁定不改。
+
+```bash
+GATE_MATRIX=smoke GATE_VARIANT=bf16,fp8 python3 tools/bench/spark_gate.py --gpu 5
+GATE_MATRIX=full  GATE_VARIANT=bf16,fp8 python3 tools/bench/spark_gate.py --gpu 5
+```
+
+- 矩阵：`smoke`（1K×C1、64K×C2 功能验证）、`quick`（调优迭代）、`full`（7 点最终验收，
+  含 8K×C16 / 64K×C8 / 256K×C8 / 1M×C1 prefill 点与 1K×C1/C8/C16、64K×C8、256K×C8 decode 点）。
+- 输出 `$AUTODEVX_ANALYZE_OUTPUT_DIR/metrics.json`：`overall_ratio_min`、`prefill_ratio_min`、
+  `decode_ratio_min`、`functional_ok`；逐点明细另存 `tools/bench/gate_last_result_spark.json`。
+- 退出码 0 通过 / 1 性能或功能失败 / 2 环境错误。
+- ratio ≥ 2.0 的最终目标由调优阶段负责；开发阶段只要求字段存在、有限且口径正确。
