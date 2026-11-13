@@ -153,6 +153,34 @@ void add_two_output_cases(Suite& suite) {
         add_profile(suite, profile, std::move(calls));
     }
     {
+        // GDN qkvz of the 122B geometry: in_proj_qkv(12288) then in_proj_z(8192).
+        Profile profile{
+            3072,
+            {{QType::BF16, 20480, 1279U}},
+            {12288, 8192},
+            {{0, 12288}, {12288, 8192}},
+            a16};
+        std::vector<Invocation> calls;
+        for (int t : {1,   2,    3,    4,    5,    7,    8,    9,    15,   16,   17,
+                      31,  32,   33,   47,   48,   49,   63,   64,   65,   95,   96,
+                      97,  127,  128,  129,  130,  191,  192,  193,  255,  256,  257,
+                      383, 384,  385,  511,  512,  513,  519,  520,  521,  1023, 1024,
+                      1025, 2047, 2048, 2049, 4096, 4097})
+            calls.push_back({.t          = t,
+                             .input_seed = 1283U,
+                             .columns    = Columns::HeadBoundaries,
+                             .full_rows  = t <= 17});
+        for (int t : {8, 17, 33, 65, 129, 130, 513, 520, 1025, 2049, 4097})
+            calls.push_back({.t             = t,
+                             .graph         = true,
+                             .input_seed    = 1283U,
+                             .changed_seed  = 1289U,
+                             .columns       = Columns::HeadBoundaries,
+                             .shared_output = true});
+        calls.push_back({.t = 0, .workspace_intervals = true});
+        add_profile(suite, profile, std::move(calls));
+    }
+    {
         Profile profile{5120,
                         {{QType::FP8_E4M3FN_ROW_BF16, 16384, 613U}},
                         {10240, 6144},

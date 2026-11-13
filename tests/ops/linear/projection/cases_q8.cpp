@@ -1,11 +1,17 @@
 #include "ops/linear/projection/runner.h"
 #include "core/platform.h"
+#include "cuda_fixture.h"
+#include "core/buffer.h"
+#include "ops/op_tester.h"
+#include "ops/quantized_weight.h"
 
 #include <algorithm>
 #include <array>
 #include <exception>
 #include <iostream>
 #include <limits>
+#include <mutex>
+#include <numeric>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -34,7 +40,7 @@ const std::array kGeometries{
     Geometry{6144, 2560, 347U},   Geometry{6144, 5120, 227U},  Geometry{9216, 2048, 263U},
     Geometry{10240, 2560, 331U},  Geometry{12288, 2048, 269U}, Geometry{12288, 2560, 313U},
     Geometry{14336, 5120, 229U},  Geometry{16384, 2560, 359U}, Geometry{34816, 5120, 233U},
-    Geometry{248320, 5120, 197U}};
+    Geometry{248320, 5120, 197U}, Geometry{248320, 3072, 349U}};
 
 int q8_workspace_domain(std::int32_t n, std::int32_t k) {
     int failures = 0;
@@ -54,6 +60,142 @@ int q8_workspace_domain(std::int32_t n, std::int32_t k) {
                 std::cerr << "Q8 [" << n << ',' << k << "]: accepted invalid workspace interval\n";
                 ++failures;
             } catch (const std::invalid_argument&) {}
+        }
+    }
+    return failures;
+}
+
+// The lm_head route must reproduce the reference argmax exactly whenever the reference top-2
+// margin clears the BF16 output roundoff. Near-tied columns are not decisive and are skipped;
+// the fixture has to stay mostly decisive or the check would no longer measure anything.
+int q8_lm_head_argmax(std::int32_t n, std::int32_t k) {
+    const auto host      = make_q8_g32_fp16_weight(n, k, 205U);
+    const auto& context  = ninfer::test::cuda_environment().context;
+    const auto execution = ninfer::test::cuda_environment().default_execution;
+    ninfer::DeviceBuffer device_weight(context.device(), host.payload.size());
+    device_weight.copy_from_host(host.payload.data(), device_weight.size());
+    const auto weight = host.device_weight(device_weight.span());
+    int failures      = 0;
+    for (const std::int32_t t : {1, 130, 520}) {
+        std::vector<std::int32_t> checked;
+        if (t == 520) {
+            for (std::int32_t token = 0; token < t; token += 40) checked.push_back(token);
+        } else {
+            checked.resize(t);
+            std::iota(checked.begin(), checked.end(), 0);
+        }
+        std::vector<std::uint16_t> bits(static_cast<std::size_t>(k) * t);
+        std::vector<float> activation(static_cast<std::size_t>(k) * t);
+        for (std::int32_t token = 0; token < t; ++token) {
+            for (std::int32_t column = 0; column < k; ++column) {
+                std::uint32_t mixed = 251U + static_cast<std::uint32_t>(t) * 0x9e3779b9U +
+                                      static_cast<std::uint32_t>(column) * 0x85ebca6bU +
+                                      static_cast<std::uint32_t>(token) * 0xc2b2ae35U;
+                mixed ^= mixed >> 15;
+                mixed *= 0x7feb352dU;
+                mixed ^= mixed >> 13;
+                const float value = static_cast<float>(static_cast<int>(mixed & 0xffU) - 128) *
+                                    (1.0F / 256.0F);
+                bits[static_cast<std::size_t>(token) * k + column] =
+                    ninfer::test::f32_to_bf16(value);
+                activation[static_cast<std::size_t>(token) * k + column] = value;
+            }
+        }
+        ninfer::DeviceBuffer device_activation(context.device(), bits.size() * sizeof(std::uint16_t));
+        device_activation.copy_from_host(bits.data(), device_activation.size());
+        ninfer::Tensor x(device_activation.span(), ninfer::DType::BF16, {k, t});
+        ninfer::DeviceBuffer output(context.device(),
+                                    static_cast<std::size_t>(n) * t * sizeof(std::uint16_t));
+        ninfer::Tensor y(output.span(), ninfer::DType::BF16, {n, t});
+        ninfer::ops::linear(x, weight, y, execution);
+        ninfer::test::cuda_check(cudaStreamSynchronize(execution.stream()), "lm_head argmax sync");
+        std::vector<std::uint16_t> logits(static_cast<std::size_t>(n) * t);
+        ninfer::test::cuda_check(
+            cudaMemcpy(logits.data(), output.data(), logits.size() * sizeof(std::uint16_t),
+                       cudaMemcpyDeviceToHost),
+            "lm_head argmax readback");
+
+        struct Top {
+            double first = -std::numeric_limits<double>::infinity(), second = -std::numeric_limits<double>::infinity();
+            std::int32_t first_row = -1;
+        };
+        std::mutex merge_mutex;
+        std::vector<Top> reference(checked.size());
+        ninfer::test::parallel_rows(
+            n, static_cast<std::uint64_t>(n) * k * checked.size(), [&](int begin, int end) {
+                std::vector<Top> local(checked.size());
+                std::vector<double> row(k);
+                for (int r = begin; r < end; ++r) {
+                    for (std::int32_t column = 0; column < k; ++column)
+                        row[column] = ninfer::test::quantized_weight::logical_weight_fp64(
+                            host, r, column);
+                    for (std::size_t index = 0; index < checked.size(); ++index) {
+                        const float* values =
+                            activation.data() + static_cast<std::size_t>(checked[index]) * k;
+                        double sum = 0.0;
+                        for (std::int32_t column = 0; column < k; ++column)
+                            sum += row[column] * static_cast<double>(values[column]);
+                        auto& top = local[index];
+                        if (sum > top.first) {
+                            top.second    = top.first;
+                            top.first     = sum;
+                            top.first_row = r;
+                        } else if (sum > top.second) {
+                            top.second = sum;
+                        }
+                    }
+                }
+                std::lock_guard lock(merge_mutex);
+                for (std::size_t index = 0; index < checked.size(); ++index) {
+                    auto& top = reference[index];
+                    if (local[index].first > top.first) {
+                        if (local[index].first_row != top.first_row) top.second = top.first;
+                        top.first     = local[index].first;
+                        top.first_row = local[index].first_row;
+                        top.second    = std::max(top.second, local[index].second);
+                    } else {
+                        top.second = std::max(top.second, local[index].first);
+                    }
+                }
+            });
+
+        std::int32_t decisive = 0;
+        for (std::size_t index = 0; index < checked.size(); ++index) {
+            const auto& top = reference[index];
+            if (top.first_row < 0 || !std::isfinite(top.first) || !std::isfinite(top.second)) {
+                std::cerr << "lm_head argmax t=" << t << ": reference row "
+                          << checked[index] << " has no finite logits\n";
+                ++failures;
+                continue;
+            }
+            // BF16 output rounding moves each logit by at most |v|/256, so a smaller top-2
+            // margin cannot decide the argmax; those tokens are ties by construction.
+            if (top.first - top.second <= (std::abs(top.first) + std::abs(top.second)) / 256.0 +
+                                              5.0e-3)
+                continue;
+            ++decisive;
+            const std::int32_t token = checked[index];
+            std::int32_t actual      = 0;
+            float best = ninfer::test::bf16_to_f32(logits[static_cast<std::size_t>(token) * n]);
+            for (std::int32_t r = 1; r < n; ++r) {
+                const float value =
+                    ninfer::test::bf16_to_f32(logits[static_cast<std::size_t>(token) * n + r]);
+                if (value > best) {
+                    actual = r;
+                    best   = value;
+                }
+            }
+            if (actual != top.first_row) {
+                std::cerr << "lm_head argmax t=" << t << " token " << token
+                          << ": reference row " << top.first_row << " but kernel row " << actual
+                          << '\n';
+                ++failures;
+            }
+        }
+        if (decisive * 2 < static_cast<std::int32_t>(checked.size())) {
+            std::cerr << "lm_head argmax t=" << t << ": only " << decisive << " of "
+                      << checked.size() << " tokens are decisive\n";
+            ++failures;
         }
     }
     return failures;
@@ -186,7 +328,17 @@ void q8_a16_conformance(Suite& suite) {
         if (shape.n == 9216 && shape.k == 2048) {
             for (int t : {12, 13, 14}) calls.push_back({t});
         }
-        if (shape.n == 248320) calls.push_back({34});
+        if (shape.n == 248320) {
+            calls.push_back({34});
+            if (shape.k == 3072) {
+                // lm_head of the 122B geometry: decode 130, boundary 519/520/521, prefill tail.
+                for (int t : {130, 519, 520, 521, 2048, 2049}) calls.push_back({t});
+                for (int t : {130, 520, 2048})
+                    calls.push_back(
+                        {t, CallForm::Policy, ninfer::ops::LinearPolicy::A16Only, true});
+                add_workspace_cases(suite, ninfer::QType::Q8_G32_FP16, shape.n, shape.k);
+            }
+        }
         if (shape.n == 2048 && shape.k == 16384) {
             for (int t : {383,  384,  385,  479,  480,  481,  639,  640,  641,  703,
                           704,  705,  959,  960,  961,  1343, 1344, 1345, 1679, 1680,
@@ -261,4 +413,11 @@ void q8_a16_conformance(Suite& suite) {
 }
 } // namespace
 
-void ninfer::test::linear::add_q8_cases(Suite& suite) { q8_a16_conformance(suite); }
+void ninfer::test::linear::add_q8_cases(Suite& suite) {
+    q8_a16_conformance(suite);
+    auto test = linear_suite::make_case("q8", 248320, 3072, 0,
+                                        ninfer::ops::LinearPolicy::A16Only,
+                                        linear_suite::Execution::Eager, "lm-head-argmax");
+    test.policies = 7;
+    suite.add(std::move(test), [] { return q8_lm_head_argmax(248320, 3072); });
+}

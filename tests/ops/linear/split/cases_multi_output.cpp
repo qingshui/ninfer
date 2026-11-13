@@ -67,6 +67,28 @@ void add_multi_output_cases(Suite& suite) {
         add_profile(suite, profile, std::move(calls));
     }
     {
+        // Full-attention qkvz of the 122B geometry: q(32x256)/k(2x256)/gate(32x256)/v(2x256).
+        Profile profile{
+            3072,
+            {{QType::NVFP4, 17408, 353U, {.weight_scale = 0.125F, .input_scale = 3.5F}}},
+            {8192, 512, 8192, 512},
+            {{0, 8192}, {8192, 512}, {8704, 8192}, {16896, 512}},
+            a16,
+            1.0 / 256.0,
+            Binding::Nvfp4Inputs};
+        std::vector<Invocation> calls;
+        for (int t : {1, 2, 4, 8, 16, 20, 32, 33, 65, 130})
+            calls.push_back({.t = t, .input_seed = 359U, .omit_divisors = t == 1});
+        calls.push_back({.t = 4, .policy = Policy::AllowA8, .input_seed = 359U});
+        calls.push_back(
+            {.t = 4, .policy = Policy::AllowA8, .input_seed = 359U, .omit_divisors = true});
+        for (int t : {4, 17, 130, 519, 520, 521, 1023, 1024, 1025, 2048, 2049})
+            calls.push_back(
+                {.t = t, .policy = Policy::AllowA4, .input_seed = 359U, .sample_rows = 31});
+        calls.push_back({.t = 0, .policy = Policy::AllowA4, .workspace_intervals = true});
+        add_profile(suite, profile, std::move(calls));
+    }
+    {
         Profile profile{5120,
                         {{QType::FP8_E4M3FN_ROW_BF16, 14336, 349U}},
                         segments,

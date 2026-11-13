@@ -30,8 +30,24 @@ void run_nvfp4_a16(Suite& suite) {
               {5120, 6144, 705U, Comparison::Sampled, true, invocations});
     add_shape(suite, ninfer::QType::NVFP4, ActivationRecipe::TokenBlocks, make_nvfp4_weight,
               {5120, 17408, 707U, Comparison::Sampled, true, invocations});
+    {
+        // Full-attention o_proj of the 122B geometry, measured logical K=8192.
+        std::vector<Invocation> calls;
+        for (int t : {1,   2,  3,  4,  5,  7,  8,  9,  15,  16,  17,  31,  32,  33,
+                      63,  64,  65,  95, 96, 97, 127, 128, 129, 130, 191, 192, 193,
+                      255, 256, 257, 383, 384, 385, 511, 512, 513, 519, 520, 521,
+                      1023, 1024, 1025, 2048, 2049, 4096, 4097})
+            calls.push_back({t});
+        for (int t : {3, 8, 17, 33, 65, 130, 521, 1025, 2049})
+            calls.push_back({t, CallForm::Policy, ops::LinearPolicy::A16Only, true});
+        for (int t : {1, 8, 130, 520, 1024}) calls.push_back({t, CallForm::A16Convenience});
+        for (int t : {2, 8, 17, 130, 520})
+            calls.push_back({t, CallForm::Policy, ops::LinearPolicy::AllowA8});
+        add_shape(suite, ninfer::QType::NVFP4, ActivationRecipe::TokenBlocks, make_nvfp4_weight,
+                  {3072, 8192, 729U, Comparison::Sampled, true, calls});
+    }
     for (auto [n, k] : {std::pair{14336, 5120}, std::pair{16384, 5120}, std::pair{34816, 5120},
-                        std::pair{5120, 6144}, std::pair{5120, 17408}}) {
+                        std::pair{5120, 6144}, std::pair{5120, 17408}, std::pair{3072, 8192}}) {
         add_workspace_cases(suite, QType::NVFP4, n, k);
     }
 }
@@ -80,6 +96,19 @@ void run_nvfp4_a4(Suite& suite) {
               {5120, 6144, 723U, Comparison::Sampled, true, invocations});
     add_shape(suite, ninfer::QType::NVFP4, ActivationRecipe::Hashed, make_nvfp4_weight,
               {5120, 17408, 725U, Comparison::Sampled, true, invocations});
+    {
+        // Full-attention o_proj of the 122B geometry, measured logical K=8192.
+        std::vector<Invocation> calls;
+        for (int t : {1,   2,   3,   4,   5,   7,   8,   16,  17,  63,  64,  65,
+                      95,  96,  97,  127, 128, 129, 130, 191, 192, 193, 383, 384,
+                      385, 511, 512, 513, 519, 520, 521, 767, 768, 769, 1023, 1024,
+                      1025, 1280, 1500, 2048, 2049, 4096, 4097})
+            calls.push_back({t, CallForm::Policy, ops::LinearPolicy::AllowA4});
+        for (int t : {63, 97, 130, 193, 385, 520, 1023, 1024})
+            calls.push_back({t, CallForm::Policy, ops::LinearPolicy::AllowA4, true});
+        add_shape(suite, ninfer::QType::NVFP4, ActivationRecipe::Hashed, make_nvfp4_weight,
+                  {3072, 8192, 733U, Comparison::Sampled, true, calls});
+    }
 }
 
 } // namespace

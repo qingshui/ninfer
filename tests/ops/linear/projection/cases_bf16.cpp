@@ -155,6 +155,7 @@ const std::array kNewGeometries{
                           576,  896,  1152, 1280, 1344, 1920, 2048, 2112, 2304,
                           2688, 2880, 3328, 3456, 3968, 4032, 4096}},
     Geometry{2560, 2560, {1, 8, 32, 48, 64, 96, 128, 256, 512, 576, 896, 1152, 2048, 4096}},
+    Geometry{3072, 8192, {1, 8, 32, 48, 64, 96, 128, 512, 2048, 4096}},
     Geometry{1152,
              1536,
              {4, 8, 16, 32, 64, 128, 192, 256, 320, 512, 640, 768, 1024, 2048, 4096},
@@ -462,6 +463,18 @@ void run_bf16(Suite& suite) {
     }
     { run_selector_linear(suite); }
     for (const auto& shape : kNewGeometries) { run_new_bf16_geometry(suite, shape); }
+    {
+        // GDN out_proj of the 122B geometry: the workload T points the shared geometry loop
+        // does not reach (decode 130, boundary 519/520/521, prefill 2048/4096 tails).
+        using namespace ninfer::test::linear;
+        std::vector<Invocation> calls;
+        for (int t : {130, 519, 520, 521, 2048, 2049, 4096, 4097}) calls.push_back({t});
+        for (int t : {130, 520, 2048, 4097})
+            calls.push_back({t, CallForm::Policy, ops::LinearPolicy::A16Only, true});
+        calls.push_back({130, CallForm::A16Convenience});
+        add_shape(suite, ninfer::QType::BF16, ActivationRecipe::TokenBlocks, make_bf16_weight,
+                  bf16_fixture(3072, 8192, 447U, ninfer::test::linear::Comparison::Sampled, calls));
+    }
 #if NINFER_TARGET_SPARK
     run_bf16_extensions(suite);
 #endif

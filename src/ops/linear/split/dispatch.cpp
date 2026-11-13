@@ -56,7 +56,8 @@ const SplitShape& select(ProjectionProfile weights, const auto& rows) {
             &kBf16SplitN1152K2560ThreeOutput,
             &kBf16SplitN1664K2560,
             &kBf16SplitN13952K2560,
-            &kBf16SplitN14336K5120};
+            &kBf16SplitN14336K5120,
+            &kBf16SplitN20480K3072};
         return match(shapes, weights, rows);
     }
     case QType::Q8_G32_FP16: {
@@ -83,7 +84,8 @@ const SplitShape& select(ProjectionProfile weights, const auto& rows) {
     }
 #endif
     case QType::NVFP4: {
-        const std::array shapes{&kNvfp4SplitN14336K5120, &kNvfp4SplitN16384K5120};
+        const std::array shapes{&kNvfp4SplitN14336K5120, &kNvfp4SplitN16384K5120,
+                                &kNvfp4SplitN17408K3072};
         return match(shapes, weights, rows);
     }
     default:
