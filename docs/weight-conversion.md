@@ -45,6 +45,8 @@ The built-in recipes are ordinary Python functions in
 | `qwen3_8_27b_nvfp4` | Imported NVFP4/FP8, FP8 embedding generated from BF16 | `quantized` |
 | `qwen3_8_flash_next` | Q8 main projections, NVIDIA NVFP4 experts, block-FP8 MTP experts, NF4 PLE, BF16 auxiliary projections/Vision | `nvidia` |
 | `glm5next` | NVIDIA NVFP4 Main experts/dense MLP, Q8 KDA and MLA output/shared projections, block-FP8 MTP experts; BF16 Main head, embedding and Vision | None; NVIDIA checkpoint is the primary source |
+| `spark_x2_6_17b_bf16` | FP8 row + FP32 scale projections quantized from the BF16 source, Q8 tied embedding/head, BF16 attention gate | None |
+| `spark_x2_6_17b_fp8` | Imported published FP8 row words with FP32 scales, Q8 tied embedding/head, BF16 attention gate | None; FP8 checkpoint is the primary source |
 
 These names select conversion choices. Runtime execution is selected from the architecture,
 configuration and actual bindings stored in the artifact. `--name` sets the public model name;
@@ -126,6 +128,39 @@ GLM frontend resources come from the primary checkpoint; do not substitute a Qwe
 After conversion, keep the entry and every part together on both Sparks and use the
 [GLM deployment example](../examples/configs/spark2-glm5_3-flash.toml).
 The [GLM5Next reference](maintainer/glm5next-model.md) records the model's representation choices.
+
+### Spark2_5
+
+Spark2_5 (`Spark2_5ForCausalLM`, `model_type = spark2_5_text`) is a text-only dense model with a
+tied embedding/head. Two official recipes share one architecture entry; the runtime representation
+comes from the artifact, not from the checkpoint name. Convert a local BF16 checkpoint with:
+
+```bash
+python3 -m tools.convert \
+  --model /path/to/spark-bf16-checkpoint \
+  --recipe spark_x2_6_17b_bf16 \
+  --name spark2_5-17b \
+  --out models/spark2_5_bf16.ninfer
+```
+
+Convert the published FP8 checkpoint with:
+
+```bash
+python3 -m tools.convert \
+  --model /path/to/spark-fp8-checkpoint \
+  --recipe spark_x2_6_17b_fp8 \
+  --name spark2_5-17b \
+  --out models/spark2_5_fp8.ninfer
+```
+
+Both recipes quantize every projection except the headwise-sigmoid attention gate to
+FP8 E4M3FN codes with FP32 row scales (`fp8_row_fp32_maxabs`) and run them as `AllowA8` w8a8;
+the gate projection stays BF16 `A16Only`. The BF16 recipe quantizes per channel from the BF16
+source, while the FP8 recipe imports the published row-scaled words unchanged. The tied
+token embedding and output head are stored once as Q8 via `recipe.share`. Identical inputs produce
+byte-identical artifacts (reproducible SHA-256).
+See the [Spark2_5 reference](maintainer/spark2_5-model.md) for the architecture facts, KV
+capacity behavior and numerical verification entry points.
 
 ## Conversion resources
 
@@ -222,12 +257,16 @@ The converter currently writes these formats:
 | `bf16`, `fp32`, `int32` | `cast_direct` | Direct words through the source reader |
 | `q4_g64_fp16`, `q5_g64_fp16`, `q6_g64_fp16`, `q8_g32_fp16` | `grouped_absmax` | Supply a custom method/source if needed |
 | `fp8_e4m3fn_row_bf16` | `fp8_row_maxabs` | `import_encoded` |
+| `fp8_e4m3fn_row_fp32` | `fp8_row_fp32_maxabs` | `import_encoded` |
 | `fp8_e4m3fn_block128x128_bf16` | None | `import_encoded` |
 | `nvfp4` | `stored_scale_mse` | `import_encoded` |
 | `nf4_g16_e4m3fn` | `stored_scale_mse` | Supply encoded words through `TensorOutput` |
 
 `grouped_absmax` stores one FP16 scale per group and signed integer codes. `fp8_row_maxabs` first
 rounds input values to BF16, then produces E4M3FN codes and one BF16 multiplier per row.
+`fp8_row_fp32_maxabs` keeps FP32 precision throughout: `scale = amax / 448` is one binary32
+division, codes round to E4M3FN with round-to-nearest-even, and all-zero rows store scale 1 with
+zero codes; host and CUDA paths round identically, so the result does not depend on the device.
 `import_encoded` preserves compatible code and scale words, including NVFP4's matrix weight divisor.
 It does not dequantize and requantize them.
 Rank-three NVFP4 targets select `batched_block_scale_k16_m128x4_v1` explicitly; each matrix owns
