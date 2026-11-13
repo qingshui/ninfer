@@ -184,12 +184,15 @@ public:
     using ScoringCore    = runtime::CausalScoreCore<Qwen35>;
     using Qwen4          = runtime::InferenceInstance<models::qwen4_exp::RuntimeTypes>;
     using Glm            = runtime::InferenceInstance<models::glm5next::RuntimeTypes>;
+    using Spark          = runtime::InferenceInstance<models::spark2_5::RuntimeTypes>;
     using Core =
         std::variant<std::monostate, std::unique_ptr<GenerationCore>, std::unique_ptr<ScoringCore>,
                      std::unique_ptr<runtime::EngineCore<Qwen4>>,
                      std::unique_ptr<runtime::CausalScoreCore<Qwen4>>,
                      std::unique_ptr<runtime::EngineCore<Glm>>,
-                     std::unique_ptr<runtime::CausalScoreCore<Glm>>>;
+                     std::unique_ptr<runtime::CausalScoreCore<Glm>>,
+                     std::unique_ptr<runtime::EngineCore<Spark>>,
+                     std::unique_ptr<runtime::CausalScoreCore<Spark>>>;
 
     explicit Impl(EngineOptions engine_options)
         : options(runtime::normalize_engine_options(std::move(engine_options))) {
@@ -251,7 +254,7 @@ private:
         description.max_context     = options.max_context;
         description.max_concurrency = options.max_concurrency;
         description.prefill_chunk   = options.prefill_chunk;
-        description.kv_cache        = options.kv_cache;
+        description.kv_cache        = *options.kv_cache;
         std::visit(
             [&](const auto& instance) {
                 description.context_token_capacity_estimate =

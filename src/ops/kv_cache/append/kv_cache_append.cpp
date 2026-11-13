@@ -14,6 +14,11 @@ namespace {
 constexpr std::int32_t kHeadDim       = 128;
 constexpr std::int32_t kKVHeads       = 8;
 constexpr std::int32_t kFullHeadDim   = 256;
+// D256/Hkv2 serves wider verification batches and the 512-slot sliding-window ring.
+constexpr std::int32_t kWideKVHeads         = 2;
+constexpr std::int32_t kWideBatchSize       = 16;
+constexpr std::int32_t kMaximumBatchSize    = 8;
+constexpr std::uint32_t kWideRingCapacity   = 512;
 constexpr const char* kAppendOp       = "kv_cache_append";
 constexpr const char* kPrefixAppendOp = "kv_cache_append_prefix";
 
@@ -100,8 +105,10 @@ void validate_inputs(const Tensor& k, const Tensor& v, const Tensor& positions,
     const std::int32_t tokens = k.ne[2];
     const std::int32_t batch  = k.ne[3];
     if (tokens < 1) { throw std::invalid_argument("kv_cache_append_prefix: T must be positive"); }
-    if (batch < 1 || batch > 8) {
-        throw std::invalid_argument("kv_cache_append_prefix: B must be 1..8");
+    const std::int32_t maximum_batch =
+        head_dim == kFullHeadDim && kv_heads == kWideKVHeads ? kWideBatchSize : kMaximumBatchSize;
+    if (batch < 1 || batch > maximum_batch) {
+        throw std::invalid_argument("kv_cache_append_prefix: B exceeds the supported batch");
     }
     require_shape(k, head_dim, kv_heads, tokens, batch, kPrefixAppendOp, "k");
     require_shape(v, head_dim, kv_heads, tokens, batch, kPrefixAppendOp, "v");
@@ -137,21 +144,27 @@ void validate_paged_cache(const PagedKVBatchLayerView& cache,
     }
 }
 
-void validate_cyclic_cache(const CyclicKVCacheLayerView& cache, std::int32_t batch,
+void validate_cyclic_cache(const CyclicKVCacheLayerView& cache, const Tensor& k, std::int32_t batch,
                            KVCacheAppendPrefixExecutionEnvelope envelope, Device device) {
-    const bool registered_capacity = cache.capacity == 2048 || cache.capacity == 4096;
-    if (cache.num_kv_heads != kKVHeads || cache.head_dim != kHeadDim || !registered_capacity ||
+    // D128/Hkv8 rings commit at most one capacity per call. The D256/Hkv2 ring accepts longer
+    // prefixes and stores only the final capacity rows.
+    const bool wide = cache.head_dim == kFullHeadDim;
+    const bool registered =
+        wide ? cache.num_kv_heads == kWideKVHeads && cache.capacity == kWideRingCapacity
+             : cache.num_kv_heads == kKVHeads && cache.head_dim == kHeadDim &&
+                   (cache.capacity == 2048 || cache.capacity == 4096);
+    if (!registered || cache.head_dim != k.ne[0] || cache.num_kv_heads != k.ne[1] ||
         cache.padded_capacity < cache.capacity ||
         cache.padded_capacity >
             static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max()) ||
-        envelope.max_count > cache.capacity) {
+        (!wide && envelope.max_count > cache.capacity)) {
         throw std::invalid_argument("kv_cache_append_prefix: invalid cyclic cache");
     }
     const auto padded = static_cast<std::int32_t>(cache.padded_capacity);
-    common::operand::state_field(cache.k, DType::BF16, {kHeadDim, padded, kKVHeads}, 16,
-                                 kPrefixAppendOp, "cache K", device);
-    common::operand::state_field(cache.v, DType::FP16, {kHeadDim, padded, kKVHeads}, 16,
-                                 kPrefixAppendOp, "cache V", device);
+    common::operand::state_field(cache.k, DType::BF16, {cache.head_dim, padded, cache.num_kv_heads},
+                                 16, kPrefixAppendOp, "cache K", device);
+    common::operand::state_field(cache.v, DType::FP16, {cache.head_dim, padded, cache.num_kv_heads},
+                                 16, kPrefixAppendOp, "cache V", device);
     const auto& offsets = cache.k.records.byte_offsets;
     if (offsets.ne[0] != batch || cache.v.records.byte_offsets.ne[0] != batch ||
         cache.k.field.layers != 1 || cache.v.field.layers != 1 ||
@@ -217,9 +230,10 @@ void kv_cache_append_prefix(const Tensor& k, const Tensor& v, const Tensor& posi
                             const Tensor& counts, KVCacheAppendPrefixExecutionEnvelope envelope,
                             CyclicKVCacheLayerView cache, CudaExecutionView execution) {
     const auto stream = execution.stream();
-    validate_inputs(k, v, positions, counts, nullptr, envelope, execution.device(), kHeadDim,
-                    kKVHeads);
-    validate_cyclic_cache(cache, k.ne[3], envelope, execution.device());
+    const bool wide = k.ne[0] == kFullHeadDim && k.ne[1] == kWideKVHeads;
+    validate_inputs(k, v, positions, counts, nullptr, envelope, execution.device(),
+                    wide ? kFullHeadDim : kHeadDim, wide ? kWideKVHeads : kKVHeads);
+    validate_cyclic_cache(cache, k, k.ne[3], envelope, execution.device());
     detail::kv_cache_append_prefix_dispatch(k, v, positions, counts, cache, envelope, stream);
 }
 

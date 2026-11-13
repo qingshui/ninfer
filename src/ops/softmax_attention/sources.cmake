@@ -20,6 +20,9 @@ target_sources(ninfer_ops PRIVATE
   "${CMAKE_CURRENT_LIST_DIR}/sliding_window/sliding_window_attention.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/sliding_window/launch.cu"
   "${CMAKE_CURRENT_LIST_DIR}/sliding_window/plan.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/causal_sliding_window/causal_sliding_window_attention.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/causal_sliding_window/launch.cu"
+  "${CMAKE_CURRENT_LIST_DIR}/causal_sliding_window/plan.cpp"
 )
 
 target_sources(ninfer_ops_non_rdc PRIVATE

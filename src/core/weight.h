@@ -23,6 +23,7 @@ enum class QType : std::uint16_t {
     NVFP4_MUL                    = 12,
     MXFP8                        = 13,
     FP8_E4M3FN_BLOCK128X128_FP32 = 14,
+    FP8_E4M3FN_ROW_FP32          = 15,
 };
 
 enum class QuantLayout : std::uint16_t {

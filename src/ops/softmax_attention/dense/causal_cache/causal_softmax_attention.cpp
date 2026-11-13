@@ -28,11 +28,18 @@ constexpr std::int32_t kHeadDim             = 256;
 constexpr float kExpectedScale              = 0.0625f;
 constexpr std::int32_t kMaximumVerifyTokens = 16;
 constexpr std::int32_t kMaximumBatchSize    = 8;
+// The Hq=8, Hkv=2 profile serves wider verification batches.
+constexpr std::int32_t kMaximumWideBatchSize = 16;
+
+std::int32_t maximum_batch_size(AttentionHeadGeometry geometry) {
+    return geometry.query_heads == 8 ? kMaximumWideBatchSize : kMaximumBatchSize;
+}
 
 void require_causal_geometry(AttentionHeadGeometry geometry, const char* op) {
     if (!valid_attention_head_geometry(geometry) || geometry.head_dim != kHeadDim ||
         !((geometry.query_heads == 24 && geometry.kv_heads == 4) ||
-          (geometry.query_heads == 16 && geometry.kv_heads == 2))) {
+          (geometry.query_heads == 16 && geometry.kv_heads == 2) ||
+          (geometry.query_heads == 8 && geometry.kv_heads == 2))) {
         throw std::invalid_argument(std::string(op) + ": unsupported head geometry");
     }
 }
@@ -156,7 +163,7 @@ void validate_batched_attention_tensors(const Tensor& q, const Tensor& positions
     const std::int32_t kv_heads = geometry.kv_heads;
     const std::int32_t width    = q.ne[2];
     const std::int32_t batch    = q.ne[3];
-    if (width <= 0 || batch <= 0 || batch > kMaximumBatchSize ||
+    if (width <= 0 || batch <= 0 || batch > maximum_batch_size(geometry) ||
         (batch > 1 && width > kMaximumVerifyTokens)) {
         throw std::invalid_argument(std::string(op) + ": unsupported B/W domain");
     }
@@ -196,7 +203,7 @@ std::size_t causal_softmax_attention_workspace_capacity_bytes(
         (void)paged_kv_storage_layout(cache_storage, kHeadDim);
     } catch (const std::invalid_argument&) { supported_dtype = false; }
     if (multiprocessor_count <= 0 || !supported_dtype || batch_size <= 0 ||
-        batch_size > kMaximumBatchSize || min_width <= 0 || max_width < min_width ||
+        batch_size > maximum_batch_size(geometry) || min_width <= 0 || max_width < min_width ||
         (batch_size > 1 && max_width > kMaximumVerifyTokens) || envelope.min_visible_keys == 0 ||
         envelope.min_visible_keys > envelope.max_visible_keys ||
         envelope.max_visible_keys > kCausalAttentionMaximumVisibleKeys) {

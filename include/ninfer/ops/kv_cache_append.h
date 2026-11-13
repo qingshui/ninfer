@@ -55,9 +55,9 @@ void kv_cache_append(const Tensor& k, const Tensor& v, const Tensor& positions,
  * reads no positions or K/V for that batch row. Inputs are unchanged, and the Op
  * neither decides nor publishes a committed frontier.
  *
- * The caller guarantees T>0, B=1..8, envelope.min_count <= counts[b] <= envelope.max_count <= T,
- * sequential nonnegative live positions, materialized table entries for every position allowed by
- * the envelope, and pairwise non-aliasing of inputs and cache storage.
+ * The caller guarantees T>0, B=1..8 (B=1..16 for D256/Hkv2), envelope.min_count <= counts[b] <=
+ * envelope.max_count <= T, sequential nonnegative live positions, materialized table entries for
+ * every position allowed by the envelope, and pairwise non-aliasing of inputs and cache storage.
  */
 void kv_cache_append_prefix(const Tensor& k, const Tensor& v, const Tensor& positions,
                             const Tensor& counts, const Tensor& table_rows,
@@ -69,13 +69,17 @@ void kv_cache_append_prefix(const Tensor& k, const Tensor& v, const Tensor& posi
  *
  * k/v, positions, counts, and their storage-conversion and mutation contracts match the paged
  * overload. The cache State fields select destination records through device I64 byte offsets
- * [B]. Each field is dense [128,padded_capacity,8] within its record and 16-byte aligned. D=128,
- * Hkv=8 and capacity 2048 or 4096. Absolute position p maps to slot p mod capacity. For a nonempty
- * prefix, the caller guarantees that the row's existing live interval ends immediately before
- * positions[0,b]. Advancing it by counts[b] makes every overwritten old slot dead, and one row
- * commits at most the ring capacity. A zero count reads no positions or K/V and changes no cache
- * bytes. Physical T is independent of the committed prefix length. Consequently, no two live writes
- * race for one physical slot. The Op does not own or publish the state frontier.
+ * [B]. Each field is dense [D,padded_capacity,Hkv] within its record and 16-byte aligned. The
+ * registered rings are D=128, Hkv=8 with capacity 2048 or 4096 (B=1..8), and D=256, Hkv=2 with
+ * capacity 512 (B=1..16). Absolute position p maps to slot p mod capacity. For a nonempty prefix,
+ * the caller guarantees that the row's existing live interval ends immediately before
+ * positions[0,b]. Advancing it by counts[b] makes every overwritten old slot dead. A D128 row
+ * commits at most the ring capacity. A D256 row may pass any counts[b] <= T and the Op writes only
+ * the final min(counts[b],512) rows, because earlier rows of the same prefix would be overwritten
+ * by later ones. A zero count reads no positions or K/V and changes no cache bytes. Physical T is
+ * independent of the committed prefix length. Consequently, no two live writes race for one
+ * physical slot. The Op does not own or publish the state frontier. A caller that attends over the
+ * ring with causal_sliding_window_attention does so before this append.
  */
 void kv_cache_append_prefix(const Tensor& k, const Tensor& v, const Tensor& positions,
                             const Tensor& counts, KVCacheAppendPrefixExecutionEnvelope envelope,

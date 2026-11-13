@@ -19,6 +19,7 @@ from .proposal import DEFAULT_RANKING, add_official_proposal
 from .glm5next import build_model as build_glm5next
 from .qwen3_5 import build_model as build_qwen3_5
 from .qwen4_exp import build_model as build_qwen4_exp
+from .spark2_5 import build_model as build_spark2_5
 from .recipe import Recipe
 from .sources.safetensors import SafetensorsSource
 
@@ -190,6 +191,7 @@ def main(argv=None):
             "Qwen3_5MoeForConditionalGeneration": build_qwen3_5,
             "Qwen4ExpForCausalLM": build_qwen4_exp,
             "Qwen4ExpForConditionalGeneration": build_qwen4_exp,
+            "Spark2_5ForCausalLM": build_spark2_5,
         }
         if len(architectures) != 1 or architectures[0] not in adapters:
             raise ValueError(f"unsupported source architectures: {architectures!r}")

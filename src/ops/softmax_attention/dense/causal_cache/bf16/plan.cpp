@@ -7,20 +7,33 @@
 namespace ninfer::ops::detail {
 namespace {
 constexpr int kGroupedPrefillMaxWidth = 256;
+constexpr int kTiledQueryRows          = 64;
+
+// The tiled kernel has no KV split: one CTA per 64-query tile and head walks every visible key.
+// With few CTAs and a long history the GPU idles, while the grouped route splits the key range.
+// For Hq=8 the grouped route wins until the tile count reaches about 70% of the SMs
+// (RTX 5090 D, 170 SMs, B=1, 262144 visible keys: W=300..896 take 4.1..11.1 ms grouped against
+// 14.0 ms tiled; W=960 takes 16.2 ms grouped against 14.0 ms tiled).
+int grouped_prefill_max_width(int heads, int batch, int multiprocessor_count) {
+    if (heads != 8 || batch != 1) return kGroupedPrefillMaxWidth;
+    const int tiles = 7 * multiprocessor_count / (10 * heads);
+    return std::max(kGroupedPrefillMaxWidth, tiles * kTiledQueryRows);
+}
 } // namespace
 
 Bf16KvCausalPlan select_bf16_kv_causal_plan(int heads, int width, int batch,
                                             CausalAttentionExecutionEnvelope envelope,
                                             int multiprocessor_count) {
-    if (multiprocessor_count <= 0 || (heads != 24 && heads != 16) || width < 1 || batch < 1 ||
-        batch > 8 || (batch > 1 && width > 16) || envelope.min_visible_keys == 0 ||
+    if (multiprocessor_count <= 0 || (heads != 24 && heads != 16 && heads != 8) || width < 1 ||
+        batch < 1 || batch > (heads == 8 ? 16 : 8) || (batch > 1 && width > 16) ||
+        envelope.min_visible_keys == 0 ||
         envelope.min_visible_keys > envelope.max_visible_keys ||
         envelope.max_visible_keys > kCausalAttentionMaximumVisibleKeys)
         throw std::invalid_argument("BF16 attention: invalid plan inputs");
     const int kv_heads = heads == 24 ? 4 : 2, group = heads / kv_heads;
     const auto ceil_div = [](int a, int b) { return (a + b - 1) / b; };
     const int visible   = envelope.max_visible_keys;
-    if (width > kGroupedPrefillMaxWidth) {
+    if (width > grouped_prefill_max_width(heads, batch, multiprocessor_count)) {
         const auto instance =
             heads == 16 && width >= 1024 && width % 128 == 0 && visible - width >= 8192
                 ? Bf16KvInstance::Tiled128
@@ -57,7 +70,8 @@ std::size_t bf16_kv_workspace_bytes(int heads, int batch, int min_width, int max
                                     CausalAttentionExecutionEnvelope envelope,
                                     int multiprocessor_count) {
     std::size_t maximum = 0;
-    for (int width = min_width; width <= std::min(max_width, kGroupedPrefillMaxWidth); ++width) {
+    const int grouped_max = grouped_prefill_max_width(heads, batch, multiprocessor_count);
+    for (int width = min_width; width <= std::min(max_width, grouped_max); ++width) {
         const auto plan =
             select_bf16_kv_causal_plan(heads, width, batch, envelope, multiprocessor_count);
         WorkspaceLayoutBuilder layout;

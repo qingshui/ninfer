@@ -1,5 +1,7 @@
 #include "models/common/parallel_wire.h"
 
+#include <stdexcept>
+
 namespace ninfer::models {
 namespace {
 using distributed::wire::Encoder;
@@ -119,7 +121,9 @@ void encode_rank_options(Encoder& out, const EngineOptions& o) {
     out.u32(o.max_context);
     out.u32(o.max_concurrency);
     out.u32(o.prefill_chunk);
-    out.u8(static_cast<std::uint8_t>(o.kv_cache));
+    if (!o.kv_cache)
+        throw std::logic_error("rank options require a resolved KV cache storage");
+    out.u8(static_cast<std::uint8_t>(*o.kv_cache));
     out.u8(static_cast<std::uint8_t>(o.speculative.backend));
     out.u32(o.speculative.draft_tokens);
     out.u8(static_cast<std::uint8_t>(o.speculative.proposal_head));

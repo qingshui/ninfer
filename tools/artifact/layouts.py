@@ -165,7 +165,7 @@ BLOCK_SCALE_M128_K128_V1 = Layout(
 ROW_SCALE_V1 = Layout(
     "row_scale_v1",
     256,
-    frozenset(("fp8_e4m3fn_row_bf16",)),
+    frozenset(("fp8_e4m3fn_row_bf16", "fp8_e4m3fn_row_fp32")),
 )
 ROW_PAGED_G16_4K_V1 = Layout(
     "row_paged_g16_4k_v1", 4096, frozenset(("nf4_g16_e4m3fn",))
@@ -354,7 +354,7 @@ def row_scale_geometry(
     n, k = _shape(shape, rank=2)
     code_plane_bytes = n * k
     scale_plane_offset = align_up(code_plane_bytes, PLANE_ALIGNMENT)
-    scale_plane_bytes = n * 2
+    scale_plane_bytes = n * spec.scale_bytes
     return RowScaleGeometry(
         n=n,
         k=k,

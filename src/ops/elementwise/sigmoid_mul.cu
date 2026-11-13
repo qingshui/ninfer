@@ -123,6 +123,44 @@ void launch_sigmoid_mul(const Tensor& gate, Tensor& x, cudaStream_t stream) {
     CUDA_CHECK(cudaGetLastError());
 }
 
+// One thread owns one 8-element pack of a single head, so the gate is loaded and activated once.
+// Requires head_dim % 8 == 0 and 16-byte aligned x.
+__launch_bounds__(256) __global__
+    void headwise_sigmoid_mul_bf16x8_kernel(const __nv_bfloat16* gate, common::Bf16x8Pack* x,
+                                            std::int32_t head_dim, std::int32_t heads,
+                                            std::int64_t packs) {
+    const std::int64_t start  = blockIdx.x * static_cast<std::int64_t>(blockDim.x) + threadIdx.x;
+    const std::int64_t stride = static_cast<std::int64_t>(gridDim.x) * blockDim.x;
+    const std::int64_t row    = static_cast<std::int64_t>(head_dim) * heads;
+    for (std::int64_t i = start; i < packs; i += stride) {
+        const std::int64_t element = i * 8;
+        const std::int64_t column  = element / row;
+        const std::int64_t head    = (element - column * row) / head_dim;
+        const float g = common::sigmoid(__bfloat162float(gate[column * heads + head]));
+        common::Bf16x8Pack xv = common::load_vec<common::Bf16x8Pack>(x + i);
+#pragma unroll
+        for (int pair = 0; pair < 4; ++pair) {
+            xv.pair[pair] = __floats2bfloat162_rn(__low2float(xv.pair[pair]) * g,
+                                                  __high2float(xv.pair[pair]) * g);
+        }
+        common::store_vec(x + i, xv);
+    }
+}
+
+__global__ void headwise_sigmoid_mul_scalar_kernel(const __nv_bfloat16* gate, __nv_bfloat16* x,
+                                                   std::int32_t head_dim, std::int32_t heads,
+                                                   std::int64_t n) {
+    const std::int64_t start  = blockIdx.x * static_cast<std::int64_t>(blockDim.x) + threadIdx.x;
+    const std::int64_t stride = static_cast<std::int64_t>(gridDim.x) * blockDim.x;
+    const std::int64_t row    = static_cast<std::int64_t>(head_dim) * heads;
+    for (std::int64_t i = start; i < n; i += stride) {
+        const std::int64_t column = i / row;
+        const std::int64_t head   = (i - column * row) / head_dim;
+        x[i] = __float2bfloat16_rn(__bfloat162float(x[i]) *
+                                   common::sigmoid(__bfloat162float(gate[column * heads + head])));
+    }
+}
+
 std::int64_t numel_allow_zero(const Tensor& t) {
     std::int64_t total = 1;
     for (int d = 0; d < 4; ++d) {
@@ -162,6 +200,52 @@ void sigmoid_mul(const Tensor& gate, Tensor& x, CudaExecutionView execution) {
     }
 
     launch_sigmoid_mul(gate, x, stream);
+}
+
+void headwise_sigmoid_mul(const Tensor& gate, Tensor& x, CudaExecutionView execution) {
+    const auto stream = execution.stream();
+    if (gate.dtype != DType::BF16 || x.dtype != DType::BF16) {
+        throw std::invalid_argument("headwise_sigmoid_mul: gate/x must be BF16");
+    }
+    const std::int32_t heads = gate.ne[0];
+    if (gate.ne[1] != x.ne[1] || gate.ne[2] != x.ne[2] || gate.ne[3] != x.ne[3]) {
+        throw std::invalid_argument("headwise_sigmoid_mul: gate/x column shapes must match");
+    }
+    if (numel_allow_zero(x) == 0 || numel_allow_zero(gate) == 0) { return; }
+    if (x.ne[0] % heads != 0) {
+        throw std::invalid_argument("headwise_sigmoid_mul: x features must be a multiple of H");
+    }
+    if (gate.device != execution.device() || x.device != execution.device()) {
+        throw std::invalid_argument(
+            "headwise_sigmoid_mul: operands must belong to the execution device");
+    }
+    if (!gate.is_contiguous() || !x.is_contiguous()) {
+        throw std::invalid_argument("headwise_sigmoid_mul: gate/x must be contiguous");
+    }
+    if (gate.data == nullptr || x.data == nullptr) {
+        throw std::invalid_argument("headwise_sigmoid_mul: gate/x data must be non-null");
+    }
+
+    constexpr int kBlock   = 256;
+    constexpr int kMaxGrid = 4096;
+    const std::int32_t head_dim = x.ne[0] / heads;
+    const std::int64_t n        = x.numel();
+    if (head_dim % 8 == 0 &&
+        (reinterpret_cast<std::uintptr_t>(x.data) & (alignof(common::Bf16x8Pack) - 1)) == 0) {
+        const std::int64_t packs = n / 8;
+        const int grid           = static_cast<int>(std::min<std::int64_t>(
+            kMaxGrid, common::div_up(packs, static_cast<std::int64_t>(kBlock))));
+        headwise_sigmoid_mul_bf16x8_kernel<<<grid, kBlock, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(gate.data),
+            static_cast<common::Bf16x8Pack*>(x.data), head_dim, heads, packs);
+    } else {
+        const int grid = static_cast<int>(std::min<std::int64_t>(
+            kMaxGrid, common::div_up(n, static_cast<std::int64_t>(kBlock))));
+        headwise_sigmoid_mul_scalar_kernel<<<grid, kBlock, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(gate.data), static_cast<__nv_bfloat16*>(x.data),
+            head_dim, heads, n);
+    }
+    CUDA_CHECK(cudaGetLastError());
 }
 
 } // namespace ninfer::ops

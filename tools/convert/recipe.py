@@ -29,6 +29,7 @@ from .methods import (
     grouped_absmax,
     fp8_block_maxabs,
     fp8_row_maxabs,
+    fp8_row_fp32_maxabs,
     import_encoded,
 )
 from .model import Model
@@ -571,6 +572,7 @@ class Recipe:
             cast_direct,
             grouped_absmax,
             fp8_row_maxabs,
+            fp8_row_fp32_maxabs,
             fp8_block_maxabs,
             import_encoded,
         )

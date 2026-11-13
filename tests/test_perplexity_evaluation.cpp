@@ -186,7 +186,7 @@ int check_report(const Files& files) {
                                 {.rank = 1, .node = 1, .device = 3, .hardware = "second"}};
     run.engine.max_context   = 4096;
     run.engine.prefill_chunk = 256;
-    run.engine.kv_cache      = options.launch.engine.kv_cache;
+    run.engine.kv_cache      = options.launch.engine.kv_cache.value();
     run.startup.ranks.resize(2);
     run.initial.ranks.resize(2);
     for (std::uint32_t rank = 0; rank < 2; ++rank) {

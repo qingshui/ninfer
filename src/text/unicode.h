@@ -51,6 +51,7 @@ std::string codepoint_to_utf8(std::int32_t codepoint);
 bool is_letter(std::int32_t codepoint) noexcept;
 bool is_mark(std::int32_t codepoint) noexcept;
 bool is_number(std::int32_t codepoint) noexcept;
+bool is_punctuation_or_symbol(std::int32_t codepoint) noexcept;
 bool is_whitespace(std::int32_t codepoint) noexcept;
 bool is_python_whitespace(std::int32_t codepoint) noexcept;
 

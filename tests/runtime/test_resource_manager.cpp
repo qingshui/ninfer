@@ -446,6 +446,14 @@ struct Program {
 
     [[nodiscard]] bool has_context_operation() const { return transfer_in_progress; }
 
+    // The mock directory epoch advances with checkpoint mutations (each add() publishes a new
+    // revision), so fixed reclaim decisions are reused while the directory is still.
+    [[nodiscard]] std::uint64_t context_epoch() const { return checkpoint_revision; }
+
+    // An in-flight context operation pins every checkpoint: nothing is released until it
+    // completes (the same conservative contract glm5next's session implements).
+    [[nodiscard]] bool context_pins(Handle) const { return transfer_in_progress; }
+
     bool release_redundant_host(std::span<const Handle>) { return false; }
 
     struct Demotion {

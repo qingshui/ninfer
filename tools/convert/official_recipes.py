@@ -6,6 +6,7 @@ from .methods import (
     AuxiliaryValue,
     cast_direct,
     fp8_row_maxabs,
+    fp8_row_fp32_maxabs,
     fp8_block_maxabs,
     grouped_absmax,
     import_encoded,
@@ -21,6 +22,7 @@ Q5 = "q5_g64_fp16"
 Q6 = "q6_g64_fp16"
 Q8 = "q8_g32_fp16"
 FP8 = "fp8_e4m3fn_row_bf16"
+FP8_FP32 = "fp8_e4m3fn_row_fp32"
 
 
 def _assign(recipe, name, format, *, source=None):
@@ -184,6 +186,55 @@ def qwen3_8_27b_nvfp4(model, recipe, sources):
             source=model.source(name, quantized, format),
             activation_policy="AllowA4" if format == "nvfp4" else "AllowA8",
         )
+
+
+def _spark_recipe(model, recipe, fp8_source):
+    """Spark2.5 tuning surface: representation per projection role and tied head.
+
+    Both variants run the projections as FP8 row-scaled w8a8 (the FP8 checkpoint imports its
+    published words, the BF16 checkpoint is quantized per channel with FP32 scales) and store
+    the tied embedding/head as Q8. Only ``attention/gate`` stays BF16.
+    """
+    if model.config.get("architectures") != ["Spark2_5ForCausalLM"]:
+        raise ValueError("this official recipe requires Spark2.5 mathematics")
+    recipe.provenance.update(mapping="spark2_5_v1", qkv_rows="query_key_value")
+    for name, parameter in model.parameters.items():
+        if name == "text/output_head" and model.config["tie_word_embeddings"]:
+            continue
+        if name == "text/token_embedding":
+            _assign(recipe, name, Q8)
+        elif parameter.projection and not name.endswith(
+            ("/attention/gate", "text/output_head")
+        ):
+            if fp8_source is not None:
+                recipe.assign(
+                    name,
+                    format=FP8_FP32,
+                    method=import_encoded,
+                    source=model.source(name, fp8_source, FP8_FP32),
+                    activation_policy="AllowA8",
+                )
+            else:
+                recipe.assign(
+                    name,
+                    format=FP8_FP32,
+                    method=fp8_row_fp32_maxabs,
+                    activation_policy="AllowA8",
+                )
+        elif parameter.projection:
+            recipe.assign(
+                name, format="bf16", method=cast_direct, activation_policy="A16Only"
+            )
+    if model.config["tie_word_embeddings"]:
+        recipe.share("text/output_head", "text/token_embedding")
+
+
+def spark_x2_6_17b_bf16(model, recipe, sources):
+    _spark_recipe(model, recipe, None)
+
+
+def spark_x2_6_17b_fp8(model, recipe, sources):
+    _spark_recipe(model, recipe, sources["base"])
 
 
 def qwen3_8_flash_next(model, recipe, sources):
@@ -675,4 +726,6 @@ RECIPES = {
     "qwen3_8_27b_nvfp4": qwen3_8_27b_nvfp4,
     "qwen3_6_35b_a3b": qwen3_6_35b_a3b,
     "qwen3_8_flash_next": qwen3_8_flash_next,
+    "spark_x2_6_17b_bf16": spark_x2_6_17b_bf16,
+    "spark_x2_6_17b_fp8": spark_x2_6_17b_fp8,
 }

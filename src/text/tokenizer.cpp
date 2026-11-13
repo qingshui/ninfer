@@ -32,6 +32,18 @@ constexpr std::string_view kQwenSplitPattern =
 constexpr std::string_view kLetterDigit3Pattern =
     R"glm((?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+)glm";
 
+constexpr std::string_view kSingleDigitPattern = R"digit(\p{N}{1,3})digit";
+
+constexpr std::string_view kCjkRunPattern = "[\u4e00-\u9fa5\u3040-\u309f\u30a0-\u30ff]+";
+
+// The third Split pattern, with the carriage return and line feed the JSON string carries.
+constexpr std::string_view kPunctLetterPattern =
+    R"punct([!"#$%&'()*+,\-./:;<=>?@\[\\\]^_`{|}~][A-Za-z]+|[^)punct"
+    "\r\n"
+    R"punct(\p{L}\p{P}\p{S}]?[\p{L}\p{M}]+| ?[\p{P}\p{S}]+|[)punct"
+    "\r\n"
+    R"punct(]|\s+(?!\S)|\s+)punct";
+
 BpePipeline parse_pipeline(const Json& root, const Json& model) {
     const auto require = [](bool valid, const char* field) {
         if (!valid) {
@@ -44,29 +56,59 @@ BpePipeline parse_pipeline(const Json& root, const Json& model) {
     };
     BpePipeline pipeline;
     if (root.contains("normalizer") && !root["normalizer"].is_null()) {
-        require(type(root["normalizer"], "NFC"), "normalizer");
-        pipeline.normalize_nfc = true;
+        const auto& normalizer = root["normalizer"];
+        if (type(normalizer, "Sequence")) {
+            // An empty Sequence is the identity; any member would need its own support.
+            require(normalizer.contains("normalizers") && normalizer["normalizers"].is_array() &&
+                        normalizer["normalizers"].empty(),
+                    "normalizer");
+        } else {
+            require(type(normalizer, "NFC"), "normalizer");
+            pipeline.normalize_nfc = true;
+        }
     }
     require(root.contains("pre_tokenizer"), "pre_tokenizer");
     {
         const auto& pre = root["pre_tokenizer"];
         require(type(pre, "Sequence") && pre.contains("pretokenizers") &&
-                    pre["pretokenizers"].is_array() && pre["pretokenizers"].size() == 2,
+                    pre["pretokenizers"].is_array(),
                 "pre_tokenizer");
-        const auto& split = pre["pretokenizers"][0];
-        const auto& bytes = pre["pretokenizers"][1];
-        require(type(split, "Split") && split.contains("pattern") && split["pattern"].is_object() &&
-                    split.value("behavior", std::string{}) == "Isolated" &&
-                    split.value("invert", Json(false)) == false,
-                "pre_tokenizer.Split");
-        const auto pattern = split["pattern"].value("Regex", std::string{});
-        require(pattern == kQwenSplitPattern || pattern == kLetterDigit3Pattern,
-                "pre_tokenizer.Split.pattern");
-        pipeline.split =
-            pattern == kQwenSplitPattern ? BpeSplit::LetterMarkDigit1 : BpeSplit::LetterDigit3;
-        require(type(bytes, "ByteLevel") && bytes.value("add_prefix_space", Json(true)) == false &&
-                    bytes.value("use_regex", Json(true)) == false,
-                "pre_tokenizer.ByteLevel");
+        const auto& stages        = pre["pretokenizers"];
+        const auto isolated_split = [&](const Json& stage, std::string_view pattern) {
+            return type(stage, "Split") && stage.contains("pattern") &&
+                   stage["pattern"].is_object() &&
+                   stage["pattern"].value("Regex", std::string{}) == pattern &&
+                   stage.value("behavior", std::string{}) == "Isolated" &&
+                   stage.value("invert", Json(false)) == false;
+        };
+        const auto plain_byte_level = [&](const Json& stage) {
+            return type(stage, "ByteLevel") &&
+                   stage.value("add_prefix_space", Json(true)) == false &&
+                   stage.value("use_regex", Json(true)) == false;
+        };
+        if (stages.size() == 2) {
+            const auto& split = stages[0];
+            require(type(split, "Split") && split.contains("pattern") &&
+                        split["pattern"].is_object() &&
+                        split.value("behavior", std::string{}) == "Isolated" &&
+                        split.value("invert", Json(false)) == false,
+                    "pre_tokenizer.Split");
+            const auto pattern = split["pattern"].value("Regex", std::string{});
+            require(pattern == kQwenSplitPattern || pattern == kLetterDigit3Pattern,
+                    "pre_tokenizer.Split.pattern");
+            pipeline.split =
+                pattern == kQwenSplitPattern ? BpeSplit::LetterMarkDigit1 : BpeSplit::LetterDigit3;
+            require(plain_byte_level(stages[1]), "pre_tokenizer.ByteLevel");
+        } else {
+            require(stages.size() == 5 && isolated_split(stages[0], kSingleDigitPattern) &&
+                        isolated_split(stages[1], kCjkRunPattern) &&
+                        isolated_split(stages[2], kPunctLetterPattern) &&
+                        type(stages[3], "Digits") &&
+                        stages[3].value("individual_digits", Json(false)) == true &&
+                        plain_byte_level(stages[4]),
+                    "pre_tokenizer");
+            pipeline.split = BpeSplit::SingleDigitCjkPunct;
+        }
     }
     require(root.contains("decoder") && type(root["decoder"], "ByteLevel"), "decoder");
     if (root.contains("post_processor") && !root["post_processor"].is_null()) {
@@ -81,7 +123,10 @@ BpePipeline parse_pipeline(const Json& root, const Json& model) {
     require(!model.contains("ignore_merges") || model["ignore_merges"].is_boolean(),
             "model.ignore_merges");
     pipeline.ignore_merges = model.value("ignore_merges", false);
-    require(!model.contains("unk_token") || model["unk_token"].is_null(), "model.unk_token");
+    // An unk_token is only reachable through a missing byte symbol, which encode rejects.
+    require(!model.contains("unk_token") || model["unk_token"].is_null() ||
+                model["unk_token"].is_string(),
+            "model.unk_token");
     require(model.value("byte_fallback", Json(false)) == false, "model.byte_fallback");
     return pipeline;
 }
@@ -262,6 +307,14 @@ int parse_added_token_decoder_id(std::string_view key, std::string_view label) {
     return static_cast<int>(parsed);
 }
 
+// HF tokenizers that save their added tokens inside model.vocab list the same id and content in
+// both places. That agreement is one token, not a collision.
+bool vocab_declares(const AddedToken& token,
+                    const std::unordered_map<std::string, int>& vocab_tokens) {
+    const auto found = vocab_tokens.find(token.content);
+    return found != vocab_tokens.end() && found->second == token.id;
+}
+
 std::vector<AddedToken>
 load_added_tokens(const Json& root, std::string_view label, std::vector<std::string>& id_to_token,
                   const std::unordered_set<int>& occupied_vocab_ids,
@@ -274,8 +327,9 @@ load_added_tokens(const Json& root, std::string_view label, std::vector<std::str
     for (const Json& item : added) {
         AddedToken token = parse_added_token(item, label);
         validate_supported_added_token(token, label);
-        const auto index = static_cast<std::size_t>(token.id);
-        if (occupied_vocab_ids.contains(token.id)) {
+        const auto index    = static_cast<std::size_t>(token.id);
+        const bool in_vocab = vocab_declares(token, occupied_vocab_tokens);
+        if (!in_vocab && occupied_vocab_ids.contains(token.id)) {
             throw std::invalid_argument("field added_tokens overlaps existing id in " +
                                         std::string(label));
         }
@@ -283,7 +337,7 @@ load_added_tokens(const Json& root, std::string_view label, std::vector<std::str
             throw std::invalid_argument("field added_tokens has duplicate id in " +
                                         std::string(label));
         }
-        if (occupied_vocab_tokens.contains(token.content) ||
+        if ((!in_vocab && occupied_vocab_tokens.contains(token.content)) ||
             !seen_added_contents.emplace(token.content, token.id).second) {
             throw std::invalid_argument("field added_tokens has duplicate content mapping in " +
                                         std::string(label));
@@ -330,19 +384,20 @@ void merge_added_tokens_decoder(const Json& root, std::string_view label,
             }
             continue;
         }
-        if (occupied_vocab_ids.contains(id)) {
+        const bool in_vocab = vocab_declares(token, occupied_vocab_tokens);
+        if (!in_vocab && occupied_vocab_ids.contains(id)) {
             throw std::invalid_argument("added_tokens_decoder overlaps vocabulary id " +
                                         std::to_string(id));
         }
         if (token_by_content.contains(token.content) ||
-            occupied_vocab_tokens.contains(token.content)) {
+            (!in_vocab && occupied_vocab_tokens.contains(token.content))) {
             throw std::invalid_argument("conflicting added-token content mapping for " +
                                         token.content);
         }
 
         const auto index = static_cast<std::size_t>(id);
         if (index >= id_to_token.size()) { id_to_token.resize(index + 1); }
-        if (!id_to_token[index].empty()) {
+        if (!in_vocab && !id_to_token[index].empty()) {
             throw std::invalid_argument("duplicate tokenizer mapping for id " + std::to_string(id));
         }
         id_to_token[index] = token.content;
@@ -555,6 +610,112 @@ std::size_t word_end(std::string_view text, std::size_t begin) {
     return after_first;
 }
 
+// Piece boundaries of the Sequence [Split \p{N}{1,3}, Split CJK runs, Split punctuation/letter
+// pieces, Digits(individual)], all Isolated. Every stage cuts the pieces of the stage before it,
+// and a regex sees only its own piece, so the lookahead of `\s+(?!\S)` stops at a digit or CJK
+// boundary. Digits are numeric characters of their own, CJK runs are maximal kana/ideograph
+// stretches, and the third regex runs inside what is left. Text no alternative matches stays
+// together as one piece.
+struct DigitCjkSegment {
+    std::string_view text;
+    bool cjk = false;
+
+    static bool is_cjk(std::int32_t codepoint) noexcept {
+        return (codepoint >= 0x4e00 && codepoint <= 0x9fa5) ||
+               (codepoint >= 0x3040 && codepoint <= 0x309f) ||
+               (codepoint >= 0x30a0 && codepoint <= 0x30ff);
+    }
+
+    // The codepoint at offset, or length 0 when offset leaves the segment.
+    uni::CodepointSpan at(std::size_t offset) const {
+        if (offset >= text.size()) { return {-1, offset, 0}; }
+        const uni::CodepointSpan value = input_codepoint_at(text, offset);
+        const bool member =
+            cjk ? is_cjk(value.value) : !is_cjk(value.value) && !uni::is_number(value.value);
+        return member ? value : uni::CodepointSpan{-1, offset, 0};
+    }
+
+    template <typename Matches>
+    std::size_t run_end(std::size_t offset, Matches&& matches) const {
+        for (uni::CodepointSpan value = at(offset); value.length != 0; value = at(offset)) {
+            if (!matches(value.value)) { break; }
+            offset += value.length;
+        }
+        return offset;
+    }
+};
+
+bool is_ascii_punctuation_or_symbol(std::int32_t codepoint) noexcept {
+    return (codepoint >= '!' && codepoint <= '/') || (codepoint >= ':' && codepoint <= '@') ||
+           (codepoint >= '[' && codepoint <= '`') || (codepoint >= '{' && codepoint <= '~');
+}
+
+bool is_ascii_letter(std::int32_t codepoint) noexcept {
+    return (codepoint >= 'A' && codepoint <= 'Z') || (codepoint >= 'a' && codepoint <= 'z');
+}
+
+bool is_letter_or_mark(std::int32_t codepoint) noexcept {
+    return uni::is_letter(codepoint) || uni::is_mark(codepoint);
+}
+
+// Length of the first alternative of the punctuation/letter regex that matches at begin, as an
+// end offset; begin itself when no alternative matches.
+std::size_t punct_letter_match_end(const DigitCjkSegment& segment, std::size_t begin) {
+    const uni::CodepointSpan first = segment.at(begin);
+    const std::size_t after_first  = begin + first.length;
+    const uni::CodepointSpan next  = segment.at(after_first);
+    const std::int32_t cp          = first.value;
+
+    // [ASCII punctuation][A-Za-z]+
+    if (is_ascii_punctuation_or_symbol(cp) && next.length != 0 && is_ascii_letter(next.value)) {
+        return segment.run_end(after_first, is_ascii_letter);
+    }
+    // [^\r\n\p{L}\p{P}\p{S}]?[\p{L}\p{M}]+ : a letter or mark run, led by at most one other
+    // character. A leading mark already belongs to the run, so both readings end together.
+    if (is_letter_or_mark(cp)) { return segment.run_end(after_first, is_letter_or_mark); }
+    if (!is_newline(cp) && !uni::is_punctuation_or_symbol(cp) && next.length != 0 &&
+        is_letter_or_mark(next.value)) {
+        return segment.run_end(after_first, is_letter_or_mark);
+    }
+    //  ?[\p{P}\p{S}]+
+    if (cp == ' ' && next.length != 0 && uni::is_punctuation_or_symbol(next.value)) {
+        return segment.run_end(after_first, uni::is_punctuation_or_symbol);
+    }
+    if (uni::is_punctuation_or_symbol(cp)) {
+        return segment.run_end(after_first, uni::is_punctuation_or_symbol);
+    }
+    // [\r\n]
+    if (is_newline(cp)) { return after_first; }
+    // \s+(?!\S) then \s+ : a run leaves its last character to the next piece unless the
+    // segment ends with it.
+    if (uni::is_whitespace(cp)) {
+        std::size_t last_begin = begin;
+        std::size_t count      = 0;
+        std::size_t end        = begin;
+        for (uni::CodepointSpan value                                    = segment.at(end);
+             value.length != 0 && uni::is_whitespace(value.value); value = segment.at(end)) {
+            last_begin = end;
+            end += value.length;
+            ++count;
+        }
+        if (segment.at(end).length == 0) { return end; }
+        return count >= 2 ? last_begin : end;
+    }
+    return begin;
+}
+
+std::size_t digit_cjk_piece_end(std::string_view text, std::size_t begin) {
+    const uni::CodepointSpan first = input_codepoint_at(text, begin);
+    if (uni::is_number(first.value)) { return begin + first.length; }
+    const DigitCjkSegment segment{text, DigitCjkSegment::is_cjk(first.value)};
+    if (const std::size_t end = punct_letter_match_end(segment, begin); end > begin) { return end; }
+    std::size_t end = begin + first.length;
+    while (segment.at(end).length != 0 && punct_letter_match_end(segment, end) == end) {
+        end += segment.at(end).length;
+    }
+    return end;
+}
+
 bool is_stop_token_id(std::span<const int> stop_token_ids, int id) {
     return std::find(stop_token_ids.begin(), stop_token_ids.end(), id) != stop_token_ids.end();
 }
@@ -616,9 +777,18 @@ bool append_normalized_bpe_ids(std::vector<int>& ids, std::string_view normalize
     if (ids.size() == max_tokens) { return false; }
 
     for (std::size_t begin = 0; begin < normalized.size();) {
-        const std::size_t end = pipeline.split == BpeSplit::LetterMarkDigit1
-                                    ? word_end<BpeSplit::LetterMarkDigit1>(normalized, begin)
-                                    : word_end<BpeSplit::LetterDigit3>(normalized, begin);
+        std::size_t end = 0;
+        switch (pipeline.split) {
+        case BpeSplit::LetterMarkDigit1:
+            end = word_end<BpeSplit::LetterMarkDigit1>(normalized, begin);
+            break;
+        case BpeSplit::LetterDigit3:
+            end = word_end<BpeSplit::LetterDigit3>(normalized, begin);
+            break;
+        case BpeSplit::SingleDigitCjkPunct:
+            end = digit_cjk_piece_end(normalized, begin);
+            break;
+        }
         const std::string_view word(normalized.data() + begin, end - begin);
         if (pipeline.ignore_merges) {
             if (const auto found = whole_tokens.find(word); found != whole_tokens.end()) {

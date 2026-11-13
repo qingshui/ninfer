@@ -1,8 +1,12 @@
 #include "runtime/engine/startup.h"
 #include "runtime/engine/startup.inl"
+#include "models/qwen3_5/config.h"
 #include "models/qwen3_5/startup.h"
 #include "models/qwen3_5/measurement.h"
+#include "models/qwen4_exp/config.h"
 #include "models/qwen4_exp/startup.h"
+#include "models/glm5next/config.h"
+#include "models/spark2_5/startup.h"
 #include "models/glm5next/startup.h"
 #include "runtime/engine/prepared_startup.inl"
 #if NINFER_ENABLE_DISTRIBUTED
@@ -29,7 +33,7 @@ void validate_options(const EngineOptions& options) {
         throw std::invalid_argument("Engine max_context must be nonzero");
     }
     if (options.max_concurrency == 0 || options.max_concurrency > kMaximumConcurrency) {
-        throw std::invalid_argument("Engine max_concurrency must be in [1,8]");
+        throw std::invalid_argument("Engine max_concurrency must be in [1,16]");
     }
     if (options.max_pending_requests == 0 || options.pending_timeout_ms == 0) {
         throw std::invalid_argument("Engine pending request capacity and timeout must be nonzero");
@@ -61,7 +65,7 @@ EngineOptions normalize_engine_options(EngineOptions options) {
         throw std::invalid_argument("Engine purpose is invalid");
     }
     if (options.max_concurrency == 0 || options.max_concurrency > kMaximumConcurrency) {
-        throw std::invalid_argument("Engine max_concurrency must be in [1,8]");
+        throw std::invalid_argument("Engine max_concurrency must be in [1,16]");
     }
 
     if (!options.context_cache.checkpoint_interval)
@@ -87,6 +91,7 @@ ConstructedModel construct_model(EngineOptions& options) {
     inspect.complete();
     switch (models::resolve_architecture(reader.directory())) {
     case models::Architecture::Glm5Next: {
+        options.kv_cache = models::glm5next::resolve_kv_cache(options);
 #if NINFER_ENABLE_DISTRIBUTED
         if (options.deployment && options.deployment->ranks.size() > 1) {
             auto built = detail::build_distributed_model<models::glm5next::ParallelStartup>(
@@ -100,6 +105,7 @@ ConstructedModel construct_model(EngineOptions& options) {
         return {std::move(built.instance), std::move(built.load), std::move(built.context_cost)};
     }
     case models::Architecture::Qwen4Exp: {
+        options.kv_cache = models::qwen4_exp::resolve_kv_cache(options);
 #if NINFER_ENABLE_DISTRIBUTED
         if (options.deployment && options.deployment->ranks.size() > 1) {
             auto built = detail::build_distributed_model<models::qwen4_exp::ParallelStartup>(
@@ -113,7 +119,15 @@ ConstructedModel construct_model(EngineOptions& options) {
     }
     case models::Architecture::Qwen3_5:
     case models::Architecture::Qwen3_5Moe: {
+        options.kv_cache = models::qwen3_5::resolve_kv_cache(options);
         auto built = detail::build_local_model<models::qwen3_5::Startup>(reader, options, start);
+        return {std::move(built.instance), std::move(built.load), std::move(built.context_cost)};
+    }
+    case models::Architecture::Spark2_5: {
+        if (options.deployment && options.deployment->ranks.size() > 1)
+            throw std::invalid_argument("Spark2_5 does not support multi-rank deployment");
+        options.kv_cache = models::spark2_5::resolve_kv_cache(options);
+        auto built = detail::build_local_model<models::spark2_5::Startup>(reader, options, start);
         return {std::move(built.instance), std::move(built.load), std::move(built.context_cost)};
     }
     }

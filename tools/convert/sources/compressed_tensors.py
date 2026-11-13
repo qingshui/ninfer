@@ -11,10 +11,15 @@ import struct
 
 import torch
 
-from tools.artifact.codecs.fp8_row import validate_fp8_row_words
+from tools.artifact.codecs.fp8_row import (
+    validate_fp8_row_fp32_words,
+    validate_fp8_row_words,
+)
 from tools.artifact.formats import valid_positive_fp32_word
 from .logical import EncodedRows, LogicalSource
 from .safetensors import SafetensorsSource, tensor_source
+
+_ROW_FORMATS = ("fp8_e4m3fn_row_bf16", "fp8_e4m3fn_row_fp32")
 
 
 def _divisor_word(store: SafetensorsSource, name: str) -> bytes:
@@ -32,7 +37,7 @@ def compressed_matrix_source(
     store: SafetensorsSource, prefix: str, shape: tuple[int, int], format: str
 ) -> LogicalSource:
     """Interpret the current compressed-tensors NVFP4 or per-row FP8 representation."""
-    if format not in ("nvfp4", "fp8_e4m3fn_row_bf16"):
+    if format != "nvfp4" and format not in _ROW_FORMATS:
         raise ValueError(f"unsupported encoded source format {format}")
     n, k = shape
     if format == "nvfp4" and k % 16:
@@ -69,7 +74,18 @@ def compressed_matrix_source(
         weight, scale = f"{prefix}.weight", f"{prefix}.weight_scale"
         signature(weight, shape, "F8_E4M3")
         info = store.describe(scale)
-        if info.dtype != "BF16" or prod(info.shape) != n:
+        if format == "fp8_e4m3fn_row_fp32":
+            if info.dtype != "F32" or info.shape not in ((n, 1), (n,)):
+                raise ValueError(
+                    f"{scale}: expected F32 scales with shape ({n}, 1) or ({n},), "
+                    f"got {info.dtype}{info.shape}"
+                )
+        elif info.dtype == "F32":
+            raise ValueError(
+                f"{scale}: F32 row scales cannot be imported as {format}; "
+                "request fp8_e4m3fn_row_fp32 instead of rounding them to BF16"
+            )
+        elif info.dtype != "BF16" or prod(info.shape) != n:
             raise ValueError(f"{scale}: expected one BF16 scale per row")
         codes = (
             store.read_flat(weight, begin * k, end * k)
@@ -77,7 +93,13 @@ def compressed_matrix_source(
             .reshape(end - begin, k)
         )
         scales = store.read_flat(scale, begin, end)
-        validate_fp8_row_words(codes, scales)
+        if format == "fp8_e4m3fn_row_fp32":
+            try:
+                validate_fp8_row_fp32_words(codes, scales)
+            except ValueError as error:
+                raise ValueError(f"{scale}: {error}") from error
+        else:
+            validate_fp8_row_words(codes, scales)
         return EncodedRows(format, codes, scales)
 
     def read(begin: int, end: int) -> torch.Tensor:
@@ -85,7 +107,7 @@ def compressed_matrix_source(
             return torch.empty(0, dtype=torch.float32)
         first, last = begin // k, (end + k - 1) // k
         words = encoded(first, last)
-        if format == "fp8_e4m3fn_row_bf16":
+        if format in _ROW_FORMATS:
             values = (
                 words.codes.view(torch.float8_e4m3fn).float()
                 * words.scales.float()[:, None]
@@ -151,7 +173,12 @@ def matrix_source(
             if actual is None and store.has(prefix + ".weight_packed"):
                 actual = "nvfp4"
             if actual is None and store.describe(name).dtype == "F8_E4M3":
-                actual = "fp8_e4m3fn_row_bf16"
+                scale_dtype = store.describe(prefix + ".weight_scale").dtype
+                actual = (
+                    "fp8_e4m3fn_row_fp32"
+                    if scale_dtype == "F32"
+                    else "fp8_e4m3fn_row_bf16"
+                )
             resolved = (
                 tensor_source(store, name, shape)
                 if actual is None

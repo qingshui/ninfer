@@ -1,4 +1,4 @@
-"""Exact E4M3FN code words and BF16 row scales in row_scale_v1 layout."""
+"""Exact E4M3FN code words and BF16 or FP32 row scales in row_scale_v1 layout."""
 
 from __future__ import annotations
 
@@ -93,5 +93,86 @@ def dequantize_fp8_row_scaled(
 
     codes, scales = decode_fp8_row_scaled_words(payload, shape)
     return (codes.view(torch.float8_e4m3fn).float() * scales.float().unsqueeze(1)).to(
+        dtype
+    )
+
+
+def _exact_fp32_vector(tensor: torch.Tensor, length: int, label: str) -> torch.Tensor:
+    if tensor.dtype != torch.float32 or tuple(tensor.shape) != (length,):
+        raise TypeError(f"{label} must be FP32 with shape ({length},)")
+    return tensor.detach().contiguous().cpu()
+
+
+def validate_fp8_row_fp32_words(codes: torch.Tensor, scales: torch.Tensor) -> None:
+    if bool(((codes & 0x7F) == 0x7F).any()):
+        raise ValueError("row-scaled FP8 codes must be finite E4M3FN words")
+    if scales.dtype != torch.float32:
+        raise TypeError("row-scaled FP8 FP32 scales must have dtype float32")
+    if bool((torch.signbit(scales) | ~torch.isfinite(scales)).any()):
+        raise ValueError("row-scaled FP8 scales must be nonnegative finite FP32 words")
+    zero_scale = scales == 0
+    nonzero_code = (codes & 0x7F) != 0
+    if bool((zero_scale.unsqueeze(1) & nonzero_code).any()):
+        raise ValueError("a zero row scale requires only signed-zero FP8 codes")
+
+
+def encode_fp8_row_fp32(
+    code_words: torch.Tensor,
+    row_scales: torch.Tensor,
+    shape: Sequence[int],
+) -> bytes:
+    """Encode exact E4M3FN code words and FP32 row multipliers."""
+
+    geometry = row_scale_geometry("fp8_e4m3fn_row_fp32", shape)
+    codes = _exact_uint8_matrix(
+        code_words,
+        (geometry.n, geometry.k),
+        "row-scaled FP8 codes",
+    )
+    scales = _exact_fp32_vector(
+        row_scales,
+        geometry.n,
+        "row-scaled FP8 scales",
+    )
+    validate_fp8_row_fp32_words(codes, scales)
+    payload = bytearray(geometry.payload_bytes)
+    payload[: geometry.code_plane_bytes] = codes.numpy().tobytes()
+    scale_begin = geometry.scale_plane_offset
+    payload[scale_begin : scale_begin + geometry.scale_plane_bytes] = encode_direct(
+        scales, "fp32"
+    )
+    return bytes(payload)
+
+
+def decode_fp8_row_fp32_words(
+    payload: Payload,
+    shape: Sequence[int],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Decode exact E4M3FN code words and FP32 row multipliers."""
+
+    geometry = row_scale_geometry("fp8_e4m3fn_row_fp32", shape)
+    if _payload_length(payload) != geometry.payload_bytes:
+        raise ValueError(
+            f"row-scaled FP8 payload has {_payload_length(payload)} bytes, "
+            f"expected {geometry.payload_bytes}"
+        )
+    raw = _payload_tensor(payload, torch.device("cpu"))
+    codes = raw[: geometry.code_plane_bytes].clone().reshape(geometry.n, geometry.k)
+    scale_begin = geometry.scale_plane_offset
+    scale_bytes = raw[scale_begin : scale_begin + geometry.scale_plane_bytes]
+    scales = decode_direct(scale_bytes, "fp32", (geometry.n,))
+    validate_fp8_row_fp32_words(codes, scales)
+    return codes, scales
+
+
+def dequantize_fp8_row_fp32(
+    payload: Payload,
+    shape: Sequence[int],
+    dtype: torch.dtype = torch.float32,
+) -> torch.Tensor:
+    """Reconstruct a row-scaled FP8 matrix from its exact stored words."""
+
+    codes, scales = decode_fp8_row_fp32_words(payload, shape)
+    return (codes.view(torch.float8_e4m3fn).double() * scales.double().unsqueeze(1)).to(
         dtype
     )

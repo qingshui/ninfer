@@ -19,6 +19,8 @@ Architecture resolve_architecture(const artifact::Directory& directory) {
 Architecture resolve_architecture(std::string_view architecture, std::string_view model_type) {
     if (architecture == "Glm5NextForCausalLM" && model_type == "glm5next_text")
         return Architecture::Glm5Next;
+    if (architecture == "Spark2_5ForCausalLM" && model_type == "spark2_5_text")
+        return Architecture::Spark2_5;
     if (architecture == "Qwen4ExpForCausalLM" && model_type == "qwen4_exp_text") {
         return Architecture::Qwen4Exp;
     }
@@ -36,6 +38,8 @@ std::string_view architecture_name(Architecture architecture) noexcept {
     switch (architecture) {
     case Architecture::Glm5Next:
         return "Glm5NextForCausalLM";
+    case Architecture::Spark2_5:
+        return "Spark2_5ForCausalLM";
     case Architecture::Qwen4Exp:
         return "Qwen4ExpForCausalLM";
     case Architecture::Qwen3_5:

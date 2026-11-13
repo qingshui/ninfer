@@ -60,3 +60,5 @@ ninfer_linear_suite(bias test.cpp cases_native.cpp)
 if(NINFER_TARGET STREQUAL "dgx_spark")
   ninfer_linear_format_tests(bias bf16 mxfp8 nvfp4_mul)
 endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/geglu_t2/tests.cmake")

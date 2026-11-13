@@ -17,6 +17,10 @@ bool pair_aligned(const Tensor& x) {
     return common::operand::aligned(x.data, 4) && x.nb[2] % 4 == 0;
 }
 
+bool vector8_aligned(const Tensor& x) {
+    return common::operand::aligned(x.data, 8) && x.nb[2] % 8 == 0;
+}
+
 template <RopeKernelMode Mode, int QHeads, int KHeads>
 Selection select_fixed(int tokens, int multiprocessors) {
     int threads = 128;
@@ -100,6 +104,13 @@ Selection select_rope(const RopeArguments& a, int multiprocessors) {
         }
         if (!a.second)
             return select_fixed<RopeKernelMode::AxialD72R72, 16, 0>(tokens, multiprocessors);
+    }
+    if (axes == 1 && a.first.ne[0] == 256 && a.second && a.second->ne[0] == 256 &&
+        first_heads == kRopeD256Kv2QHeads && second_heads == 2 &&
+        (a.rotary_dim == 64 || (a.rotary_dim == 256 && vector8_aligned(a.first) &&
+                                vector8_aligned(*a.second)))) {
+        return {a.rotary_dim == 64 ? launch_rope_d256_kv2<64> : launch_rope_d256_kv2<256>,
+                kRopeD256Kv2Threads};
     }
     return generic;
 }

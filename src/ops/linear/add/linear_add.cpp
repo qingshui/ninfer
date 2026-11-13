@@ -52,6 +52,8 @@ void validate_operands(const Tensor& x, const Weight& w, const Tensor& residual,
     operand::disjoint(operand::range(x.data, x.bytes(), "linear_add"),
                       operand::range(residual.data, residual.bytes(), "linear_add"), "linear_add");
 
+    if (w.qtype == QType::FP8_E4M3FN_ROW_FP32)
+        throw std::invalid_argument("linear_add: unsupported weight format");
     if (w.qtype == QType::FP8_E4M3FN_ROW_BF16) {
         (void)common::validate_fp8_weight(w, "linear_add");
         return;

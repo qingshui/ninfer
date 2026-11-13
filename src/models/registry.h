@@ -8,7 +8,7 @@ struct Directory;
 
 namespace ninfer::models {
 
-enum class Architecture { Qwen3_5, Qwen3_5Moe, Qwen4Exp, Glm5Next };
+enum class Architecture { Qwen3_5, Qwen3_5Moe, Qwen4Exp, Glm5Next, Spark2_5 };
 
 [[nodiscard]] Architecture resolve_architecture(const artifact::Directory&);
 [[nodiscard]] Architecture resolve_architecture(std::string_view architecture,

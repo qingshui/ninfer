@@ -113,7 +113,8 @@ StartupConfigurationView view(const LaunchOptions& launch, EntryPoint entry, con
             value = std::uint64_t{e.max_context};
             break;
         case Field::KvDtype:
-            value = std::string(kv_name(e.kv_cache));
+            value = e.kv_cache ? std::string(kv_name(*e.kv_cache))
+                               : std::string("default (model)");
             break;
         case Field::ContextCapacity:
             if (e.context_capacity.mode == ContextCapacityMode::Automatic)

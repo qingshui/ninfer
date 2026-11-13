@@ -105,4 +105,12 @@ struct Config {
 
 [[nodiscard]] Config parse_config(const artifact::Directory&, const LoadOptions&);
 
+// Model-owned defaults and limits for the shared EngineOptions fields.
+inline constexpr KvCacheStorage kDefaultKvCacheStorage      = KvCacheStorage::BFloat16;
+inline constexpr std::uint32_t kMaximumSupportedConcurrency = 8;
+
+[[nodiscard]] inline KvCacheStorage resolve_kv_cache(const EngineOptions& options) noexcept {
+    return options.kv_cache.value_or(kDefaultKvCacheStorage);
+}
+
 } // namespace ninfer::models::glm5next

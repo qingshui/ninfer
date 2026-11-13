@@ -17,4 +17,12 @@ extern const Fp8LinearShape kFp8N34816K5120;
 extern const Fp8LinearShape kFp8N5120K6144;
 extern const Fp8LinearShape kFp8N5120K17408;
 extern const Fp8LinearShape kFp8N248320K5120;
+
+// FP8_E4M3FN_ROW_FP32 shapes: the same row-scaled kernels with FP32 scale words.
+extern const Fp8LinearShape kFp8RowFp32N3072K2048;
+extern const Fp8LinearShape kFp8RowFp32N8K2048;
+extern const Fp8LinearShape kFp8RowFp32N2048K2048;
+extern const Fp8LinearShape kFp8RowFp32N13312K2048;
+extern const Fp8LinearShape kFp8RowFp32N131072K2048;
+extern const Fp8LinearShape kFp8RowFp32N2048K6656;
 } // namespace ninfer::ops::detail

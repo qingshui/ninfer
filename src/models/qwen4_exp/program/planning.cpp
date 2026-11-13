@@ -15,9 +15,10 @@ PersistentLayout persistent(const execution::ModelProfile& p, const EngineOption
     PersistentLayout out;
     out.state = plan_state_image(p.config, p.local.gdn);
     out.main  = plan_qsa_cache(b, p.local.qsa, p.config.text.qsa_layers, o.max_context,
-                               o.max_concurrency, o.kv_cache);
+                               o.max_concurrency, resolve_kv_cache(o));
     if (p.mtp)
-        out.mtp = plan_qsa_cache(b, p.local.qsa, 1, o.max_context, o.max_concurrency, o.kv_cache);
+        out.mtp = plan_qsa_cache(b, p.local.qsa, 1, o.max_context, o.max_concurrency,
+                            resolve_kv_cache(o));
     out.buffers =
         plan_buffers(b, p.config, o, o.prefill_chunk, p.public_tokens, p.local.gdn,
                      p.local.vocabulary, p.local.size, p.ple_placement == ple::Placement::Device);
@@ -54,8 +55,10 @@ std::shared_ptr<const moe::Plan> describe_moe_plan(const execution::ModelProfile
 namespace {
 EngineOptions options(const execution::ModelProfile& profile, const EngineOptions& supplied) {
     auto o = supplied;
-    if (load_options(o) != profile.options || o.max_concurrency == 0 ||
-        o.max_concurrency > kMaximumConcurrency || !o.max_context ||
+    if (o.max_concurrency > kMaximumSupportedConcurrency)
+        throw std::invalid_argument("Qwen4Exp supports max_concurrency up to " +
+                                    std::to_string(kMaximumSupportedConcurrency));
+    if (load_options(o) != profile.options || o.max_concurrency == 0 || !o.max_context ||
         o.max_context > profile.config.text.max_context)
         throw std::invalid_argument(
             "execution options differ from selected Qwen4Exp components or domain");
@@ -126,7 +129,7 @@ ExecutionShape describe_execution_shape(const execution::ModelProfile& profile,
             o.max_concurrency,
             o.prefill_chunk,
             o.speculative.draft_tokens,
-            o.kv_cache,
+            resolve_kv_cache(o),
             o.purpose,
             o.context_cache.enabled,
             o.use_cuda_graph,

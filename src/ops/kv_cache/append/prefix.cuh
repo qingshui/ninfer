@@ -13,19 +13,18 @@ inline constexpr int kKVCacheAppendPrefixHeadDim = 128;
 inline constexpr int kKVCacheAppendPrefixHeads   = 8;
 inline constexpr int kKVCacheAppendPrefixPage    = 64;
 
-template <int Capacity>
+template <int Dim, int Heads, int Capacity>
 __device__ __forceinline__ void
 prefix_copy_cyclic_unit(const __nv_bfloat16* __restrict__ k, const __nv_bfloat16* __restrict__ v,
                         __nv_bfloat16* __restrict__ cache_k, __half* __restrict__ cache_v,
                         int token, int unit_in_token, int slot, int padded_capacity) {
     constexpr int ElementsPerUnit = 8;
-    constexpr int UnitsPerHead    = kKVCacheAppendPrefixHeadDim / ElementsPerUnit;
+    constexpr int UnitsPerHead    = Dim / ElementsPerUnit;
     const int kv_head             = unit_in_token / UnitsPerHead;
     const int d                   = (unit_in_token - kv_head * UnitsPerHead) * ElementsPerUnit;
     const std::int64_t src =
-        static_cast<std::int64_t>(d) + static_cast<std::int64_t>(kKVCacheAppendPrefixHeadDim) *
-                                           (kv_head + kKVCacheAppendPrefixHeads * token);
-    const std::int64_t dst = kv::cyclic_offset<128, Capacity>(slot, kv_head, padded_capacity, d);
+        static_cast<std::int64_t>(d) + static_cast<std::int64_t>(Dim) * (kv_head + Heads * token);
+    const std::int64_t dst = kv::cyclic_offset<Dim, Capacity>(slot, kv_head, padded_capacity, d);
 
     const int4 key   = *reinterpret_cast<const int4*>(&k[src]);
     const int4 value = common::bf16x8_bits_to_f16x8_bits(*reinterpret_cast<const int4*>(&v[src]));
@@ -57,25 +56,29 @@ prefix_copy_paged_unit(const __nv_bfloat16* __restrict__ k, const __nv_bfloat16*
     *reinterpret_cast<int4*>(&cache_v[dst + 8]) = v1;
 }
 
-template <int Capacity, int Threads>
+// Row b writes the last min(count, Capacity) of its counts[b] rows. Older rows of a longer
+// prefix would be overwritten by the same call, so they are never stored. Callers whose rows
+// fit the ring (count <= Capacity) write every row.
+template <int Dim, int Heads, int Capacity, int Threads>
 __global__ void prefix_cyclic_kernel(
     const __nv_bfloat16* __restrict__ k, const __nv_bfloat16* __restrict__ v,
     const std::int32_t* __restrict__ positions, const std::int32_t* __restrict__ counts,
     const std::int64_t* __restrict__ state_offsets, __nv_bfloat16* __restrict__ cache_k,
     __half* __restrict__ cache_v, int min_count, int max_count, int width, int padded_capacity) {
-    static_assert(Capacity == 2048 || Capacity == 4096);
+    static_assert(Capacity == 512 || Capacity == 2048 || Capacity == 4096);
     static_assert((Capacity & (Capacity - 1)) == 0);
-    constexpr int UnitsPerToken = kKVCacheAppendPrefixHeads * kKVCacheAppendPrefixHeadDim / 8;
+    constexpr int UnitsPerToken = Heads * Dim / 8;
     const int unit              = static_cast<int>(blockIdx.x) * Threads + threadIdx.x;
-    const int token             = unit / UnitsPerToken;
+    const int local_token       = unit / UnitsPerToken;
     const int unit_in_token     = unit % UnitsPerToken;
     const int batch             = static_cast<int>(blockIdx.y);
     const int count             = counts[batch];
-    if (count < min_count || count > max_count || token >= count) return;
+    if (count < min_count || count > max_count) return;
+    const int token = (count > Capacity ? count - Capacity : 0) + local_token;
+    if (token >= count) return;
 
-    constexpr std::int64_t ElementsPerToken =
-        kKVCacheAppendPrefixHeadDim * kKVCacheAppendPrefixHeads;
-    const std::int64_t input_offset = ElementsPerToken * width * batch;
+    constexpr std::int64_t ElementsPerToken = static_cast<std::int64_t>(Dim) * Heads;
+    const std::int64_t input_offset         = ElementsPerToken * width * batch;
     k += input_offset;
     v += input_offset;
     positions += static_cast<std::int64_t>(width) * batch;
@@ -84,8 +87,8 @@ __global__ void prefix_cyclic_kernel(
 
     const int position = positions[token];
     const int slot     = position & (Capacity - 1);
-    prefix_copy_cyclic_unit<Capacity>(k, v, cache_k, cache_v, token, unit_in_token, slot,
-                                      padded_capacity);
+    prefix_copy_cyclic_unit<Dim, Heads, Capacity>(k, v, cache_k, cache_v, token, unit_in_token,
+                                                  slot, padded_capacity);
 }
 
 __global__ void prefix_paged_kernel(

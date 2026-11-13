@@ -14,7 +14,7 @@ GraphPreparationPlan describe_graph_preparation(const EngineOptions& options,
     out.max_concurrency = options.max_concurrency;
     out.draft_tokens    = options.speculative.draft_tokens;
     out.prefill_chunk   = options.prefill_chunk;
-    out.kv_cache        = options.kv_cache;
+    out.kv_cache        = resolve_kv_cache(options);
     out.vision          = options.enable_vision;
     if (!plan) return out;
     for (std::uint32_t batch = 1; batch <= options.max_concurrency; ++batch)

@@ -1,0 +1,106 @@
+{
+  "meta": {
+    "what": "Frozen sglang baselines for spark-x2.6-1.7b gate (tools/bench/spark_gate.py)",
+    "measured_date": "2026-11-10",
+    "sglang_version": "0.5.23",
+    "config": "run_spark_x26_17b_{bf16,fp8}.sh: trtllm_mha decode, cds=2, tuned FP8 GEMM tables, SWA ratio 0.15, chunked prefill 8192, 1M ctx, max-running 16, bf16 KV",
+    "bf16_url": "http://127.0.0.1:30013",
+    "fp8_url": "http://127.0.0.1:30012",
+    "bf16_measured_unix": 1794281350.661692,
+    "fp8_measured_unix": 1794281321.8715837,
+    "method": "prefill_tps = sum(prompt_tokens)/max(TTFT of wave); decode_tps = mean per-stream (completion-1)/(e2e-ttft); OpenAI /v1/chat/completions, enable_thinking=false, temp 0, 512 out tokens, nonce prompts",
+    "note": "FROZEN: do not re-measure or edit; gate reads sglang_prefill_tps/sglang_decode_tps per point."
+  },
+  "bf16": {
+    "points": {
+      "ctx1024_c1": {
+        "sglang_prefill_tps": 89430.08864704912,
+        "sglang_decode_tps": 281.440928728747,
+        "n": 3,
+        "failed": 0
+      },
+      "ctx1024_c8": {
+        "sglang_prefill_tps": 53910.09148748809,
+        "sglang_decode_tps": 220.38749553526972,
+        "n": 8,
+        "failed": 0
+      },
+      "ctx1024_c16": {
+        "sglang_prefill_tps": 36748.34386711167,
+        "sglang_decode_tps": 174.2861454875943,
+        "n": 16,
+        "failed": 0
+      },
+      "ctx8192_c16": {
+        "sglang_prefill_tps": 56679.120013065185,
+        "sglang_decode_tps": 134.13349252339367,
+        "n": 16,
+        "failed": 0
+      },
+      "ctx65536_c8": {
+        "sglang_prefill_tps": 37510.77840851078,
+        "sglang_decode_tps": 58.49184094071574,
+        "n": 8,
+        "failed": 0
+      },
+      "ctx262144_c8": {
+        "sglang_prefill_tps": 16143.569563130291,
+        "sglang_decode_tps": 30.681737871378623,
+        "n": 8,
+        "failed": 0
+      },
+      "ctx1048576_c1": {
+        "sglang_prefill_tps": 10674.460435861061,
+        "sglang_decode_tps": 80.24120072025644,
+        "n": 2,
+        "failed": 0
+      }
+    }
+  },
+  "fp8": {
+    "points": {
+      "ctx1024_c1": {
+        "sglang_prefill_tps": 119067.70043375128,
+        "sglang_decode_tps": 352.77999699612457,
+        "n": 3,
+        "failed": 0
+      },
+      "ctx1024_c8": {
+        "sglang_prefill_tps": 81900.93751879946,
+        "sglang_decode_tps": 320.65525217763354,
+        "n": 8,
+        "failed": 0
+      },
+      "ctx1024_c16": {
+        "sglang_prefill_tps": 54696.09154374349,
+        "sglang_decode_tps": 215.6134539350061,
+        "n": 16,
+        "failed": 0
+      },
+      "ctx8192_c16": {
+        "sglang_prefill_tps": 84165.74014198857,
+        "sglang_decode_tps": 185.03918433699616,
+        "n": 16,
+        "failed": 0
+      },
+      "ctx65536_c8": {
+        "sglang_prefill_tps": 48474.48729546389,
+        "sglang_decode_tps": 73.25270294656865,
+        "n": 8,
+        "failed": 0
+      },
+      "ctx262144_c8": {
+        "sglang_prefill_tps": 17928.587609403054,
+        "sglang_decode_tps": 34.344080490136,
+        "n": 8,
+        "failed": 0
+      },
+      "ctx1048576_c1": {
+        "sglang_prefill_tps": 10981.888600921253,
+        "sglang_decode_tps": 85.05556983241286,
+        "n": 2,
+        "failed": 0
+      }
+    }
+  }
+}

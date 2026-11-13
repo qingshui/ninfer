@@ -55,6 +55,15 @@ inline void launch_rope_generic(const RopeArguments& a, int threads, cudaStream_
         a.first.nb[2] / 2, a.second_stride());
 }
 
+template <int Rotary>
+void launch_rope_d256_kv2(const RopeArguments& a, int, cudaStream_t stream) {
+    CUDA_CHECK(pdl::launch_dependent(
+        {dim3(a.positions.ne[0]), dim3(kRopeD256Kv2Threads), 0, stream},
+        rope_d256_kv2_kernel<Rotary, true>, static_cast<const std::int32_t*>(a.positions.data),
+        static_cast<__nv_bfloat16*>(a.first.data), a.second_data(), a.positions.ne[0],
+        a.first.nb[2] / 2, a.second_stride(), a.theta));
+}
+
 template <int HeadsPerBlock>
 void launch_rope_axial64(const RopeArguments& a, int, cudaStream_t stream) {
     launch_axial_rope64<false, HeadsPerBlock>(
