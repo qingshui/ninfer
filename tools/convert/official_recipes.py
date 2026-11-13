@@ -188,6 +188,126 @@ def qwen3_8_27b_nvfp4(model, recipe, sources):
         )
 
 
+def qwen3_5_122b_nvfp4(model, recipe, sources):
+    """Qwen3.5-MoE ModelOpt NVFP4 import with expert-major banks and shared divisors.
+
+    Full-attention Q/K/V/O and the shared experts import their published NVFP4
+    words through the default sources (ModelOpt U8 tensors with weight_scale_2).
+    The routed experts pack into per-layer expert-major banks; every expert of a
+    layer shares one activation divisor pair stored in a single FP32 tensor.
+    """
+    if "num_experts" not in model.config:
+        raise ValueError("this official recipe requires Qwen3.5 MoE mathematics")
+    if "mtp" in model.components:
+        raise ValueError("qwen3_5_122b_nvfp4 converts the text component only")
+    cfg = model.config
+    h, experts, intermediate = (
+        cfg[key] for key in ("hidden_size", "num_experts", "moe_intermediate_size")
+    )
+    layers = cfg["num_hidden_layers"]
+    recipe.provenance.update(
+        mapping="qwen3_5_moe",
+        nvidia_nvfp4="preserve_codes_scales; RN_FP32(1/multiplier) divisors",
+        expert_banks="expert-major gate/up interleave and down; shared layer divisors",
+    )
+    _optional(model, recipe)
+    _assign(recipe, "text/token_embedding", Q8)
+    _assign(recipe, "text/output_head", Q8)
+    recipe.place("text/*", (0,))
+    if "vision" in model.components:
+        recipe.place("vision/*", (1, 0))
+    for name, parameter in model.parameters.items():
+        if not name.startswith("text/layers/") or not parameter.projection:
+            continue
+        if (
+            "/gdn/" in name
+            or name.endswith(("/moe/router", "/moe/shared_score"))
+            or "/moe/experts/" in name
+        ):
+            continue
+        recipe.assign(
+            name,
+            format="nvfp4",
+            method=import_encoded,
+            activation_policy="AllowA4",
+        )
+    for layer, kind in enumerate(cfg["layer_types"]):
+        if kind != "full_attention":
+            continue
+        scales = {}
+        for role in ("query", "key", "value"):
+            source = model.parameters[f"text/layers/{layer}/attention/{role}"].source
+            scales[role] = (source.weight_scale(), source.activation_scale())
+        if len(set(scales.values())) != 1:
+            raise ValueError(
+                f"layer {layer}: attention q/k/v weight_scale_2 or input_scale differ"
+            )
+    controls = []
+    for layer in range(layers):
+        prefix = f"text/layers/{layer}/moe/experts/"
+        gate_up_parts, down_parts = [], []
+        layer_inputs = None
+        for expert in range(experts):
+            refs, scalars = {}, {}
+            for role in ("gate", "up", "down"):
+                name = f"{prefix}{expert}/{role}"
+                source = model.parameters[name].source
+                refs[role] = source
+                scalars[role] = (source.weight_scale(), source.activation_scale())
+            if scalars["gate"] != scalars["up"]:
+                raise ValueError(
+                    f"layer {layer} expert {expert}: "
+                    "gate/up weight_scale_2 or input_scale differ"
+                )
+            inputs = (scalars["gate"][1], scalars["down"][1])
+            if layer_inputs is None:
+                layer_inputs = inputs
+                controls.extend(inputs)
+            elif layer_inputs != inputs:
+                raise ValueError(
+                    f"layer {layer} expert {expert}: "
+                    "input_scale differs within the layer"
+                )
+            gate_up_parts.extend(
+                (f"{prefix}{expert}/{role}", 0, intermediate * h, refs[role])
+                for role in ("gate", "up")
+            )
+            down_parts.append(
+                (f"{prefix}{expert}/down", 0, h * intermediate, refs["down"])
+            )
+        for parts, shape, order in (
+            (gate_up_parts, (experts, 2 * intermediate, h), 0),
+            (down_parts, (experts, h, intermediate), 1),
+        ):
+            recipe.parent(
+                parts,
+                shape=shape,
+                format="nvfp4",
+                method=import_encoded,
+                layout="batched_block_scale_k16_m128x4_v1",
+                order=(3, layer, order),
+            )
+    recipe.auxiliary_tensor(
+        "expert_activation_divisors",
+        AuxiliaryValue("fp32", (layers, 2), b"".join(controls)),
+    )
+    for layer in range(layers):
+        for expert in range(experts):
+            for role in ("gate", "up", "down"):
+                name = f"text/layers/{layer}/moe/experts/{expert}/{role}"
+                offset = 2 * layer + int(role == "down")
+                recipe.use(
+                    name,
+                    model.parameters[name].inputs[0],
+                    activation_policy="AllowA4",
+                    auxiliaries={
+                        "activation_input_divisor": AuxiliaryReference(
+                            "expert_activation_divisors", offset, offset + 1
+                        )
+                    },
+                )
+
+
 def _spark_recipe(model, recipe, fp8_source):
     """Spark2.5 tuning surface: representation per projection role and tied head.
 
@@ -724,6 +844,7 @@ RECIPES = {
     "qwen3_6_27b_nvfp4": qwen3_6_27b_nvfp4,
     "qwen3_8_27b": qwen3_8_27b,
     "qwen3_8_27b_nvfp4": qwen3_8_27b_nvfp4,
+    "qwen3_5_122b_nvfp4": qwen3_5_122b_nvfp4,
     "qwen3_6_35b_a3b": qwen3_6_35b_a3b,
     "qwen3_8_flash_next": qwen3_8_flash_next,
     "spark_x2_6_17b_bf16": spark_x2_6_17b_bf16,
