@@ -179,7 +179,12 @@ def test_optional_components_are_selected_before_sources_are_required(tmp_path):
     config = _config()
     config["vision_config"] = {"in_channels": 99}
     config["text_config"]["mtp_num_hidden_layers"] = 3
-    with _checkpoint(tmp_path / "text", config, {"unused": torch.ones(1)}) as source:
+    # The text prefix is probed from real model tensors, so the base needs one.
+    tensors = {
+        "unused": torch.ones(1),
+        "model.language_model.embed_tokens.weight": torch.zeros(8, 16),
+    }
+    with _checkpoint(tmp_path / "text", config, tensors) as source:
         model = build_model(source)
         assert set(model.components) == {"text"}
         assert all(name.startswith("text/") for name in model.parameters)
@@ -219,8 +224,13 @@ def test_draft_query_context_and_dynamic_weights_keep_their_uses(
     }
     key = torch.arange(8 * 16).float().reshape(8, 16)
     kernel = torch.arange(2 * 2 * 16).float().reshape(2, 2, 16)
+    # The text prefix is probed from real model tensors, so the base needs one.
+    base_tensors = {
+        "unused": torch.ones(1),
+        "model.language_model.embed_tokens.weight": torch.zeros(8, 16),
+    }
     with (
-        _checkpoint(tmp_path / "text", _config(), {"unused": torch.ones(1)}) as base,
+        _checkpoint(tmp_path / "text", _config(), base_tensors) as base,
         _checkpoint(
             tmp_path / "draft",
             draft,
@@ -309,8 +319,13 @@ def test_additional_source_checks_mapping_geometry_without_release_pinning(tmp_p
     changed_heads = _config()
     changed_heads["text_config"].update(num_attention_heads=4, head_dim=4)
     changed_heads["text_config"]["rope_parameters"]["partial_rotary_factor"] = 1.0
+    # The text prefix is probed from real model tensors, so the base needs one.
+    base_tensors = {
+        "unused": torch.ones(1),
+        "model.language_model.embed_tokens.weight": torch.zeros(8, 16),
+    }
     with (
-        _checkpoint(tmp_path / "base", _config(), {"unused": torch.ones(1)}) as base,
+        _checkpoint(tmp_path / "base", _config(), base_tensors) as base,
         _checkpoint(
             tmp_path / "compatible",
             compatible,
@@ -388,9 +403,12 @@ def test_selected_vision_processor_geometry_is_checked_before_conversion(tmp_pat
     bad.write_text(
         json.dumps({"patch_size": 99, "temporal_patch_size": 1, "merge_size": 2})
     )
-    with _checkpoint(
-        tmp_path / "source", _config(), {"unused": torch.ones(1)}
-    ) as source:
+    # The text prefix is probed from real model tensors, so the base needs one.
+    tensors = {
+        "unused": torch.ones(1),
+        "model.language_model.embed_tokens.weight": torch.zeros(8, 16),
+    }
+    with _checkpoint(tmp_path / "source", _config(), tensors) as source:
         for role in ("preprocessor_config.json", "video_preprocessor_config.json"):
             with pytest.raises(
                 ValueError, match="patch_size differs from Vision config"
