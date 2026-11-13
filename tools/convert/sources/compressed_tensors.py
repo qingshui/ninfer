@@ -17,6 +17,7 @@ from tools.artifact.codecs.fp8_row import (
 )
 from tools.artifact.formats import valid_positive_fp32_word
 from .logical import EncodedRows, LogicalSource
+from .modelopt_nvfp4 import ModelOptNvfp4
 from .safetensors import SafetensorsSource, tensor_source
 
 _ROW_FORMATS = ("fp8_e4m3fn_row_bf16", "fp8_e4m3fn_row_fp32")
@@ -172,13 +173,23 @@ def matrix_source(
             actual = format
             if actual is None and store.has(prefix + ".weight_packed"):
                 actual = "nvfp4"
-            if actual is None and store.describe(name).dtype == "F8_E4M3":
-                scale_dtype = store.describe(prefix + ".weight_scale").dtype
-                actual = (
-                    "fp8_e4m3fn_row_fp32"
-                    if scale_dtype == "F32"
-                    else "fp8_e4m3fn_row_bf16"
-                )
+            if actual is None:
+                dtype = store.describe(name).dtype
+                if dtype == "F8_E4M3":
+                    scale_dtype = store.describe(prefix + ".weight_scale").dtype
+                    actual = (
+                        "fp8_e4m3fn_row_fp32"
+                        if scale_dtype == "F32"
+                        else "fp8_e4m3fn_row_bf16"
+                    )
+                elif dtype == "U8":
+                    if not store.has(prefix + ".weight_scale_2"):
+                        raise ValueError(
+                            f"{name}: U8 weight is missing {prefix}.weight_scale_2; "
+                            "only ModelOpt NVFP4 U8 weights are supported"
+                        )
+                    resolved = ModelOptNvfp4(store).matrix(prefix, shape)
+                    return resolved
             resolved = (
                 tensor_source(store, name, shape)
                 if actual is None

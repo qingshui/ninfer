@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import struct
 
+import numpy as np
 import pytest
 from safetensors.torch import save_file
 import torch
@@ -132,3 +133,82 @@ def test_modelopt_preserves_words_and_converts_multiplier_to_divisor(tmp_path):
         )
         expected *= 2.0 / struct.unpack("<f", words.weight_scale)[0]
         assert torch.equal(source.values(), expected)
+
+
+def _e4m3_fn_values(bits: np.ndarray) -> np.ndarray:
+    """Decode E4M3FN bytes by bit inspection, independent of torch's dtype view."""
+    bits = bits.astype(np.uint32)
+    sign = np.where(bits & 0x80, -1.0, 1.0)
+    exponent = (bits >> 3) & 0xF
+    mantissa = bits & 0x7
+    normal = (1.0 + mantissa / 8.0) * np.exp2(exponent.astype(np.float64) - 7.0)
+    subnormal = (mantissa / 8.0) * np.exp2(-6.0)
+    return sign * np.where(exponent == 0, subnormal, normal)
+
+
+_FP4_E2M1_VALUES = np.array(
+    [0, 0.5, 1, 1.5, 2, 3, 4, 6, -0.0, -0.5, -1, -1.5, -2, -3, -4, -6]
+)
+
+
+def _save_modelopt_checkpoint(path, codes, scales, scale_2, input_scale):
+    save_file(
+        {
+            "proj.weight": codes,
+            "proj.weight_scale": scales.view(torch.float8_e4m3fn),
+            "proj.weight_scale_2": torch.tensor(scale_2, dtype=torch.float32),
+            "proj.input_scale": torch.tensor(input_scale, dtype=torch.float32),
+        },
+        str(path),
+    )
+
+
+def test_matrix_source_resolves_modelopt_nvfp4_naming(tmp_path):
+    n, k = 32, 64
+    gen = torch.Generator().manual_seed(7)
+    codes = torch.randint(0, 256, (n, k // 2), generator=gen).to(torch.uint8)
+    scales = torch.randint(0, 127, (n, k // 16), generator=gen).to(torch.uint8)
+    scale_2 = 0.25
+    _save_modelopt_checkpoint(
+        tmp_path / "model.safetensors", codes, scales, scale_2, 0.5
+    )
+    with SafetensorsSource(tmp_path) as store:
+        source = matrix_source(store, "proj.weight", (n, k))
+        assert source.shape == (n, k)
+        assert source.encoding() == "nvfp4"
+        assert source.weight_scale() == struct.pack("<f", 1.0 / scale_2)
+        assert source.activation_scale() == struct.pack("<f", 2.0)
+        nibbles = np.stack(
+            (codes.numpy() & 0xF, codes.numpy() >> 4), axis=-1
+        ).reshape(n, k)
+        blocks = np.repeat(_e4m3_fn_values(scales.numpy()), 16, axis=1)
+        expected = _FP4_E2M1_VALUES[nibbles] * blocks * scale_2
+        assert np.array_equal(source.values().reshape(n, k).numpy(), expected)
+
+
+def test_matrix_source_u8_without_weight_scale_2_is_rejected(tmp_path):
+    codes = torch.full((2, 8), 0x21, dtype=torch.uint8)
+    scales = torch.full((2, 1), 0x38, dtype=torch.uint8)
+    save_file(
+        {
+            "proj.weight": codes,
+            "proj.weight_scale": scales.view(torch.float8_e4m3fn),
+        },
+        str(tmp_path / "model.safetensors"),
+    )
+    with SafetensorsSource(tmp_path) as store:
+        source = matrix_source(store, "proj.weight", (2, 16))
+        with pytest.raises(ValueError, match="weight_scale_2"):
+            source.values()
+
+
+def test_matrix_source_modelopt_scale_shape_is_validated(tmp_path):
+    codes = torch.full((2, 8), 0x21, dtype=torch.uint8)
+    scales = torch.full((2, 2), 0x38, dtype=torch.uint8)
+    _save_modelopt_checkpoint(
+        tmp_path / "model.safetensors", codes, scales, 0.25, 0.5
+    )
+    with SafetensorsSource(tmp_path) as store:
+        source = matrix_source(store, "proj.weight", (2, 16))
+        with pytest.raises(ValueError, match="unexpected encoded geometry/type"):
+            source.values()
