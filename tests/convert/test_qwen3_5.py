@@ -99,6 +99,8 @@ def test_model_mapping_preserves_query_gate_gdn_mtp_and_vision_axes(tmp_path):
     patch = torch.arange(8 * 3 * 4).float().reshape(8, 3, 1, 2, 2)
     vision_bias = torch.arange(24).float()
     tensors = {
+        # The text prefix is probed from real model tensors, so the base needs one.
+        "model.language_model.embed_tokens.weight": torch.zeros(8, 16),
         "model.language_model.layers.1.self_attn.q_proj.weight": q_gate,
         "model.language_model.layers.0.linear_attn.in_proj_qkv.weight": qkv,
         "model.language_model.layers.0.linear_attn.conv1d.weight": conv,
@@ -154,6 +156,8 @@ def test_expert_bank_uses_expert_major_gate_up_and_down_ranges(tmp_path):
         tmp_path / "moe",
         _config(moe=True),
         {
+            # The text prefix is probed from real model tensors, so the base needs one.
+            "model.language_model.embed_tokens.weight": torch.zeros(8, 16),
             "model.language_model.layers.0.mlp.experts.gate_up_proj": gate_up,
             "model.language_model.layers.0.mlp.experts.down_proj": down,
         },
@@ -173,6 +177,92 @@ def test_expert_bank_uses_expert_major_gate_up_and_down_ranges(tmp_path):
         ) as other:
             selected = model.source("text/layers/0/moe/experts/2/gate", other).values()
             assert torch.equal(selected.reshape(8, 16), gate_up[2, :8])
+
+
+def test_nested_config_with_flat_prefix_resolves_flat_source_names(tmp_path):
+    config = _config()
+    config["text_config"]["tie_word_embeddings"] = True
+    q_gate = torch.arange(32 * 16).float().reshape(32, 16)
+    tensors = {
+        "model.embed_tokens.weight": torch.zeros(8, 16),
+        "model.layers.0.input_layernorm.weight": torch.ones(16),
+        "model.layers.1.self_attn.q_proj.weight": q_gate,
+    }
+    with _checkpoint(tmp_path / "flat", config, tensors) as source:
+        model = build_model(source)
+        for name, parameter in model.parameters.items():
+            assert "model.language_model." not in parameter.source.label, name
+        embed = model.parameters["text/token_embedding"]
+        assert "model.embed_tokens.weight" in embed.source.label
+        assert torch.equal(_values(model, "text/token_embedding"), torch.zeros(8, 16))
+        query = model.parameters["text/layers/1/attention/query"]
+        assert "model.layers.1.self_attn.q_proj.weight" in query.source.label
+
+
+def test_missing_text_prefix_reports_every_probed_candidate(tmp_path):
+    tensors = {"unused": torch.ones(1)}
+    with _checkpoint(tmp_path / "prefixless", _config(), tensors) as source:
+        with pytest.raises(ValueError) as error:
+            build_model(source)
+        message = str(error.value)
+        assert "model.language_model.embed_tokens.weight" in message
+        assert "model.embed_tokens.weight" in message
+
+
+def test_split_expert_tensors_map_each_expert_logical_parameters(tmp_path):
+    config = _config(moe=True)
+    config["text_config"]["num_experts"] = 4
+    tensors = {"model.embed_tokens.weight": torch.zeros(8, 16)}
+    roles = (("gate", (8, 16)), ("up", (8, 16)), ("down", (16, 8)))
+    for expert in range(4):
+        for index, (role, shape) in enumerate(roles):
+            tensors[f"model.layers.0.mlp.experts.{expert}.{role}_proj.weight"] = (
+                torch.full(shape, float(expert * 3 + index))
+            )
+    with _checkpoint(tmp_path / "split", config, tensors) as source:
+        model = build_model(source)
+        expected = {
+            f"text/layers/0/moe/experts/{expert}/{role}"
+            for expert in range(4)
+            for role, _ in roles
+        }
+        assert expected <= set(model.parameters)
+        for expert in range(4):
+            prefix = f"text/layers/0/moe/experts/{expert}/"
+            for index, (role, shape) in enumerate(roles):
+                assert torch.equal(
+                    _values(model, prefix + role),
+                    torch.full(shape, float(expert * 3 + index)),
+                )
+            label = model.parameters[prefix + "gate"].source.label
+            assert f"model.layers.0.mlp.experts.{expert}.gate_proj.weight" in label
+
+
+def test_split_expert_source_missing_an_expert_is_rejected(tmp_path):
+    tensors = {"model.embed_tokens.weight": torch.zeros(8, 16)}
+    for expert in (0, 1):
+        for role, shape in (("gate", (8, 16)), ("up", (8, 16)), ("down", (16, 8))):
+            tensors[f"model.layers.0.mlp.experts.{expert}.{role}_proj.weight"] = (
+                torch.zeros(shape)
+            )
+    with _checkpoint(tmp_path / "missing-expert", _config(moe=True), tensors) as source:
+        with pytest.raises(ValueError, match="expert 2") as error:
+            build_model(source)
+        assert "experts.2.gate_proj.weight" in str(error.value)
+
+
+def test_fused_and_split_expert_tensors_cannot_coexist(tmp_path):
+    gate_up = torch.arange(3 * 16 * 16).float().reshape(3, 16, 16)
+    tensors = {
+        "model.language_model.embed_tokens.weight": torch.zeros(8, 16),
+        "model.language_model.layers.0.mlp.experts.gate_up_proj": gate_up,
+        "model.language_model.layers.0.mlp.experts.0.gate_proj.weight": torch.zeros(
+            8, 16
+        ),
+    }
+    with _checkpoint(tmp_path / "mixed", _config(moe=True), tensors) as source:
+        with pytest.raises(ValueError, match="both present"):
+            build_model(source)
 
 
 def test_optional_components_are_selected_before_sources_are_required(tmp_path):

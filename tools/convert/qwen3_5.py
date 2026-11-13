@@ -333,6 +333,47 @@ def _has_model_config(source: SafetensorsSource) -> bool:
     )
 
 
+def _text_prefix(base: SafetensorsSource) -> str:
+    """Probe the base's real tensors for the text prefix; never trust the config layout."""
+    candidates = (
+        ("model.language_model.", "model.language_model.embed_tokens.weight"),
+        ("model.", "model.embed_tokens.weight"),
+    )
+    for prefix, name in candidates:
+        if base.has(name):
+            return prefix
+    if not base.weight_map:
+        # A custom recipe may supply every logical value from another source.
+        return "model.language_model." if "text_config" in base.config else "model."
+    raise ValueError(
+        f"{base.path}: no text tensor prefix found; probed "
+        + ", ".join(name for _, name in candidates)
+    )
+
+
+def _text_source_name(
+    selected: SafetensorsSource, source_name: str, store: SafetensorsSource
+) -> str:
+    """Resolve a text tensor name against an additional source's probed prefix."""
+    if source_name.startswith("model.language_model."):
+        nested = source_name
+        flat = source_name.replace("model.language_model.", "model.", 1)
+    elif source_name.startswith("model."):
+        nested = "model.language_model." + source_name[len("model.") :]
+        flat = source_name
+    else:
+        return source_name
+    has_nested, has_flat = selected.has(nested), selected.has(flat)
+    if has_nested != has_flat:
+        return nested if has_nested else flat
+    # Probing cannot distinguish the prefixes; keep the config-derived conventions.
+    if "text_config" not in selected.config:
+        return flat
+    if "text_config" not in store.config:
+        return nested
+    return source_name
+
+
 def _check_source_fields(name, actual, expected, fields):
     for field in sorted(fields):
         if actual.get(field) != expected.get(field):
@@ -454,16 +495,7 @@ class _Builder:
             self.validate_source(selected, store, name)
             selected_name = source_name
             if name.startswith("text/") and _has_model_config(selected):
-                if "text_config" not in selected.config:
-                    selected_name = selected_name.replace(
-                        "model.language_model.", "model.", 1
-                    )
-                elif "text_config" not in store.config and selected_name.startswith(
-                    "model."
-                ):
-                    selected_name = selected_name.replace(
-                        "model.", "model.language_model.", 1
-                    )
+                selected_name = _text_source_name(selected, selected_name, store)
             if transpose is not None:
                 if format is not None:
                     raise ValueError(f"{name}: transpose source requires value access")
@@ -653,30 +685,72 @@ class _Builder:
             inputs=(prefix + "ffn_input",),
         )
         self.group(p + "router", p + "shared_score")
-        gate_up, downs = [], []
-        for expert in range(e):
-            ep = p + f"experts/{expert}/"
-            for role, half in (("gate", 0), ("up", 1)):
-                self.add(
-                    ep + role,
-                    store,
-                    sp + "experts.gate_up_proj",
-                    (ir, h),
-                    source_shape=(e, 2 * ir, h),
-                    offset=(expert * 2 + half) * ir * h,
-                    inputs=(prefix + "ffn_input",),
-                )
-                gate_up.append(ep + role)
-            self.add(
-                ep + "down",
-                store,
-                sp + "experts.down_proj",
-                (h, ir),
-                source_shape=(e, h, ir),
-                offset=expert * h * ir,
-                inputs=(ep + "product",),
+        fused = (sp + "experts.gate_up_proj", sp + "experts.down_proj")
+        split = tuple(
+            sp + f"experts.{expert}.{role}_proj.weight"
+            for expert in range(e)
+            for role in ("gate", "up", "down")
+        )
+        if any(store.has(name) for name in fused) and any(
+            store.has(name) for name in split
+        ):
+            raise ValueError(
+                f"{sp}experts: fused ({fused[0]}) and per-expert ({split[0]}) "
+                "expert tensors are both present"
             )
-            downs.append(ep + "down")
+        gate_up, downs = [], []
+        if any(store.has(name) for name in split):
+            for expert in range(e):
+                for role in ("gate", "up", "down"):
+                    name = sp + f"experts.{expert}.{role}_proj.weight"
+                    if not store.has(name):
+                        raise ValueError(
+                            f"{name}: per-expert source is missing "
+                            f"expert {expert} of {e}"
+                        )
+            for expert in range(e):
+                ep, esp = p + f"experts/{expert}/", sp + f"experts.{expert}."
+                for role in ("gate", "up"):
+                    self.add(
+                        ep + role,
+                        store,
+                        esp + role + "_proj.weight",
+                        (ir, h),
+                        inputs=(prefix + "ffn_input",),
+                    )
+                    gate_up.append(ep + role)
+                self.add(
+                    ep + "down",
+                    store,
+                    esp + "down_proj.weight",
+                    (h, ir),
+                    inputs=(ep + "product",),
+                )
+                downs.append(ep + "down")
+        else:
+            for expert in range(e):
+                ep = p + f"experts/{expert}/"
+                for role, half in (("gate", 0), ("up", 1)):
+                    self.add(
+                        ep + role,
+                        store,
+                        sp + "experts.gate_up_proj",
+                        (ir, h),
+                        source_shape=(e, 2 * ir, h),
+                        offset=(expert * 2 + half) * ir * h,
+                        inputs=(prefix + "ffn_input",),
+                    )
+                    gate_up.append(ep + role)
+                self.add(
+                    ep + "down",
+                    store,
+                    sp + "experts.down_proj",
+                    (h, ir),
+                    source_shape=(e, h, ir),
+                    offset=expert * h * ir,
+                    inputs=(ep + "product",),
+                )
+                downs.append(ep + "down")
         self.group(*gate_up)
         self.group(*downs)
         for role in ("gate", "up"):
@@ -952,7 +1026,7 @@ def build_model(
     )
     builder = _Builder(model)
     h, r = config["hidden_size"], config["vocab_size"]
-    text_prefix = "model.language_model." if "text_config" in base.config else "model."
+    text_prefix = _text_prefix(base)
     builder.add(
         "text/token_embedding", base, text_prefix + "embed_tokens.weight", (r, h)
     )
