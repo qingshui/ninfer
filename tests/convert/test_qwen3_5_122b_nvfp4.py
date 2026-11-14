@@ -11,10 +11,11 @@ import json
 from pathlib import Path
 import struct
 
+import pytest
 from safetensors.torch import save_file
 import torch
 
-from tools.convert.official_recipes import qwen3_5_122b_nvfp4
+from tools.convert.official_recipes import RECIPES, qwen3_5_122b_nvfp4
 from tools.convert.qwen3_5 import build_model
 from tools.convert.recipe import Recipe
 from tools.convert.sources.safetensors import SafetensorsSource
@@ -150,6 +151,10 @@ def _job(prepared, name):
     return next(job for job in prepared.weights if name in job.parameters)
 
 
+def test_recipe_is_registered_by_name():
+    assert RECIPES["qwen3_5_122b_nvfp4"] is qwen3_5_122b_nvfp4
+
+
 def test_expert_banks_are_expert_major_with_batched_nvfp4_layout(tmp_path):
     model, _, prepared = _prepare(tmp_path)
     assert set(model.components) == {"text"}
@@ -230,3 +235,46 @@ def test_expert_uses_share_one_divisor_tensor_per_layer(tmp_path):
     }
     assert len(others) == len(non_expert_uses)
     assert all(spec.shape == () for spec in others)
+
+
+def test_divergent_expert_input_scales_within_a_layer_are_rejected(tmp_path):
+    tensors = _tensors({(1, 2): {"input_scale": 99.0}})
+    with pytest.raises(ValueError, match="input_scale differs within the layer"):
+        _prepare(tmp_path, tensors)
+
+
+def test_attention_qkv_scale_mismatch_is_rejected_and_o_proj_is_independent(tmp_path):
+    tensors = _tensors()
+    tensors["model.layers.1.self_attn.q_proj.weight_scale_2"] = torch.tensor(
+        2.0, dtype=torch.float32
+    )
+    with pytest.raises(
+        ValueError, match="attention q/k/v weight_scale_2 or input_scale differ"
+    ):
+        _prepare(tmp_path, tensors)
+    # o_proj is handled independently: its published scales may differ from q/k/v.
+    tensors = _tensors()
+    tensors["model.layers.1.self_attn.o_proj.weight_scale_2"] = torch.tensor(
+        2.0, dtype=torch.float32
+    )
+    _, _, prepared = _prepare(tmp_path / "independent", tensors)
+    assert _job(prepared, "text/layers/1/attention/output").spec.format == "nvfp4"
+
+
+def test_unquantized_roles_stay_cast_direct_and_vocabulary_uses_q8(tmp_path):
+    _, _, prepared = _prepare(tmp_path)
+    for name in (
+        "text/layers/0/gdn/query",
+        "text/layers/0/gdn/a_projection",
+        "text/layers/0/gdn/output",
+        "text/layers/0/gdn/norm",
+        "text/layers/0/gdn/convolution",
+        "text/layers/0/moe/router",
+        "text/layers/0/moe/shared_score",
+        "text/layers/0/input_norm",
+        "text/layers/0/post_attention_norm",
+        "text/final_norm",
+    ):
+        assert _job(prepared, name).method_name == "cast_direct", name
+    for name in ("text/token_embedding", "text/output_head"):
+        assert _job(prepared, name).spec.format == "q8_g32_fp16", name
