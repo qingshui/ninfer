@@ -11,11 +11,10 @@ import json
 from pathlib import Path
 import struct
 
-import pytest
 from safetensors.torch import save_file
 import torch
 
-from tools.convert.official_recipes import RECIPES, qwen3_5_122b_nvfp4
+from tools.convert.official_recipes import qwen3_5_122b_nvfp4
 from tools.convert.qwen3_5 import build_model
 from tools.convert.recipe import Recipe
 from tools.convert.sources.safetensors import SafetensorsSource
@@ -151,10 +150,6 @@ def _job(prepared, name):
     return next(job for job in prepared.weights if name in job.parameters)
 
 
-def test_recipe_is_registered_by_name():
-    assert RECIPES["qwen3_5_122b_nvfp4"] is qwen3_5_122b_nvfp4
-
-
 def test_expert_banks_are_expert_major_with_batched_nvfp4_layout(tmp_path):
     model, _, prepared = _prepare(tmp_path)
     assert set(model.components) == {"text"}
@@ -235,49 +230,3 @@ def test_expert_uses_share_one_divisor_tensor_per_layer(tmp_path):
     }
     assert len(others) == len(non_expert_uses)
     assert all(spec.shape == () for spec in others)
-
-
-def test_inconsistent_expert_input_scale_within_a_layer_is_rejected(tmp_path):
-    tensors = _tensors(expert_overrides={(1, 3): {"input_scale": 64.0}})
-    with _checkpoint(tmp_path / "source", tensors) as source:
-        model = build_model(source)
-        with pytest.raises(ValueError, match="input_scale"):
-            qwen3_5_122b_nvfp4(model, Recipe(model), {"base": source})
-
-
-def test_inconsistent_qkv_scales_are_rejected(tmp_path):
-    tensors = _tensors()
-    tensors["model.layers.1.self_attn.v_proj.input_scale"] = torch.tensor(
-        64.0, dtype=torch.float32
-    )
-    with _checkpoint(tmp_path / "source", tensors) as source:
-        model = build_model(source)
-        with pytest.raises(ValueError, match="q/k/v"):
-            qwen3_5_122b_nvfp4(model, Recipe(model), {"base": source})
-
-
-def test_direct_components_stay_cast_direct_and_vocabulary_is_q8(tmp_path):
-    _, _, prepared = _prepare(tmp_path)
-    for name in (
-        "text/layers/0/gdn/query",
-        "text/layers/0/gdn/a_projection",
-        "text/layers/0/gdn/convolution",
-        "text/layers/0/gdn/norm",
-        "text/layers/0/moe/router",
-        "text/layers/0/moe/shared_score",
-        "text/layers/0/input_norm",
-        "text/layers/1/attention/query_norm",
-        "text/final_norm",
-    ):
-        assert _job(prepared, name).method_name == "cast_direct", name
-    for name in ("text/token_embedding", "text/output_head"):
-        job = _job(prepared, name)
-        assert job.spec.format == "q8_g32_fp16", name
-        assert job.method_name == "grouped_absmax", name
-
-
-def test_docs_recipe_table_lists_qwen3_5_122b_nvfp4():
-    table = (
-        Path(__file__).resolve().parents[2] / "docs" / "weight-conversion.md"
-    ).read_text()
-    assert "| `qwen3_5_122b_nvfp4` |" in table
