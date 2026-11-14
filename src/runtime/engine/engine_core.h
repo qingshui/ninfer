@@ -164,20 +164,32 @@ public:
     //    budget fragments prefill into more flights, each paying the same fixed host submission
     //    cost again, and measured slower end to end (mini load: 1.28 req/s at 40 ms vs 1.57 req/s
     //    at 100 ms).
+    //  - Large-batch recalibration (direction values, not tuned results): the pack budget now
+    //    merges many request segments into single flights of up to kPrefillPackChunks chunks
+    //    (2048-8192 tokens at the resident chunk), and serving holds 130+ resident decode lanes.
+    //    kInterleaveChunks follows the pack budget so one Interleave cycle can carry one whole
+    //    merged flight, and kInterleaveNs rises with it: fragmenting an 8192-token flight at the
+    //    old 100 ms budget re-pays the fixed submission cost on every fragment. Cold lanes start
+    //    with a full chunk for the same reason. The debt pair adapts the decode yield to a large
+    //    resident batch: with 130+ lanes decoding, one decode round serves the whole resident
+    //    batch, so each cycle repays twice the debt while the cap still lets a short request
+    //    prefill across several cycles without waiting. These numbers are direction values for
+    //    that regime; throughput and latency targets are owned by the tuning phase, which
+    //    re-measures them against the recorded loads.
     //  - Time-derived units are multiples of kUnitGranularity, the chunk alignment.
     //  - Debt: a decode round takes 4-6 ms alone, but a lane that shares every cycle with the
     //    prefill budget decodes at a fraction of its solo rate, for as long as the prefill
     //    lasts (tens of seconds at 128K-200K contexts). The Scheduler counts the prefill time
     //    that ran beside a waiting lane as a debt. kInterleaveDebtCapNs lets a short request
     //    prefill without waiting (several interleave cycles), and each Interleave cycle repays
-    //    kInterleaveRepayNs, about a quarter of a 15-20 ms decode-only cycle, so a long prefill
-    //    keeps about a fifth of the time while a lane decodes.
-    static constexpr std::uint64_t kInterleaveNs         = 100'000'000;
-    static constexpr std::uint32_t kInterleaveChunks     = 2;
-    static constexpr std::uint32_t kInterleaveColdTokens = 1024;
+    //    kInterleaveRepayNs, so a long prefill keeps a bounded share of the time while the
+    //    resident lanes decode.
+    static constexpr std::uint64_t kInterleaveNs         = 200'000'000;
+    static constexpr std::uint32_t kInterleaveChunks     = 4;
+    static constexpr std::uint32_t kInterleaveColdTokens = 2048;
     static constexpr std::uint32_t kUnitGranularity      = 128;
-    static constexpr std::uint64_t kInterleaveDebtCapNs  = 300'000'000;
-    static constexpr std::uint64_t kInterleaveRepayNs    = 4'000'000;
+    static constexpr std::uint64_t kInterleaveDebtCapNs  = 400'000'000;
+    static constexpr std::uint64_t kInterleaveRepayNs    = 8'000'000;
 
     [[nodiscard]] static PrefillPacing prefill_pacing(std::uint32_t pack_tokens,
                                                       std::uint32_t prefill_chunk,

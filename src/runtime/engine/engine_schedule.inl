@@ -944,7 +944,10 @@ EngineCore<Instance>::next_prefill(const LaneSlots& candidates,
 
 template <class Instance>
 std::uint32_t EngineCore<Instance>::prefill_pack_limit() const {
-    return std::min(instance_.session->prefill_pack_limit(), max_concurrency_);
+    // The Session's pack capacity is the only bound: it carries the pack segment budget, which
+    // is decoupled from the lane count. The lanes a flight merges stay bounded by the resident
+    // prefilling lanes the scheduler admits.
+    return instance_.session->prefill_pack_limit();
 }
 
 template <class Instance>

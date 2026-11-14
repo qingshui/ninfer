@@ -18,7 +18,9 @@ struct FrameSpec {
     std::int32_t public_tokens  = 0;
     std::uint32_t prefill_chunk = 0;
     // Summed token extent and segment count of one packed prefill execution: pack_tokens >=
-    // prefill_chunk, pack_segments <= batch_capacity. Per-sequence consumers stay at one chunk.
+    // prefill_chunk, pack_segments <= kPrefillPackSegmentLimit (a budget decoupled from
+    // batch_capacity; the lanes a flight merges stay bounded by batch_capacity at admission).
+    // Per-sequence consumers stay at one chunk.
     std::uint32_t pack_tokens   = 0;
     std::uint32_t pack_segments = 1;
     // A mixed execution appends the verify block of up to mixed_decode_rows decode rows to a

@@ -714,13 +714,16 @@ make_sequence_planner_impl(std::shared_ptr<const execution::ModelProfile> profil
     const auto pack_tokens   = offload || scoring ? chunk
                                                   : resolve_prefill_pack_tokens(chunk,
                                                                                 options.max_context);
-    const auto pack_segments = masked || scoring ? 1U : options.max_concurrency;
-    // Decode rows ride a prefill execution as a verify block. Every row is a distinct sequence
-    // and at least one prefill segment is present, so at most max_concurrency - 1 rows fit.
+    // The segment bound is the pack segment budget, decoupled from the lane count: a flight
+    // merges as many waiting segments as the token budget holds. Masked draft windows and
+    // scoring still execute one segment at a time.
+    const auto pack_segments = masked || scoring ? 1U : kPrefillPackSegmentLimit;
+    // Decode rows ride a prefill execution as a verify block. Every row is a distinct sequence and
+    // at least one prefill segment is present, so the rows leave room for that segment inside the
+    // same segment budget instead of the lane count; admission bounds them by the resident lanes.
     // Offloaded experts, masked draft windows and scoring never mix.
-    const auto mixed_rows = offload || masked || scoring || options.max_concurrency < 2
-                                ? 0U
-                                : options.max_concurrency - 1;
+    static_assert(kPrefillPackSegmentLimit >= 2, "the pack segment budget must fit a mixed flight");
+    const auto mixed_rows = offload || masked || scoring ? 0U : kPrefillPackSegmentLimit - 1;
     const auto mixed_tokens =
         resolve_mixed_tokens(pack_tokens, mixed_rows, options.speculative.draft_tokens);
     SequencePlanningInputs inputs{

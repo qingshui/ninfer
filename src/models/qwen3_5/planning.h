@@ -68,11 +68,14 @@ struct SessionPlan {
     std::uint32_t max_concurrency = 1;
     std::uint32_t prefill_chunk   = 0;
     // One prefill execution packs at most pack_segments sequence windows whose lengths sum to at
-    // most pack_tokens (>= prefill_chunk).
+    // most pack_tokens (>= prefill_chunk). The bound is the pack segment budget
+    // (kPrefillPackSegmentLimit), not the lane count.
     std::uint32_t pack_tokens   = 0;
     std::uint32_t pack_segments = 0;
     // A mixed execution carries a packed prefill followed by up to mixed_decode_rows decode rows
     // on one token axis of at most mixed_tokens columns. Zero rows means the model does not mix.
+    // The row bound leaves room for one prefill segment inside the pack segment budget; the rows
+    // a flight actually carries stay bounded by the resident lanes at admission time.
     std::uint32_t mixed_decode_rows        = 0;
     std::uint32_t mixed_tokens             = 0;
     std::uint32_t draft_window             = 0;

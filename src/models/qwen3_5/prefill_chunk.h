@@ -18,10 +18,17 @@ inline constexpr std::uint32_t kResidentPrefillChunk    = 2048;
 inline constexpr std::uint32_t kHostExpertsPrefillChunk = 4096;
 
 // One packed prefill execution carries at most this many chunks of tokens in total, summed over
-// its sequence segments. The Session reports the resulting capacity through
-// Session::prefill_pack_tokens(); the Engine derives its Throughput allowance from that and holds
-// no copy of this value.
-inline constexpr std::uint32_t kPrefillPackChunks = 2;
+// its sequence segments. With the resident chunk (2048) one flight carries up to 8192 tokens.
+// The Session reports the resulting capacity through Session::prefill_pack_tokens(); the Engine
+// derives its Throughput allowance from that and holds no copy of this value.
+inline constexpr std::uint32_t kPrefillPackChunks = 4;
+
+// Upper bound on the number of sequence segments one packed prefill execution carries. It is the
+// only authority for that bound and is decoupled from the lane count: a flight merges whichever
+// waiting segments fit the token budget, whether few lanes each carry a long window or many lanes
+// each carry a short one. Masked draft backends and causal scoring execute one segment at a time
+// and keep their single-segment constraint.
+inline constexpr std::uint32_t kPrefillPackSegmentLimit = 64;
 
 // Explicit EngineOptions::prefill_chunk wins over the placement default. The result is clamped
 // to max_context and must be a multiple of kPrefillChunkAlignment; a max_context that is not

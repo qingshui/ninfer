@@ -27,7 +27,13 @@
 | 工况 | 条件 | 预算 |
 | --- | --- | --- |
 | Throughput | 没有等待 decode 的 lane | `max(pack_tokens, chunk)` token，单元数 `max(2, concurrency)`，允许多段打包 |
-| Interleave | 有等待 decode 的 lane | 按预测耗时放行：`interleave_ns`（100 ms）与 `2 × chunk` token 两个上界，另有 debt cap 300 ms、repay 4 ms |
+| Interleave | 有等待 decode 的 lane | 按预测耗时放行：`interleave_ns`（200 ms）与 `4 × chunk` token 两个上界，另有 debt cap 400 ms、repay 8 ms |
+
+- Interleave 常量按大 batch 场景（多请求段合并的 2048–8192 token 单 flight、130+ 驻留 decode
+  lane）重标定，为方向值：`kInterleaveChunks` 与打包预算一致使一个 Interleave 周期可承载一次完整
+  合并 flight；`kInterleaveNs`（200 ms）随之放大避免大 flight 被切碎重复支付固定提交成本；
+  `kInterleaveColdTokens`（2048）让冷启动 lane 从一个整 chunk 开始；debt 对（cap 400 ms /
+  repay 8 ms）适配大驻留 batch 的 decode 让步比例。吞吐/延迟达标归调优阶段，以实测数据为准。
 
 - 每周期首个单元总是放行。放不下的 lane 结束本周期，游标停在该 lane。
 - 耗时预测：`prefill_executed(lane, concurrency, tokens, elapsed_ns)` 维护按 lane 的
@@ -61,12 +67,20 @@
 
 ## 多段 prefill 打包
 
+- 打包预算与 lane 数解耦，权威来源均在 `src/models/qwen3_5/prefill_chunk.h`：
+  - 段数上界 `kPrefillPackSegmentLimit`（64）：`pack_segments` 的唯一上界（masked draft 与
+    causal scoring 保留单段约束）；`Session::prefill_pack_limit()` 与
+    `EngineCore::prefill_pack_limit()` 只受该预算约束，不再与 `max_concurrency` 取 min。
+  - 单 flight token 上界 `resolve_prefill_pack_tokens`：`prefill_chunk × kPrefillPackChunks`
+    （4，resident 2048 chunk 下单 flight 8192 token），上限为对齐后的 max_context。
+  - mixed 行数上界 `mixed_decode_rows = kPrefillPackSegmentLimit - 1`：为 mixed flight 保留至少
+    一个 prefill 段的预算推导值，不再引用 `max_concurrency`；运行期准入仍受驻留 lane 数约束。
 - `Session::prefill_pack_limit()`（段数上限，来源是 Program 规划的 `pack_segments`）与
   `Session::start_prefill(std::span<const SequenceHandle>, std::span<const bool>)` 返回
   `PrefillStart{ticket, segments}`，接纳非空前缀。旧的单段 `start_prefill` 已删除。
 - 接纳规则归 Session：多段时所有段都必须是 `SamplePurpose::None`，非 Vision 窗口，后端非 DFlash，
-  且 Σlen ≤ `resolve_prefill_pack_tokens`（`prefill_chunk × 2`，上限为对齐后的 max_context）。
-  FirstToken、Vision、DFlash 段单独成包。qwen4_exp、glm5next 的上限为 1。Replay 仍走 `start_replay`。
+  且 Σlen ≤ `resolve_prefill_pack_tokens`。FirstToken、Vision、DFlash 段单独成包。
+  qwen4_exp、glm5next 的上限为 1。Replay 仍走 `start_replay`。
 - 在 cap 截断下段长可以不等（含 1、非 128 倍数），范围是 1 到 chunk。
 - 每个 flight 只有一次 Commit。`pending` 只可能出现在 `segments == 1` 的 flight 中。
 - 前向：embedding、norm、linear、MoE 在 Σtokens 上合并计算。GQA 与 GDN（含 conv 状态）通过
@@ -93,7 +107,7 @@ decode 小 W（≤16）和 MTP verify 路径不受影响。
 | 回收缓存与 pin | `tests/runtime/test_resource_manager.cpp`、`tests/models/qwen3_5/test_native_transactions.cpp`、`tests/test_context_reclaim.py` |
 | 捕获不阻塞与取消回收 | `tests/models/qwen3_5/test_capture_nonblocking.cpp` |
 | 打包合同与模型级一致性 | `tests/models/qwen3_5/test_packed_forward_contract.cpp`、`test_packed_prefill_real.cpp` |
-| 打包基准 | `bench/models/qwen3_5/packed_prefill_bench.cpp`（记录 `segments, segment_tokens, total_tokens, packed_ms, sequential_ms`） |
+| 打包基准 | `bench/models/qwen3_5/packed_prefill_bench.cpp`（多段大 flight 负载：默认 segments 1–64、`--rows` 控制 bench lane 数，一次 flight Σtoken 至多 pack 预算；记录 `segments, segment_tokens, total_tokens, packed_ms, sequential_ms`） |
 
 ## 已过时的稳定文档
 

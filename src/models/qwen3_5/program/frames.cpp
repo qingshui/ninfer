@@ -65,13 +65,13 @@ void validate(const FrameSpec& spec) {
         spec.public_tokens > spec.output_rows || spec.prefill_chunk == 0 ||
         spec.pack_tokens < spec.prefill_chunk || spec.pack_segments == 0 ||
         spec.batch_capacity == 0 || spec.batch_capacity > kMaximumConcurrency ||
-        spec.pack_segments > spec.batch_capacity) {
+        spec.pack_segments > kPrefillPackSegmentLimit) {
         throw std::invalid_argument("Qwen3.5 frame geometry is invalid");
     }
     if (spec.mixed_tokens !=
             resolve_mixed_tokens(spec.pack_tokens, spec.mixed_decode_rows, spec.draft_window) ||
         (spec.mixed_decode_rows != 0 &&
-         (spec.mixed_decode_rows >= spec.batch_capacity || spec.causal_scoring ||
+         (spec.mixed_decode_rows + 1 > spec.pack_segments || spec.causal_scoring ||
           is_masked_draft_backend(spec.backend)))) {
         throw std::invalid_argument("Qwen3.5 frame mixed geometry is invalid");
     }

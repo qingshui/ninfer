@@ -90,6 +90,19 @@ void test_throughput_membership_fits_pack() {
 }
 
 // A request longer than the pack still gets a nonzero, truncated unit: single-segment fallback.
+void test_long_request_truncated_unit() {
+    Scheduler scheduler(kSlots);
+    scheduler.configure_prefill(pacing());
+    scheduler.begin_prefill_cycle(false);
+    PrefillUnitTokens limits(kSlots, 0);
+    limits[0]         = 4 * kPack;
+    const auto caps   = scheduler.prefill_unit_caps(limits);
+    require(caps[0] == kPack, "a window longer than the pack is truncated to the pack");
+    const auto slots = prefilling_lanes(1);
+    const auto members = scheduler.prefill_candidates(slots, kSlots, caps);
+    require(!members.empty() && members.size == 1, "a truncated window runs as a single segment");
+    require(caps[members.lane_span().front()] > 0, "the truncated unit is nonzero");
+}
 
 // Executed units are charged to the cycle allowance; a drained allowance admits nothing more.
 void test_charging_and_regimes() {
@@ -114,15 +127,37 @@ void test_charging_and_regimes() {
 }
 
 
-// Pack capacity is >= one window, 128-aligned, and never beyond the context.
-
+// Pack capacity is >= one window, 128-aligned, and never beyond the context. The pack budget is
+// decoupled from the lane count: the segment bound comes from kPrefillPackSegmentLimit alone, and
+// the token bound makes one merged flight of the resident chunk reach 2048-8192 tokens.
+void test_pack_capacity_bounds() {
+    namespace q = ninfer::models::qwen3_5;
+    require(q::kPrefillPackSegmentLimit >= 2, "segment budget fits a mixed flight");
+    const auto flight = q::kResidentPrefillChunk * q::kPrefillPackChunks;
+    require(flight >= 2048 && flight <= 8192, "one flight carries 2048-8192 resident tokens");
+    for (const std::uint32_t chunk : {128u, 512u, 2048u, 4096u}) {
+        for (const std::uint32_t ctx : {chunk, 262144u}) {
+            const auto p = q::resolve_prefill_pack_tokens(chunk, ctx);
+            require(p % 128 == 0, "pack tokens is a multiple of 128");
+            require(p >= chunk, "pack tokens holds at least one chunk");
+            if (ctx >= chunk)
+                require(p <= (ctx + 127) / 128 * 128, "pack tokens bounded by the context");
+        }
+    }
+    require(q::resolve_prefill_pack_tokens(128, 128) == 128, "pack == chunk when context == chunk");
+    require(q::resolve_prefill_pack_tokens(2048, 262144) ==
+                q::kPrefillPackChunks * 2048,
+            "an unbounded context takes the full chunk budget");
+}
 
 } // namespace
 
 int main() {
     try {
         test_throughput_membership_fits_pack();
+        test_long_request_truncated_unit();
         test_charging_and_regimes();
+        test_pack_capacity_bounds();
     } catch (const std::exception& error) {
         std::cerr << "FAIL: " << error.what() << "\n";
         return 1;

@@ -27,11 +27,16 @@ namespace ctx = models::context;
 using Native  = test::qwen3_5::NativeRankFixture;
 using Clock   = std::chrono::steady_clock;
 
+// The lane budget of the bench. The pack segment budget bounds the segments of one flight; the
+// bench lanes only need to cover the largest segment count measured.
+constexpr std::uint32_t kMaxRows = q35::kPrefillPackSegmentLimit, kPage = 64;
+
 struct Options {
     std::string artifact;
     std::uint32_t chunk = 2048, warmup = 2, repetitions = 5, drafts = 3;
+    std::uint32_t rows = 0; // 0 resolves to the pack segment budget
     bool mtp = true;
-    std::vector<std::uint32_t> segments{1, 2, 4, 6}, tokens{128, 512, 1024, 2048};
+    std::vector<std::uint32_t> segments{1, 2, 4, 8, 16, 32, 64}, tokens{128, 512, 1024, 2048};
 };
 
 std::vector<std::uint32_t> list(std::string_view text) {
@@ -62,13 +67,18 @@ Options parse(int argc, char** argv) {
             out.segments = list(value());
         else if (argument == "--segment-tokens")
             out.tokens = list(value());
+        else if (argument == "--rows")
+            out.rows = std::stoul(value());
         else if (argument == "--no-mtp")
             out.mtp = false;
         else if (argument == "-h" || argument == "--help") {
             std::cout << "usage: " << argv[0]
-                      << " --artifact <model.ninfer> [--chunk 2048] [--segments 1,2,4,6]"
-                         " [--segment-tokens 128,512,1024,2048] [--warmup 2] [--reps 5]"
-                         " [--no-mtp]\n";
+                      << " --artifact <model.ninfer> [--chunk 2048] [--segments 1,2,4,8,16,32,64]"
+                         " [--segment-tokens 128,512,1024,2048] [--rows 64] [--warmup 2] [--reps 5]"
+                         " [--no-mtp]\n"
+                         "Rows bound the bench lane count (at most the pack segment budget "
+                         << q35::kPrefillPackSegmentLimit
+                         << "); one flight sums to at most the pack token budget.\n";
             std::exit(0);
         } else {
             throw std::invalid_argument("unknown argument: " + std::string(argument));
@@ -76,6 +86,9 @@ Options parse(int argc, char** argv) {
     }
     if (out.artifact.empty()) throw std::invalid_argument("--artifact is required");
     if (out.repetitions == 0) throw std::invalid_argument("--reps must be positive");
+    if (out.rows == 0) out.rows = q35::kPrefillPackSegmentLimit;
+    if (out.rows == 0 || out.rows > kMaxRows)
+        throw std::invalid_argument("--rows must be within the pack segment budget");
     return out;
 }
 
@@ -83,36 +96,40 @@ void require(bool value, const char* message) {
     if (!value) throw std::runtime_error(message);
 }
 
-constexpr std::uint32_t kRows = 6, kPage = 64;
-
 // Independent sequences over one Context; each repetition clears their States and restarts them
 // at position zero.
 class Rig {
 public:
-    Rig(Native& native, std::uint32_t context)
-        : native_(native), pool_(0, native.rank().resources.context.size(),
-                                 native.rank().resources.context_records) {
+    Rig(Native& native, std::uint32_t context, std::uint32_t rows)
+        : native_(native), lane_count_(rows),
+          pools_(native.rank().resources.context_records.size()),
+          pool_(0, native.rank().resources.context.size(),
+                native.rank().resources.context_records) {
+        if (rows == 0 || rows > kMaxRows) throw std::invalid_argument("bench rows out of range");
         const auto pages = context / kPage;
-        const std::vector<RecordRequest> demand{{pool_.record_class(0), kRows},
-                                                {pool_.record_class(1), kRows * pages},
-                                                {pool_.record_class(2), kRows * pages}};
+        // One chunk of Context per row: every window of one repetition stays inside the first
+        // chunk, so the pool demand matches the engine's concurrent-requests working set.
+        std::vector<RecordRequest> demand{{pool_.record_class(0), rows}};
+        for (std::size_t kind = 1; kind < pools_; ++kind)
+            demand.push_back({pool_.record_class(kind), rows * pages});
         auto result = pool_.reserve(demand);
         require(result.reservation && result.reservation->ready(),
                 "Context capacity cannot hold the benchmark rows");
         auto& reservation = *result.reservation;
-        for (auto& state : states_)
-            state = pool_.resolve(reservation.materialize(pool_.record_class(0)));
+        for (std::uint32_t row = 0; row < lane_count_; row++)
+            states_[row] = pool_.resolve(reservation.materialize(pool_.record_class(0)));
         q35::ContextWork bindings;
         q35::Work work;
-        for (std::uint32_t row = 0; row < kRows; ++row) {
-            for (std::uint32_t kind = 0; kind < 2; ++kind) {
+        for (std::uint32_t row = 0; row < lane_count_; row++) {
+            for (std::size_t kind = 0; kind + 1 < pools_; ++kind) {
                 std::vector<std::int64_t> offsets;
-                for (std::uint32_t page = 0; page < pages; ++page)
+                for (std::uint32_t page = 0; page < pages; page++)
                     offsets.push_back(static_cast<std::int64_t>(
                         pool_.resolve(reservation.materialize(pool_.record_class(kind + 1)))
                             .offset));
                 work.context.operations.emplace_back(
-                    ctx::MappingUpdate{kind, static_cast<std::int32_t>(row), 0, offsets});
+                    ctx::MappingUpdate{static_cast<std::uint32_t>(kind),
+                                       static_cast<std::int32_t>(row), 0, offsets});
             }
             rows_[row] = {.member            = {{row + 1, 1}, {{row}, 1}},
                           .source_state      = {row, 1},
@@ -120,7 +137,9 @@ public:
                           .state_offsets     = {static_cast<std::int64_t>(states_[row].offset),
                                                 static_cast<std::int64_t>(states_[row].offset)},
                           .main_table        = {0, row, 1},
-                          .backend_table     = ctx::TableRow{1, row, 1}};
+                          .backend_table     = pools_ > 2
+                                                   ? std::optional{ctx::TableRow{1, row, 1}}
+                                                   : std::nullopt};
             bindings.bindings.push_back({rows_[row].member, {}, {}});
         }
         work.operation = std::move(bindings);
@@ -129,20 +148,22 @@ public:
 
     void reset() {
         q35::Work work;
-        for (const auto& state : states_)
+        for (std::uint32_t row = 0; row < lane_count_; row++)
             work.context.operations.emplace_back(
                 ctx::RecordClear{{ctx::ContextMemory::Device,
-                                  static_cast<std::int64_t>(state.offset), state.bytes}});
+                                  static_cast<std::int64_t>(states_[row].offset), states_[row].bytes}});
         work.operation = q35::ContextWork{};
         wait(submit(std::move(work), runtime::FrameKind::Context), false);
-        for (auto& row : rows_) {
-            row.main_frontier = row.backend_frontier = 0;
-            row.tail_rope_position                   = {};
+        for (std::uint32_t row = 0; row < lane_count_; row++) {
+            rows_[row].main_frontier = rows_[row].backend_frontier = 0;
+            rows_[row].tail_rope_position                   = {};
         }
     }
 
     // One ForwardWork holding `rows` windows of `tokens`, committed and retired.
     void forward(std::uint32_t rows, std::uint32_t first, std::uint32_t tokens) {
+        if (rows == 0 || first + rows > lane_count_)
+            throw std::invalid_argument("forward membership exceeds the bench rows");
         q35::ForwardWork work;
         work.purpose = q35::ForwardPurpose::Prefill;
         for (std::uint32_t r = first; r < first + rows; ++r) {
@@ -189,9 +210,11 @@ public:
     }
 
     Native& native_;
+    std::uint32_t lane_count_ = 0;
+    std::size_t pools_  = 0;
     ContextPool pool_;
-    std::array<RecordBinding, kRows> states_;
-    std::array<q35::ExecutionRow, kRows> rows_;
+    std::array<RecordBinding, kMaxRows> states_{};
+    std::array<q35::ExecutionRow, kMaxRows> rows_{};
 };
 
 double milliseconds(Clock::time_point begin) {
@@ -223,10 +246,11 @@ int run(const Options& options) {
     auto profile = q35::execution::describe_model(*definition);
     std::shared_ptr<const q35::ModelShard> model =
         q35::materialize_model(q35::resolve_load(reader, definition, loading.device()), loading);
-    const auto pack = q35::resolve_prefill_pack_tokens(options.chunk, 2 * options.chunk);
+    const auto pack = q35::resolve_prefill_pack_tokens(options.chunk,
+                                                        q35::kPrefillPackChunks * options.chunk);
     EngineOptions engine;
     engine.max_context                       = pack;
-    engine.max_concurrency                   = kRows;
+    engine.max_concurrency                   = options.rows;
     engine.prefill_chunk                     = options.chunk;
     engine.kv_cache                          = KvCacheStorage::BFloat16;
     engine.use_cuda_graph                    = false;
@@ -237,12 +261,15 @@ int run(const Options& options) {
         engine.speculative.draft_tokens = options.drafts;
     }
     Native native(definition, model, profile, engine);
-    Rig rig(native, pack);
+    // Each repetition restarts every row at position zero with windows of at most one chunk, so
+    // one chunk of Context per row covers the load; the flight token budget is still the full
+    // pack, summed over the segments of one packed execution.
+    Rig rig(native, options.chunk, options.rows);
     std::cout << "bench,segments,segment_tokens,total_tokens,packed_ms,sequential_ms\n";
     for (auto segments : options.segments) {
         for (auto tokens : options.tokens) {
             const std::uint64_t total = std::uint64_t{segments} * tokens;
-            if (segments > kRows || tokens > options.chunk || total > pack) continue;
+            if (segments > options.rows || tokens > options.chunk || total > pack) continue;
             const auto packed     = mean_ms(rig, segments, tokens, true, options);
             const auto sequential = mean_ms(rig, segments, tokens, false, options);
             std::cout << "packed_prefill," << segments << ',' << tokens << ',' << total << ','

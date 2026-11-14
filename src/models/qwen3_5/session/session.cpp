@@ -1,5 +1,7 @@
 #include "models/qwen3_5/session/internal.h"
 
+#include "models/qwen3_5/prefill_chunk.h"
+
 #include <stdexcept>
 #include <utility>
 
@@ -506,7 +508,7 @@ SessionImpl::SessionImpl(std::shared_ptr<const ModelDefinition> definition_in, S
       lane_epochs(plan.max_concurrency, 0) {
     if (!definition || !plan.profile || plan.context.pools.empty() ||
         plan.pack_tokens < plan.prefill_chunk || plan.pack_segments == 0 ||
-        plan.pack_segments > plan.max_concurrency)
+        plan.pack_segments > kPrefillPackSegmentLimit)
         throw std::invalid_argument("Session preparation is incomplete");
     checkpoints.configure(Checkpoints::capacity_for_metadata(directory.metadata_budget().limit()),
                           directory.metadata_budget(), &recovery_index);

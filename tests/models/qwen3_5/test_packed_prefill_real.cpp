@@ -828,7 +828,8 @@ int main() {
         Native fixture(definition, model, profile, options);
         auto& spec = fixture.rank().resources.frame.spec;
         require(spec.pack_tokens == q35::resolve_prefill_pack_tokens(kChunk, kContext) &&
-                    spec.pack_tokens >= 2 * kChunk && spec.pack_segments == kRows,
+                    spec.pack_tokens >= 2 * kChunk &&
+                    spec.pack_segments == q35::kPrefillPackSegmentLimit,
                 "the frame does not plan the packed extent");
         Rig rig(fixture);
         const std::vector<CaseSpec> cases{
