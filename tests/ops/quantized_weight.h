@@ -741,6 +741,54 @@ inline PackedWeight make_patterned_weight(QType qtype, std::int32_t n, std::int3
     if (qtype == QType::MXFP8 || qtype == QType::NVFP4_MUL ||
         qtype == QType::FP8_E4M3FN_BLOCK128X128_FP32)
         return detail::make_native_patterned_weight(qtype, n, k, seed, options);
+    if (qtype == QType::BF16) {
+        if (options.weight_scale != 0.0F || options.input_scale != 0.0F) {
+            throw std::invalid_argument(
+                "quantized-weight fixture: divisors do not belong to BF16 weights");
+        }
+
+        PackedWeight packed;
+        packed.code_plane_bytes = static_cast<std::uint64_t>(n) * k * 2;
+        packed.payload.assign(static_cast<std::size_t>(packed.code_plane_bytes), 0);
+        for (std::int32_t row = 0; row < n; ++row) {
+            const std::uint32_t row_mix =
+                static_cast<std::uint32_t>(row) ^ (static_cast<std::uint32_t>(row) >> 7);
+            for (std::int32_t column = 0; column < k; ++column) {
+                const std::uint32_t pattern =
+                    row_mix * 13U + static_cast<std::uint32_t>(column) * 7U + seed;
+                // Small magnitudes keep long BF16 dots inside the shared tolerance budgets.
+                const float value = ((pattern >> 8) & 0xffU) * (1.0F / 65536.0F) - 1.0F / 512.0F;
+                detail::store_u16_le(packed.payload,
+                                     (static_cast<std::size_t>(row) * k + column) * 2,
+                                     f32_to_bf16(value));
+            }
+        }
+
+        packed.weight.qtype            = QType::BF16;
+        packed.weight.layout           = QuantLayout::Contiguous;
+        packed.weight.scale_dtype      = DType::FP32;
+        packed.weight.device           = Device::cpu();
+        packed.weight.payload          = packed.payload.data();
+        packed.weight.payload_bytes    = packed.payload.size();
+        packed.weight.high_plane_bytes = 0;
+        packed.weight.qdata            = packed.payload.data();
+        packed.weight.qhigh            = nullptr;
+        packed.weight.scales           = nullptr;
+        packed.weight.group_size       = 0;
+        packed.weight.group            = 0;
+        packed.weight.ndim             = 2;
+        packed.weight.shape[0]         = n;
+        packed.weight.shape[1]         = k;
+        packed.weight.shape[2]         = 1;
+        packed.weight.shape[3]         = 1;
+        packed.weight.padded_shape[0]  = n;
+        packed.weight.padded_shape[1]  = k;
+        packed.weight.padded_shape[2]  = 1;
+        packed.weight.padded_shape[3]  = 1;
+        packed.weight.n                = n;
+        packed.weight.k                = k;
+        return packed;
+    }
     if (qtype == QType::FP8_E4M3FN_ROW_BF16) {
         if (options.weight_scale != 0.0F || options.input_scale != 0.0F) {
             throw std::invalid_argument(

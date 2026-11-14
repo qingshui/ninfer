@@ -1,6 +1,7 @@
 #include "ops/suite.h"
 #include "ops/state_fixture.h"
 #include "ninfer/ops/gated_delta_net.h"
+#include "ninfer/types.h"
 #include "cuda_fixture.h"
 #include "core/buffer.h"
 #include "core/decode_graph.h"
@@ -827,6 +828,40 @@ int contract_rejection_cases() {
     return failures;
 }
 
+int batch_update_bound_rejection_case() {
+    // The batch update admits one row per decode lane; one past the engine ceiling is rejected
+    // before any state field or storage is consulted.
+    constexpr int kQkHeads    = 1;
+    constexpr int kValueHeads = 3;
+    constexpr int kBatch      = static_cast<int>(kMaximumConcurrency) + 1;
+    auto& context             = ninfer::test::cuda_environment().context;
+    DeviceBuffer q(context.device(), std::size_t(kStateDim) * kQkHeads * kBatch * 2);
+    DeviceBuffer k(context.device(), std::size_t(kStateDim) * kQkHeads * kBatch * 2);
+    DeviceBuffer v(context.device(), std::size_t(kStateDim) * kValueHeads * kBatch * 2);
+    DeviceBuffer g(context.device(), std::size_t(kValueHeads) * kBatch * 4);
+    DeviceBuffer beta(context.device(), std::size_t(kValueHeads) * kBatch * 4);
+    DeviceBuffer out(context.device(), std::size_t(kStateDim) * kValueHeads * kBatch * 2);
+    DeviceBuffer states(context.device(), std::size_t(kStateDim) * kStateDim * kValueHeads * 4);
+    DeviceBuffer offsets(context.device(), std::size_t(kBatch) * 8);
+    Tensor qt(q.span(), DType::BF16, {kStateDim, kQkHeads, 1, kBatch});
+    Tensor kt(k.span(), DType::BF16, {kStateDim, kQkHeads, 1, kBatch});
+    Tensor vt(v.span(), DType::BF16, {kStateDim, kValueHeads, 1, kBatch});
+    Tensor gt(g.span(), DType::FP32, {kValueHeads, 1, kBatch});
+    Tensor bt(beta.span(), DType::FP32, {kValueHeads, 1, kBatch});
+    Tensor ot(out.span(), DType::BF16, {kStateDim, kValueHeads, 1, kBatch});
+    Tensor states_tensor(states.span(), DType::FP32, {kStateDim, kStateDim, kValueHeads, 1});
+    RecordStateFixture history(states_tensor, 3);
+    Tensor selector(offsets.span(), DType::I64, {kBatch});
+    try {
+        ops::gated_delta_net_batch_update(
+            qt, kt, vt, gt, bt, 1.0F / std::sqrt(static_cast<float>(kStateDim)), true,
+            history.view(selector), history.view(selector), ot,
+            ninfer::test::cuda_environment().default_execution);
+    } catch (const std::invalid_argument&) { return 0; }
+    std::cerr << "gated_delta_net batch update accepted B=kMaximumConcurrency+1\n";
+    return 1;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -850,6 +885,7 @@ int main(int argc, char** argv) {
             ++failures;
         } catch (const std::invalid_argument&) {}
         failures += contract_rejection_cases();
+        failures += batch_update_bound_rejection_case();
         return failures;
     });
     const auto add = [&](Case c, unsigned seed, InputPattern pattern = InputPattern::Ordinary,
@@ -1015,6 +1051,13 @@ int main(int argc, char** argv) {
     batch({"35b ordinary", 16, 32, 1, true}, {8, 9, 10, 11, 12, 13, 14, 15},
           {8, 9, 10, 11, 12, 13, 14, 15}, 16, 13001u);
     batch({"35b mixed fork destinations", 16, 32, 1, true}, {0, 2, 4, 6}, {1, 3, 5, 7}, 8, 13101u);
+    // The new execution model decodes one in-place row per lane; carry the 122B head map at a
+    // wide decode batch far past the old sixteen-row bound, with state continuing per row.
+    {
+        std::vector<int> wide(520);
+        std::iota(wide.begin(), wide.end(), 0);
+        batch({"122b wide decode", 16, 64, 1, true}, wide, wide, 520, 15320u);
+    }
 
     suite.add("gdn/graph/running-t1",
               [] { return graph_case({"running-t1", 16, 32, 1, false}, 1, false); },

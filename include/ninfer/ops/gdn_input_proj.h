@@ -53,7 +53,8 @@ void gdn_input_proj_conv_update(const Tensor& x, const ProjectionWeights& weight
  *   Source is a BF16 [C,3] field in each record, selected by device I64 [B] byte offsets.
  *   Snapshots are contiguous BF16 [C,3,N]; snapshot_bases is contiguous device I32 [B].
  *   Fields, snapshots and other data tensors are 16-byte aligned; data tensors are contiguous.
- *   B=1 accepts every positive T; B=2..8 accepts T=1..16. Empty valid_columns means every
+ *   B=1 accepts every positive T; B=2..kMaximumConcurrency accepts T=1..16 (one row per decode
+ *   lane of the execution model). Empty valid_columns means every
  *   row is dense; otherwise it is device I32 [B] with each extent in [1,T]. Projection
  *   processes all M=B*T safe columns.
  *

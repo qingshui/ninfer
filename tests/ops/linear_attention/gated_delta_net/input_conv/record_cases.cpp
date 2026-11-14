@@ -42,6 +42,8 @@ std::vector<RecordCase> cases(Profile p) {
                     for (int row = 0; row < b; ++row) valid[row] = t - row % t;
                     result.push_back({t, b, valid, 1541U + t + b});
                 }
+    } else if (p.format == QType::BF16) {
+        result = {{2, 1, {}, 1200U}, {16, 8, ragged(16, 8), 1250U}, {4, 17, ragged(4, 17), 1270U}};
     } else {
         const bool fp8 = p.format == QType::FP8_E4M3FN_ROW_BF16;
         for (auto policy : {Policy::A16Only, fp8 ? Policy::AllowA8 : Policy::AllowA4}) {

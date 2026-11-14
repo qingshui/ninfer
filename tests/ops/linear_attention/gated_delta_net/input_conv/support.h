@@ -17,14 +17,20 @@ struct Profile {
 
     int qk_rows = 2048;
 
-    int value_rows() const { return qk_rows == 1024 ? 3072 : (hidden == 2048 ? 4096 : 6144); }
+    int value_rows() const {
+        return qk_rows == 1024 ? 3072
+               : hidden == 2048 ? 4096
+               : hidden == 3072 ? 8192
+                                : 6144;
+    }
 };
 
 inline constexpr Profile profiles[]{{QType::Q4_G64_FP16, 5120, "q4_q5"},
                                     {QType::Q8_G32_FP16, 2048, "q8"},
                                     {QType::Q8_G32_FP16, 2560, "q8"},
                                     {QType::NVFP4, 5120, "nvfp4"},
-                                    {QType::FP8_E4M3FN_ROW_BF16, 5120, "fp8"}};
+                                    {QType::FP8_E4M3FN_ROW_BF16, 5120, "fp8"},
+                                    {QType::BF16, 3072, "bf16"}};
 
 inline constexpr Profile local_profile{QType::Q8_G32_FP16, 2560, "q8_local", 1024};
 

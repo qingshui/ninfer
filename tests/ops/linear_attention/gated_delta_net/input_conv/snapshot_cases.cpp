@@ -1,4 +1,7 @@
 #include "support.h"
+#include "ninfer/types.h"
+
+#include <stdexcept>
 
 using namespace ninfer;
 using namespace ninfer::test;
@@ -77,6 +80,12 @@ std::vector<SnapshotCase> cases(Profile p) {
                   {17, Policy::AllowA4, 0},
                   {1024, Policy::AllowA4}};
         batch(6, 3, {6, 3, 1}, 829, Policy::AllowA4);
+    } else if (p.format == QType::BF16) {
+        // Qwen3.5-122B decode load: one row per lane through the update route at width one,
+        // including rows beyond the old sixteen-lane bound and the wide decode batch in graphs.
+        batch(1, 17, {}, 1043U);
+        batch(1, 520, {}, 1051U);
+        result.back().graph = true;
     } else {
         result = {{.width = 1},
                   {3},
@@ -203,6 +212,30 @@ int snapshot_capacity_contract() {
             }
         }
     }
+    // The 122B BF16 profile plans one row per decode lane, so the whole lane range is admitted
+    // and one past the engine ceiling is rejected.
+    const ops::SingleProjectionWeight bf16_capacity_weights{
+        capacity_weight(QType::BF16, 20480, 3072), ops::LinearPolicy::A16Only};
+    const auto bf16_snapshot_capacity = [&](std::int32_t batch, std::int32_t first,
+                                            std::int32_t last) {
+        return ops::gdn_input_proj_conv_snapshot_workspace_capacity_bytes(bf16_capacity_weights,
+                                                                          batch, first, last);
+    };
+    const int full_lanes = static_cast<std::int32_t>(kMaximumConcurrency);
+    {
+        std::size_t peak = 0;
+        for (int width = 1; width <= 16; ++width)
+            peak = std::max(peak, bf16_snapshot_capacity(full_lanes, width, width));
+        if (peak == 0 || bf16_snapshot_capacity(full_lanes, 1, 16) != peak) {
+            std::cerr << "BF16 snapshot interval missed its interior high-water\n";
+            ++failures;
+        }
+    }
+    try {
+        (void)bf16_snapshot_capacity(full_lanes + 1, 1, 16);
+        std::cerr << "BF16 snapshot capacity admitted a batch past the decode-lane ceiling\n";
+        ++failures;
+    } catch (const std::invalid_argument&) {}
     return failures;
 }
 

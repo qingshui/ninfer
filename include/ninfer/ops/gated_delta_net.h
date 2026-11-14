@@ -64,7 +64,8 @@ void gated_delta_net(const Tensor& q, const Tensor& k, const Tensor& v, const Te
  * One-token update for B independent records. q/k are contiguous BF16 [128,Hqk,1,B],
  * v/out BF16 [128,Hv,1,B], and g/beta FP32 [Hv,1,B]. Source and destination fields are dense
  * FP32 [128,128,Hv] within caller-owned records, selected by device I64 [B] arena-relative byte
- * offsets. B is in [1,8]. Each selected field must be 16-byte aligned and fully inside its arena.
+ * offsets. B is in [1, kMaximumConcurrency]: one row per decode lane of the execution model.
+ * Each selected field must be 16-byte aligned and fully inside its arena.
  * A row may update in place. Destinations are distinct and do not overwrite other active sources.
  * Input/output tensors do not overlap selected state fields. This form uses no arena allocation.
  */

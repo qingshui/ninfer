@@ -28,7 +28,12 @@ std::vector<Case> projection_cases(Profile p) {
                    {1, 4, 8, 192, 448, 512, 896, 1024, 1280, 2048, 2688, 5120, 7168, 8192});
     else if (p.input_rows == 5120)
         boundaries(outputs, {1, 8, 1024, 2048, 4096});
-    else
+    else if (p.input_rows == 3072) {
+        boundaries(outputs, {127, 1024, 2048, 4096});
+        // Qwen3.5-122B production columns: wide decode batches and long prefill segments.
+        outputs.push_back({520});
+        outputs.push_back({2042});
+    } else
         boundaries(outputs, {127, 1024, 2048, 4096});
     outputs.push_back({8192});
     unique(outputs);
@@ -55,7 +60,13 @@ std::vector<Case> norm_cases(Profile p) {
     std::vector<Case> outputs{{1}, {64}, {128}, {8192}};
     if (p.input_rows == 5120)
         boundaries(outputs, {2, 14, 28, 42, 1024, 2048, 4096});
-    else
+    else if (p.input_rows == 3072) {
+        boundaries(outputs, {6, 8, 12, 16, 127, 1024, 2048, 4096});
+        // The 122B GDN control path runs through the normalized projection; cover the
+        // production decode/prefill column loads on that entry too.
+        outputs.push_back({520});
+        outputs.push_back({2042});
+    } else
         boundaries(outputs, {6, 8, 12, 16, 127, 1024, 2048, 4096});
     unique(outputs);
     if (p.storage == Storage::Pair) outputs = {{1}, {9}, {64}, {1025}, {2049}, {4097}};

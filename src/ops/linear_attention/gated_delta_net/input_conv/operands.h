@@ -1,11 +1,17 @@
 #pragma once
 
 #include "ninfer/ops/gdn_input_proj.h"
+#include "ninfer/types.h"
 #include <span>
 
 namespace ninfer::ops::detail::gdn_input {
 
 enum class Format { Q4Q5, Q8, Fp8, Nvfp4, Bf16 };
+
+// Multi-row executions carry one row per decode lane, so the engine's concurrency ceiling is
+// the authoritative row bound of the materialized route.
+inline constexpr std::int32_t kDecodeRowLimit =
+    static_cast<std::int32_t>(ninfer::kMaximumConcurrency);
 
 struct Geometry {
     std::int32_t input_rows;

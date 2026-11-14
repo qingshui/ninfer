@@ -1,5 +1,6 @@
 #include "ops/common/host/operands.h"
 #include "ninfer/ops/gated_delta_net.h"
+#include "ninfer/types.h"
 #include "core/device.h"
 #include "ops/linear_attention/gated_delta_net/recurrence/chunked/launch.h"
 #include "ops/linear_attention/gated_delta_net/recurrence/plan.h"
@@ -81,7 +82,8 @@ RecurrenceGeometry validate_recurrent_batch_update(const Tensor& q, const Tensor
                                                    ConstStateFieldView source_state,
                                                    StateFieldView destination_state,
                                                    const Tensor& out, Device device) {
-    constexpr std::int32_t kMaximumBatch = 16;
+    // One row per decode lane: the engine's concurrency ceiling is the authoritative bound.
+    constexpr std::int32_t kMaximumBatch = static_cast<std::int32_t>(ninfer::kMaximumConcurrency);
     common::operand::dtype(q, DType::BF16, "gated_delta_net", "q must be BF16");
     common::operand::dtype(k, DType::BF16, "gated_delta_net", "k must be BF16");
     common::operand::dtype(v, DType::BF16, "gated_delta_net", "v must be BF16");
@@ -92,7 +94,8 @@ RecurrenceGeometry validate_recurrent_batch_update(const Tensor& q, const Tensor
     const RecurrenceGeometry geometry = require_geometry(q, v);
     const std::int32_t batch          = q.ne[3];
     if (batch <= 0 || batch > kMaximumBatch || geometry.tokens != 1) {
-        throw std::invalid_argument("gated_delta_net: batch update requires B=1..16 and W=1");
+        throw std::invalid_argument("gated_delta_net: batch update requires B=1.." +
+                                     std::to_string(kMaximumBatch) + " and W=1");
     }
     common::operand::shape(
         q, {detail::gated_delta_net::kStateDim, geometry.qk_heads, geometry.tokens, batch},

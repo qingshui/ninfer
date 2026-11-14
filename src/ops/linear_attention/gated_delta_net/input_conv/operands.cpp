@@ -115,9 +115,9 @@ void validate_batch_interval(Publication publication, std::int32_t batch, std::i
                              std::int32_t last) {
     validate_interval(first, last);
     // The materialized route (projection plus the sequential projected convolution) serves any
-    // row count; the fused kernels select only single-row or small-column batches, so the
-    // batch bound is the engine's sixteen decode lanes.
-    if (batch < 1 || batch > 16 || (batch > 1 && last > 16) ||
+    // row count; the fused kernels select only single-row or small-column batches, so the row
+    // bound is the engine's decode-lane ceiling and multi-row blocks stay within one window.
+    if (batch < 1 || batch > kDecodeRowLimit || (batch > 1 && last > 16) ||
         (publication == Publication::Record && (first < 2 || last > 16)))
         throw std::invalid_argument("GDN convolution: unsupported batch/token interval");
 }

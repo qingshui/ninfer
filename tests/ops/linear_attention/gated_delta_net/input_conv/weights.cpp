@@ -17,6 +17,9 @@ quantized_weight::PackedWeight make_first(Profile p, bool record) {
     case QType::FP8_E4M3FN_ROW_BF16:
         seed = record ? 1701 : 929;
         break;
+    case QType::BF16:
+        seed = record ? 1801 : 1031;
+        break;
     default:
         throw std::logic_error("unknown GDN input-conv test format");
     }
