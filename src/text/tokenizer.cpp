@@ -32,6 +32,10 @@ constexpr std::string_view kQwenSplitPattern =
 constexpr std::string_view kLetterDigit3Pattern =
     R"glm((?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+)glm";
 
+// The Qwen3.5 MoE split: plain letters (no marks) with single digits.
+constexpr std::string_view kLetterDigit1Pattern =
+    R"q35m((?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+)q35m";
+
 constexpr std::string_view kSingleDigitPattern = R"digit(\p{N}{1,3})digit";
 
 constexpr std::string_view kCjkRunPattern = "[\u4e00-\u9fa5\u3040-\u309f\u30a0-\u30ff]+";
@@ -94,10 +98,13 @@ BpePipeline parse_pipeline(const Json& root, const Json& model) {
                         split.value("invert", Json(false)) == false,
                     "pre_tokenizer.Split");
             const auto pattern = split["pattern"].value("Regex", std::string{});
-            require(pattern == kQwenSplitPattern || pattern == kLetterDigit3Pattern,
+            require(pattern == kQwenSplitPattern || pattern == kLetterDigit1Pattern ||
+                        pattern == kLetterDigit3Pattern,
                     "pre_tokenizer.Split.pattern");
-            pipeline.split =
-                pattern == kQwenSplitPattern ? BpeSplit::LetterMarkDigit1 : BpeSplit::LetterDigit3;
+            pipeline.split = pattern == kQwenSplitPattern  ? BpeSplit::LetterMarkDigit1
+                             : pattern == kLetterDigit1Pattern
+                                 ? BpeSplit::LetterDigit1
+                                 : BpeSplit::LetterDigit3;
             require(plain_byte_level(stages[1]), "pre_tokenizer.ByteLevel");
         } else {
             require(stages.size() == 5 && isolated_split(stages[0], kSingleDigitPattern) &&
@@ -781,6 +788,9 @@ bool append_normalized_bpe_ids(std::vector<int>& ids, std::string_view normalize
         switch (pipeline.split) {
         case BpeSplit::LetterMarkDigit1:
             end = word_end<BpeSplit::LetterMarkDigit1>(normalized, begin);
+            break;
+        case BpeSplit::LetterDigit1:
+            end = word_end<BpeSplit::LetterDigit1>(normalized, begin);
             break;
         case BpeSplit::LetterDigit3:
             end = word_end<BpeSplit::LetterDigit3>(normalized, begin);

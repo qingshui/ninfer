@@ -45,6 +45,7 @@ void launch_tma(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t stre
 } // namespace
 
 LinearAddLaunch select_bf16_linear_add(std::int32_t rows, std::int32_t k, std::int32_t tokens) {
+    if (rows == 3072 && k == 8192) return select_bf16_linear_add_n3072_k8192(tokens);
     if (rows != 5120 || k != 6144 || tokens <= 0)
         throw std::invalid_argument("bf16 linear_add: unsupported shape or token extent");
     if (tokens == 1) return launch_decode;

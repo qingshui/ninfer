@@ -816,6 +816,23 @@ int main(int argc, char** argv) {
     constexpr std::int32_t kQwen35Channels = 8192;
     ordinary(kQwen35Channels, 257, StateCall::InPlaceEntry, 3257U);
 
+    // The 122B GDN geometry: 2x2048 key/query channels plus 8192 value channels. The same
+    // route boundaries and state forms as the peer geometries, against the same oracle.
+    constexpr std::int32_t kQwen122Channels = 12288;
+    for (const std::int32_t T : {1, 2, 7, 15, 16, 17, 32, 33, 63, 64, 65, 257, 1024}) {
+        split(kQwen122Channels, 2048, 2048, 8192, T, false, false,
+              13000U + static_cast<std::uint32_t>(T));
+    }
+    for (const std::int32_t T : {1, 2, 15, 16, 17, 32, 33, 64, 65, 257}) {
+        split(kQwen122Channels, 2048, 2048, 8192, T, true, false,
+              13100U + static_cast<std::uint32_t>(T));
+    }
+    for (const std::int32_t T : {16, 33, 257}) {
+        split(kQwen122Channels, 2048, 2048, 8192, T, false, true,
+              13200U + static_cast<std::uint32_t>(T));
+    }
+    split(kQwen122Channels, 2048, 2048, 8192, 257, true, true, 13257U, true);
+
     // Snapshot decode, small-T boundary/interior, sequence route, slot 0 initialization, and
     // continuation from selected slots. A nonzero destination base proves that snapshots are not
     // hard-wired to physical slots [0,T); selected source slots may overlap the destination range.

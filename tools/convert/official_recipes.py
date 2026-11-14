@@ -191,10 +191,13 @@ def qwen3_8_27b_nvfp4(model, recipe, sources):
 def qwen3_5_122b_nvfp4(model, recipe, sources):
     """Qwen3.5-MoE ModelOpt NVFP4 import with expert-major banks and shared divisors.
 
-    Full-attention Q/K/V/O and the shared experts import their published NVFP4
-    words through the default sources (ModelOpt U8 tensors with weight_scale_2).
-    The routed experts pack into per-layer expert-major banks; every expert of a
-    layer shares one activation divisor pair stored in a single FP32 tensor.
+    Full-attention Q/K/V/O import their published NVFP4 words through the default
+    sources (ModelOpt U8 tensors with weight_scale_2). The shared experts decode
+    to BF16: the registered 122B runtime MoE contract executes the shared expert
+    on BF16 weights alongside the NVFP4 expert-major banks, so the artifact stores
+    the decoded shared matrices instead of preserving their published codes. Every
+    expert of a layer still shares one activation divisor pair stored in a single
+    FP32 tensor.
     """
     if "num_experts" not in model.config:
         raise ValueError("this official recipe requires Qwen3.5 MoE mathematics")
@@ -223,6 +226,7 @@ def qwen3_5_122b_nvfp4(model, recipe, sources):
             "/gdn/" in name
             or name.endswith(("/moe/router", "/moe/shared_score"))
             or "/moe/experts/" in name
+            or "/moe/shared/" in name
         ):
             continue
         recipe.assign(
@@ -230,6 +234,14 @@ def qwen3_5_122b_nvfp4(model, recipe, sources):
             format="nvfp4",
             method=import_encoded,
             activation_policy="AllowA4",
+        )
+    for name, parameter in model.parameters.items():
+        if not name.startswith("text/layers/") or not parameter.projection:
+            continue
+        if not name.split("/moe/", 1)[-1].startswith("shared/"):
+            continue
+        recipe.assign(
+            name, format="bf16", method=cast_direct, activation_policy="A16Only"
         )
     for layer, kind in enumerate(cfg["layer_types"]):
         if kind != "full_attention":

@@ -80,7 +80,7 @@ void test_model_defaults() {
     static_assert(noexcept(models::qwen3_5::resolve_kv_cache(EngineOptions{})));
     static_assert(noexcept(models::qwen4_exp::resolve_kv_cache(EngineOptions{})));
     static_assert(noexcept(models::glm5next::resolve_kv_cache(EngineOptions{})));
-    static_assert(models::qwen3_5::kMaximumSupportedConcurrency == 8);
+    static_assert(models::qwen3_5::kMaximumSupportedConcurrency == 16);
     static_assert(models::qwen4_exp::kMaximumSupportedConcurrency == 8);
     static_assert(models::glm5next::kMaximumSupportedConcurrency == 8);
     check_resolution([](const EngineOptions& o) { return models::qwen3_5::resolve_kv_cache(o); },
@@ -159,15 +159,22 @@ int test_qwen3_5_plan_limit() {
     profile.config.text.max_position_embeddings = 1U << 20;
     auto shared = std::make_shared<const q::execution::ModelProfile>(std::move(profile));
     DeviceContext device(0);
-    for (const std::uint32_t concurrency : {9U, 16U}) {
+    for (const std::uint32_t concurrency : {17U, 520U}) {
         auto options          = engine_options(concurrency);
         options.prefill_chunk = 1024;
         require(contains(rejection([&] {
                              (void)q::detail::make_sequence_planner_impl(shared, device, options);
                          }),
-                         "[1,8]"),
+                         "[1,16]"),
                 "Qwen3.5 accepted more lanes than its limit");
     }
+    auto at_limit          = engine_options(16);
+    at_limit.prefill_chunk = 1024;
+    require(!contains(rejection([&] {
+                          (void)q::detail::make_sequence_planner_impl(shared, device, at_limit);
+                      }),
+                      "[1,16]"),
+            "Qwen3.5 rejected a lane count within its limit");
     return 0;
 }
 

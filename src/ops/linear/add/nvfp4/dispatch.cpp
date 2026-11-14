@@ -8,6 +8,8 @@ Nvfp4LinearAddPlan select_plan(std::int32_t rows, std::int32_t k, LinearPolicy p
         if (k == 6144) return select_nvfp4_add_n5120_k6144(policy, tokens);
         if (k == 17408) return select_nvfp4_add_n5120_k17408(policy, tokens);
     }
+    if (tokens > 0 && rows == 3072 && k == 8192)
+        return select_nvfp4_add_n3072_k8192(policy, tokens);
     throw std::invalid_argument("nvfp4 linear_add: unsupported shape or token extent");
 }
 } // namespace

@@ -49,8 +49,13 @@ Json parse_resource_json(std::string_view bytes, std::string_view name) {
 void validate_tokenizer_config(const FrontendResources& resources) {
     const Json tokenizer_config =
         parse_resource_json(resources.text.tokenizer_config_json, "tokenizer_config.json");
-    if (tokenizer_config.value("add_bos_token", true) ||
-        tokenizer_config.value("add_prefix_space", true)) {
+    // Qwen tokenizer_config.json omits add_bos_token when it is off (HF Qwen2Tokenizer
+    // defaults it to false); only an explicit true breaks the prefix semantics.
+    const auto flag = [&tokenizer_config](const char* key) {
+        return tokenizer_config.contains(key) && tokenizer_config.at(key).is_boolean() &&
+               tokenizer_config.at(key).get<bool>();
+    };
+    if (flag("add_bos_token") || flag("add_prefix_space")) {
         throw std::invalid_argument(
             "tokenizer_config.json does not match Qwen tokenizer prefix semantics");
     }

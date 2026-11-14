@@ -18,7 +18,12 @@ struct CausalConvSnapshotPlan {
     bool masked;
 };
 
-enum class CausalConvSplitGeometry { Rows2048x2048x4096, Rows2048x2048x6144, Rows1024x1024x3072 };
+enum class CausalConvSplitGeometry {
+    Rows1024x1024x3072,
+    Rows2048x2048x4096,
+    Rows2048x2048x6144,
+    Rows2048x2048x8192
+};
 
 inline CausalConvRoute select_causal_conv_plan(const Tensor& x, const Tensor& weight,
                                                const Tensor& state_in, const Tensor& state_out,

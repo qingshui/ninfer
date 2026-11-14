@@ -636,8 +636,15 @@ void validate_target_options(const execution::ModelProfile& profile, DeviceConte
         }
         break;
     }
-    if (device.compute_capability() != 120) {
-        throw std::invalid_argument("Qwen3.5 family runtime requires compute capability 12.0");
+    // Platform specialization is chosen by the build target, not at runtime: every target
+    // binary only accepts the compute capability its kernels were compiled for.
+    constexpr int kTargetComputeCapability =
+        NINFER_TARGET_B200 ? 100 : NINFER_TARGET_SPARK ? 121 : 120;
+    if (device.compute_capability() != kTargetComputeCapability) {
+        throw std::invalid_argument(
+            "Qwen3.5 family runtime requires the compute capability of its build target (" +
+            std::to_string(kTargetComputeCapability / 10) + "." +
+            std::to_string(kTargetComputeCapability % 10) + ")");
     }
 }
 

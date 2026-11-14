@@ -14,10 +14,13 @@ struct Nvfp4LinearAddPlan {
 
 Nvfp4LinearAddPlan select_nvfp4_add_n5120_k6144(LinearPolicy policy, std::int32_t tokens);
 Nvfp4LinearAddPlan select_nvfp4_add_n5120_k17408(LinearPolicy policy, std::int32_t tokens);
+Nvfp4LinearAddPlan select_nvfp4_add_n3072_k8192(LinearPolicy policy, std::int32_t tokens);
 void launch_nvfp4_add_n5120_k6144_tma(const Tensor&, const Weight&, Tensor&, Nvfp4A4Workspace,
                                       cudaStream_t);
 void launch_nvfp4_add_n5120_k17408_tma(const Tensor&, const Weight&, Tensor&, Nvfp4A4Workspace,
                                        cudaStream_t);
+void launch_nvfp4_add_n3072_k8192_tma(const Tensor&, const Weight&, Tensor&, Nvfp4A4Workspace,
+                                      cudaStream_t);
 std::size_t nvfp4_linear_add_workspace_capacity_bytes(std::int32_t rows, std::int32_t k,
                                                       LinearPolicy policy, std::int32_t first,
                                                       std::int32_t last);

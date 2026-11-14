@@ -57,9 +57,16 @@ struct BpeMergeEntry {
     int result        = -1;
 };
 
-// Pre-tokenization families. SingleDigitCjkPunct is the Sequence of isolated Split(\p{N}{1,3}),
+// Pre-tokenization families. LetterMarkDigit1 and LetterDigit1 split on single digits;
+// LetterMarkDigit1 also treats Unicode marks as word letters. LetterDigit3 groups up to
+// three digits. SingleDigitCjkPunct is the Sequence of isolated Split(\p{N}{1,3}),
 // Split(CJK kana/ideograph runs), Split(punctuation-letter pieces) and Digits(individual_digits).
-enum class BpeSplit : std::uint8_t { LetterMarkDigit1, LetterDigit3, SingleDigitCjkPunct };
+enum class BpeSplit : std::uint8_t {
+    LetterMarkDigit1,
+    LetterDigit1,
+    LetterDigit3,
+    SingleDigitCjkPunct,
+};
 
 struct BpePipeline {
     bool normalize_nfc = false;

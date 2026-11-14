@@ -1,7 +1,10 @@
 #include "options.h"
 
 #include <charconv>
+#include <filesystem>
+#include <optional>
 #include <stdexcept>
+#include <system_error>
 #include <utility>
 
 namespace ninfer::perplexity {
@@ -23,6 +26,18 @@ std::uint32_t count(const product::CommandLineArgument& argument) {
 std::filesystem::path path(const product::CommandLineArgument& argument) {
     if (argument.value.empty()) throw std::invalid_argument(argument.flag + " must not be empty");
     return std::filesystem::absolute(argument.value).lexically_normal();
+}
+
+// The fixed quick corpus shipped next to the executable's build tree:
+// <build>/apps/ninfer-perplexity -> <repo>/eval/corpora/perplexity-1m/manifest.json.
+std::optional<std::filesystem::path> bundled_quick_corpus() {
+    std::error_code error;
+    const auto executable = std::filesystem::read_symlink("/proc/self/exe", error);
+    if (error) return std::nullopt;
+    auto manifest = std::filesystem::weakly_canonical(
+        executable.parent_path() / "../../../eval/corpora/perplexity-1m/manifest.json", error);
+    if (error || !std::filesystem::is_regular_file(manifest)) return std::nullopt;
+    return manifest;
 }
 
 } // namespace
@@ -48,6 +63,12 @@ Options parse_options(int argc, char** argv) {
         else if (argument.flag == "--quick")
             options.quick = true;
     }
+    if (!options.corpus && !options.text && options.quick)
+        options.corpus = bundled_quick_corpus();
+    if (!options.corpus && !options.text && options.quick)
+        throw std::invalid_argument(
+            "--quick without --corpus requires the bundled perplexity-1m corpus next to the "
+            "executable; pass --corpus explicitly");
     if (options.corpus.has_value() == options.text.has_value())
         throw std::invalid_argument("exactly one of --corpus and --text is required");
     if (options.quick && !options.corpus) throw std::invalid_argument("--quick requires --corpus");
@@ -67,7 +88,8 @@ perplexity:
   --corpus FILE / --text FILE
       Select a corpus manifest or one UTF-8 file. Exactly one is required.
   --quick
-      Use the fixed corpus subset; requires --corpus.
+      Use the fixed corpus subset; requires --corpus. Without --corpus or --text,
+      falls back to the bundled eval/corpora/perplexity-1m corpus next to the executable.
   --context N        Scoring window length (default 4096).
   --stride N         Newly scored targets per later window (default 2048).
   --output DIRECTORY Write report.json here; the directory must be absent or empty.

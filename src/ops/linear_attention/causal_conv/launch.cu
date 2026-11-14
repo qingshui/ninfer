@@ -121,6 +121,10 @@ void launch_token_parallel_split(const Tensor& x, const Tensor& weight, const Te
         launch_token_parallel_split_geometry<2048, 2048, 6144>(
             x, weight, conv_state_in, conv_state_out, out0, out1, out2, stream);
         return;
+    case CausalConvSplitGeometry::Rows2048x2048x8192:
+        launch_token_parallel_split_geometry<2048, 2048, 8192>(
+            x, weight, conv_state_in, conv_state_out, out0, out1, out2, stream);
+        return;
     }
     throw std::logic_error("causal_conv1d: unhandled split geometry");
 }
@@ -164,6 +168,10 @@ void launch_prefill_split(const Tensor& x, const Tensor& weight, const Tensor& c
         return;
     case CausalConvSplitGeometry::Rows2048x2048x6144:
         launch_prefill_split_geometry<2048, 2048, 6144>(x, weight, conv_state_in, conv_state_out,
+                                                        out0, out1, out2, stream);
+        return;
+    case CausalConvSplitGeometry::Rows2048x2048x8192:
+        launch_prefill_split_geometry<2048, 2048, 8192>(x, weight, conv_state_in, conv_state_out,
                                                         out0, out1, out2, stream);
         return;
     }
