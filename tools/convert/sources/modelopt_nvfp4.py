@@ -35,15 +35,20 @@ class ModelOptNvfp4:
 
     def matrix(self, prefix: str, shape: tuple[int, int]) -> LogicalSource:
         n, k = shape
+        if k % 16:
+            raise ValueError(
+                f"{prefix}: ModelOpt NVFP4 requires K divisible by 16, got {k}"
+            )
         for suffix, dims, dtype in (
             ("weight", (n, k // 2), "U8"),
             ("weight_scale", (n, k // 16), "F8_E4M3"),
         ):
             info = self.store.describe(prefix + "." + suffix)
             if info.shape != dims or info.dtype != dtype:
-                raise ValueError(f"{prefix}.{suffix}: unexpected encoded geometry/type")
-        if k % 16:
-            raise ValueError("ModelOpt NVFP4 requires K divisible by 16")
+                raise ValueError(
+                    f"{prefix}.{suffix}: expected {dtype}{dims}, "
+                    f"got {info.dtype}{tuple(info.shape)}"
+                )
         _, dw, _, da = self.scales(prefix)
 
         def encoded(first, last):

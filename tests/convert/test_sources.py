@@ -176,6 +176,7 @@ def test_matrix_source_resolves_modelopt_nvfp4_naming(tmp_path):
         source = matrix_source(store, "proj.weight", (n, k))
         assert source.shape == (n, k)
         assert source.encoding() == "nvfp4"
+        assert source.read_encoded(0, 1).codes.shape == (1, k // 2)
         assert source.weight_scale() == struct.pack("<f", 1.0 / scale_2)
         assert source.activation_scale() == struct.pack("<f", 2.0)
         nibbles = np.stack(
@@ -210,5 +211,5 @@ def test_matrix_source_modelopt_scale_shape_is_validated(tmp_path):
     )
     with SafetensorsSource(tmp_path) as store:
         source = matrix_source(store, "proj.weight", (2, 16))
-        with pytest.raises(ValueError, match="unexpected encoded geometry/type"):
+        with pytest.raises(ValueError, match="expected F8_E4M3"):
             source.values()
