@@ -465,11 +465,11 @@ void run_bf16(Suite& suite) {
     for (const auto& shape : kNewGeometries) { run_new_bf16_geometry(suite, shape); }
     {
         // GDN out_proj of the 122B geometry: the workload T points the shared geometry loop
-        // does not reach (decode 130, boundary 519/520/521, prefill 2048/4096 tails).
+        // does not reach (decode 130, boundary 519/520/521, prefill flights through 8192).
         using namespace ninfer::test::linear;
         std::vector<Invocation> calls;
-        for (int t : {130, 519, 520, 521, 2048, 2049, 4096, 4097}) calls.push_back({t});
-        for (int t : {130, 520, 2048, 4097})
+        for (int t : {130, 519, 520, 521, 2048, 2049, 4096, 4097, 8191, 8192}) calls.push_back({t});
+        for (int t : {130, 520, 2048, 4097, 8192})
             calls.push_back({t, CallForm::Policy, ops::LinearPolicy::A16Only, true});
         calls.push_back({130, CallForm::A16Convenience});
         add_shape(suite, ninfer::QType::BF16, ActivationRecipe::TokenBlocks, make_bf16_weight,

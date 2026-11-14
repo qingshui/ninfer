@@ -36,9 +36,9 @@ void run_nvfp4_a16(Suite& suite) {
         for (int t : {1,   2,  3,  4,  5,  7,  8,  9,  15,  16,  17,  31,  32,  33,
                       63,  64,  65,  95, 96, 97, 127, 128, 129, 130, 191, 192, 193,
                       255, 256, 257, 383, 384, 385, 511, 512, 513, 519, 520, 521,
-                      1023, 1024, 1025, 2048, 2049, 4096, 4097})
+                      1023, 1024, 1025, 2048, 2049, 4096, 4097, 8191, 8192})
             calls.push_back({t});
-        for (int t : {3, 8, 17, 33, 65, 130, 521, 1025, 2049})
+        for (int t : {3, 8, 17, 33, 65, 130, 521, 1025, 2049, 8192})
             calls.push_back({t, CallForm::Policy, ops::LinearPolicy::A16Only, true});
         for (int t : {1, 8, 130, 520, 1024}) calls.push_back({t, CallForm::A16Convenience});
         for (int t : {2, 8, 17, 130, 520})
@@ -102,9 +102,9 @@ void run_nvfp4_a4(Suite& suite) {
         for (int t : {1,   2,   3,   4,   5,   7,   8,   16,  17,  63,  64,  65,
                       95,  96,  97,  127, 128, 129, 130, 191, 192, 193, 383, 384,
                       385, 511, 512, 513, 519, 520, 521, 767, 768, 769, 1023, 1024,
-                      1025, 1280, 1500, 2048, 2049, 4096, 4097})
+                      1025, 1280, 1500, 2048, 2049, 4096, 4097, 8191, 8192})
             calls.push_back({t, CallForm::Policy, ops::LinearPolicy::AllowA4});
-        for (int t : {63, 97, 130, 193, 385, 520, 1023, 1024})
+        for (int t : {63, 97, 130, 193, 385, 520, 1023, 1024, 8192})
             calls.push_back({t, CallForm::Policy, ops::LinearPolicy::AllowA4, true});
         add_shape(suite, ninfer::QType::NVFP4, ActivationRecipe::Hashed, make_nvfp4_weight,
                   {3072, 8192, 733U, Comparison::Sampled, true, calls});

@@ -77,14 +77,25 @@ void add_multi_output_cases(Suite& suite) {
             1.0 / 256.0,
             Binding::Nvfp4Inputs};
         std::vector<Invocation> calls;
-        for (int t : {1, 2, 4, 8, 16, 20, 32, 33, 65, 130})
+        for (int t : {1, 2, 4, 8, 16, 20, 32, 33, 65, 130, 520, 8192})
             calls.push_back({.t = t, .input_seed = 359U, .omit_divisors = t == 1});
         calls.push_back({.t = 4, .policy = Policy::AllowA8, .input_seed = 359U});
         calls.push_back(
             {.t = 4, .policy = Policy::AllowA8, .input_seed = 359U, .omit_divisors = true});
-        for (int t : {4, 17, 130, 519, 520, 521, 1023, 1024, 1025, 2048, 2049})
+        for (int t : {4, 17, 130, 191, 192, 193, 383, 384, 385, 511, 519, 520, 521, 1023, 1024,
+                      1025, 2048, 2049, 4096, 4097, 8191, 8192})
             calls.push_back(
                 {.t = t, .policy = Policy::AllowA4, .input_seed = 359U, .sample_rows = 31});
+        // The new execution model runs decode and prefill flights inside CUDA graphs; replay the
+        // decode batch boundary and a prefill flight under capture for both activation routes.
+        for (int t : {520, 2048, 8192})
+            calls.push_back({.t           = t,
+                             .policy      = Policy::AllowA4,
+                             .graph       = true,
+                             .input_seed  = 359U,
+                             .sample_rows = 31});
+        calls.push_back(
+            {.t = 520, .graph = true, .input_seed = 359U, .sample_rows = 31});
         calls.push_back({.t = 0, .policy = Policy::AllowA4, .workspace_intervals = true});
         add_profile(suite, profile, std::move(calls));
     }

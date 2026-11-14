@@ -331,9 +331,11 @@ void q8_a16_conformance(Suite& suite) {
         if (shape.n == 248320) {
             calls.push_back({34});
             if (shape.k == 3072) {
-                // lm_head of the 122B geometry: decode 130, boundary 519/520/521, prefill tail.
-                for (int t : {130, 519, 520, 521, 2048, 2049}) calls.push_back({t});
-                for (int t : {130, 520, 2048})
+                // lm_head of the 122B geometry: decode 130, boundary 519/520/521, prefill tail
+                // through the single-flight prefill budget (8192).
+                for (int t : {130, 519, 520, 521, 2048, 2049, 4097, 8191, 8192})
+                    calls.push_back({t});
+                for (int t : {130, 520, 2048, 8192})
                     calls.push_back(
                         {t, CallForm::Policy, ninfer::ops::LinearPolicy::A16Only, true});
                 add_workspace_cases(suite, ninfer::QType::Q8_G32_FP16, shape.n, shape.k);
