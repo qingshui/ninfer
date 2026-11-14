@@ -706,51 +706,46 @@ int sixteen_lane_contract() {
     return failures;
 }
 
-// Host loop over the public prefix/slot contract with repeated IDs and one shared slot.
-int increment_counts_batch_16_contract() {
-    constexpr int t = 5, b = 16, v = 64, s = 12;
-    std::vector<std::int32_t> ids(t * b), valid(b), slots(b), initial(v * s), expected;
-    for (int row = 0; row < b; ++row) {
-        valid[row] = row % (t + 1);
-        slots[row] = (row * 5) % s; // Lanes 0 and 12 share slot 0.
-        for (int col = 0; col < t; ++col) ids[row * t + col] = (3 * row + 5 * (col % 2)) % v;
-    }
-    for (int i = 0; i < v * s; ++i) initial[i] = i % 3;
-    expected = initial;
-    for (int row = 0; row < b; ++row)
-        for (int col = 0; col < valid[row]; ++col) ++expected[slots[row] * v + ids[row * t + col]];
+// Host loop over the public prefix/slot contract with repeated IDs and one shared slot. The
+// batch dimension is a data dimension — decode batches reach the engine lane capacity — so the
+// same contract is verified at the former 16-lane bound, just past it, and at the 520-row
+// service workload.
+int increment_counts_batch_contract() {
+    constexpr int t = 5, v = 64, s = 12;
+    int failures    = 0;
+    for (const int b : {16, 17, 520}) {
+        std::vector<std::int32_t> ids(t * b), valid(b), slots(b), initial(v * s), expected;
+        for (int row = 0; row < b; ++row) {
+            valid[row] = row % (t + 1);
+            slots[row] = (row * 5) % s; // Rows sharing a slot collide on purpose.
+            for (int col = 0; col < t; ++col) ids[row * t + col] = (3 * row + 5 * (col % 2)) % v;
+        }
+        for (int i = 0; i < v * s; ++i) initial[i] = i % 3;
+        expected = initial;
+        for (int row = 0; row < b; ++row)
+            for (int col = 0; col < valid[row]; ++col)
+                ++expected[slots[row] * v + ids[row * t + col]];
 
-    DeviceBuffer device_ids = to_device(ids), device_valid = to_device(valid),
-                 device_slots = to_device(slots);
-    GuardedDeviceBuffer device_counts(initial.size() * sizeof(std::int32_t));
-    device_counts.copy_from_host(initial.data(), initial.size() * sizeof(std::int32_t));
-    Tensor token_ids(device_ids.span(), DType::I32, {t, b});
-    Tensor valid_columns(device_valid.span(), DType::I32, {b});
-    Tensor slot_ids(device_slots.span(), DType::I32, {b});
-    Tensor token_counts(device_counts.span(), DType::I32, {v, s});
-    ops::increment_token_counts_batch(token_ids, valid_columns, slot_ids, token_counts,
-                                      ninfer::test::cuda_environment().default_execution);
-    cuda_synchronize();
-
-    int failures = verify_exact("increment token counts B=16",
-                                from_device<std::int32_t>(device_counts.data(), initial.size()),
-                                expected);
-    failures += verify_exact("increment token counts B=16 read-only ids",
-                             from_device<std::int32_t>(device_ids, ids.size()), ids);
-    failures += device_counts.verify_guards("increment token counts B=16 guards");
-    try {
-        std::vector<std::int32_t> wide_valid(17, 0), wide_slots(17, 0), wide_ids(17, 0);
-        DeviceBuffer d_ids = to_device(wide_ids), d_valid = to_device(wide_valid),
-                     d_slots = to_device(wide_slots);
-        Tensor wide_token_ids(d_ids.span(), DType::I32, {1, 17});
-        Tensor wide_valid_columns(d_valid.span(), DType::I32, {17});
-        Tensor wide_slot_ids(d_slots.span(), DType::I32, {17});
-        ops::increment_token_counts_batch(wide_token_ids, wide_valid_columns, wide_slot_ids,
-                                          token_counts,
+        DeviceBuffer device_ids = to_device(ids), device_valid = to_device(valid),
+                     device_slots = to_device(slots);
+        GuardedDeviceBuffer device_counts(initial.size() * sizeof(std::int32_t));
+        device_counts.copy_from_host(initial.data(), initial.size() * sizeof(std::int32_t));
+        Tensor token_ids(device_ids.span(), DType::I32, {t, b});
+        Tensor valid_columns(device_valid.span(), DType::I32, {b});
+        Tensor slot_ids(device_slots.span(), DType::I32, {b});
+        Tensor token_counts(device_counts.span(), DType::I32, {v, s});
+        ops::increment_token_counts_batch(token_ids, valid_columns, slot_ids, token_counts,
                                           ninfer::test::cuda_environment().default_execution);
-        std::cerr << "increment token counts accepted 17 lanes\n";
-        ++failures;
-    } catch (const std::invalid_argument&) {}
+        cuda_synchronize();
+
+        const std::string label = "increment token counts B=" + std::to_string(b);
+        failures += verify_exact(label.c_str(), from_device<std::int32_t>(device_counts.data(),
+                                                                        initial.size()),
+                                 expected);
+        failures += verify_exact((label + " read-only ids").c_str(),
+                                 from_device<std::int32_t>(device_ids, ids.size()), ids);
+        failures += device_counts.verify_guards((label + " guards").c_str());
+    }
     return failures;
 }
 } // namespace
@@ -767,6 +762,6 @@ void add_sampling_cases(ninfer::test::OpSuite& suite) {
     suite.add("sample/workspace_route_boundary", workspace_route_boundary_contract);
     suite.add("sample/increment_counts", increment_counts_contract);
     suite.add("sample/sixteen_lanes", sixteen_lane_contract);
-    suite.add("sample/increment_counts_batch_16", increment_counts_batch_16_contract);
+    suite.add("sample/increment_counts_batch", increment_counts_batch_contract);
     suite.add("sample/grammar_mask", grammar_mask_contract);
 }

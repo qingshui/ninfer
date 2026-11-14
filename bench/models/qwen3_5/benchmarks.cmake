@@ -14,6 +14,16 @@ ninfer_internal_includes(ninfer_qwen3_5_dflash_round_bench)
 target_link_libraries(ninfer_qwen3_5_dflash_round_bench PRIVATE
   ninfer_engine ninfer_model_execution ninfer_core)
 
+# Decode step-time benchmark over a real artifact: one complete decode step per measured round
+# for a fixed batch, in captured-graph replay and eager dispatch, with phase decomposition
+# (attention/GDN/MoE) from the opt-in execution phase clock. Prints one JSON object per
+# (batch, mode) pair.
+add_executable(ninfer_qwen3_5_decode_step_bench
+  "${CMAKE_CURRENT_LIST_DIR}/decode_step_bench.cpp")
+ninfer_internal_includes(ninfer_qwen3_5_decode_step_bench)
+target_link_libraries(ninfer_qwen3_5_decode_step_bench PRIVATE
+  ninfer_engine ninfer_model_execution ninfer_model_loading ninfer_core ninfer::json)
+
 if(NINFER_TARGET STREQUAL "rtx5090")
   add_executable(ninfer_qwen3_5_moe_execution_bench
     "${CMAKE_CURRENT_LIST_DIR}/moe_execution_bench.cpp")

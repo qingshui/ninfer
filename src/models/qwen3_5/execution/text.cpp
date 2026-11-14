@@ -5,6 +5,7 @@
 #include "models/qwen3_5/execution/attention.h"
 #include "models/qwen3_5/execution/dense_mlp.h"
 #include "models/qwen3_5/execution/gdn.h"
+#include "models/qwen3_5/execution/phase_timing.h"
 #include "models/qwen3_5/execution/workspace.h"
 #include "ninfer/ops/causal_conv1d_silu.h"
 #include "ninfer/ops/embedding.h"
@@ -39,6 +40,16 @@ bool is_sequence(const TextStateUpdate& update) {
     return std::holds_alternative<SequenceUpdate>(update) ||
            std::holds_alternative<PackedSequenceUpdate>(update) ||
            std::holds_alternative<MixedUpdate>(update);
+}
+
+// Phase segments of the decode-step benchmark's armed clock. Unarmed execution pays one
+// pointer load; a captured body records external nodes that every graph replay refreshes.
+void enter_decode_phase(DecodePhase phase, CudaExecutionView cuda) {
+    if (auto* clock = DecodePhaseClock::current()) clock->enter(phase, cuda.stream());
+}
+
+void exit_decode_phase(CudaExecutionView cuda) {
+    if (auto* clock = DecodePhaseClock::current()) clock->exit(cuda.stream());
 }
 
 // Segments cover [0, tokens) in order, address distinct rows of the [rows] metadata outside
@@ -497,10 +508,12 @@ void TextRun::mixer(std::uint32_t layer) {
         full ? nvtx::Category::Attention : nvtx::Category::Gdn, layer);
     auto scope         = view_.workspace.scope();
     const auto compact = config.compact_layer_indices[layer];
+    enter_decode_phase(full ? DecodePhase::Attention : DecodePhase::Gdn, view_.execution);
     if (full)
         attention(block, compact);
     else
         gdn(block, compact);
+    exit_decode_phase(view_.execution);
 }
 
 void TextRun::post_mixer(std::uint32_t layer, const moe::GpuCall* call) {
@@ -511,6 +524,7 @@ void TextRun::post_mixer(std::uint32_t layer, const moe::GpuCall* call) {
                             nvtx::Category::PostMixer, layer);
     auto scope = view_.workspace.scope();
     Tensor h   = workspace::post_mixer_hidden(view_.workspace, config, residual_.ne[1]);
+    enter_decode_phase(DecodePhase::Moe, view_.execution);
     ops::rmsnorm(residual_, block.post_attention_norm, config.rms_norm_eps, true, h,
                  view_.execution);
     if (const auto* dense = std::get_if<DenseParameters>(&block.ffn)) {
@@ -523,6 +537,7 @@ void TextRun::post_mixer(std::uint32_t layer, const moe::GpuCall* call) {
         moe::execute(h, parameters, parameters.resident, ops::MoeEpilogue::AddResidual, residual_,
                      view_.workspace, view_.execution, next_projection_hints(layer));
     }
+    exit_decode_phase(view_.execution);
 }
 
 void TextRun::capture_features(std::uint32_t layer) {
@@ -581,6 +596,7 @@ bool TextRun::poll() {
         throw std::logic_error("Main traversal is not active");
     if (stage_ == Stage::PostMixer) {
         if (!view_.moe->poll()) return false;
+        exit_decode_phase(view_.execution);
         complete_layer();
     }
     const auto& parameters = view_.parameters;
@@ -594,12 +610,16 @@ bool TextRun::poll() {
             post_mixer_scope_.emplace(view_.workspace.scope());
             post_mixer_hidden_ =
                 workspace::post_mixer_hidden(view_.workspace, config, residual_.ne[1]);
+            // The MoE segment spans the schedule's asynchronous handoffs: enter before the
+            // projection norm, exit after the activity reports completion.
+            enter_decode_phase(DecodePhase::Moe, view_.execution);
             ops::rmsnorm(residual_, block.post_attention_norm, config.rms_norm_eps, true,
                          post_mixer_hidden_, view_.execution);
             stage_ = Stage::PostMixer;
             if (!view_.moe->start(routed->bank, post_mixer_hidden_, residual_, view_.workspace,
                                   next_projection_hints(layer_)))
                 return false;
+            exit_decode_phase(view_.execution);
         } else {
             post_mixer(layer_);
         }

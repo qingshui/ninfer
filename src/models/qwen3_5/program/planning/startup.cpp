@@ -263,9 +263,12 @@ WorkspaceSpec build_workspace_plan(const SequencePlanImpl& plan) {
                 scratch(layout, bytes);
             }
         }
-        // The output head only ever reads the last column of a sampled window.
+        // The output head only ever reads the last column of a sampled window: a prefill body
+        // samples one chunk, so its interval clamps to the chunk. A decode body projects the
+        // whole batch at once, so the clamp may never invert the interval below `first`.
         if (!plan.causal_scoring) {
-            linear_scratch(layout, profile.text.output_head, first, std::min(last, chunk));
+            linear_scratch(layout, profile.text.output_head, first,
+                           std::max(first, std::min(last, chunk)));
         }
     };
     const auto mtp_post_mixer = [&](WorkspaceLayoutBuilder& layout, int first, int last) {

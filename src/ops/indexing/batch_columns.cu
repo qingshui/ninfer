@@ -111,7 +111,9 @@ void scatter_batch_columns(const Tensor& source, const Tensor& columns,
     namespace operand        = common::operand;
     constexpr const char* op = "scatter_batch_columns";
     const int d = source.ne[0], t = source.ne[1], b = source.ne[2];
-    if (d <= 0 || t <= 0 || b < 1 || b > 16 ||
+    // The batch dimension addresses one grid.y block per row; the launch layout bound is the
+    // hardware grid extent, not the lane count of any one model.
+    if (d <= 0 || t <= 0 || b < 1 || b > 65535 ||
         (source.dtype != DType::BF16 && source.dtype != DType::I32))
         throw std::invalid_argument("scatter_batch_columns: invalid shape or type");
     const auto bytes = dtype_size(source.dtype);

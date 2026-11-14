@@ -81,4 +81,9 @@ void add_scatter_columns_cases(OpSuite& suite) {
               [] { return run<std::uint16_t>(DType::BF16, 384, 1, 4); });
     suite.add("scatter_columns/i32/coordinates",
               [] { return run<std::uint32_t>(DType::I32, 3, 1, 4); });
+    // The batch dimension is a data dimension: decode commits reach the engine lane capacity.
+    suite.add("scatter_columns/bf16/large_batch",
+              [] { return run<std::uint16_t>(DType::BF16, 384, 1, 130); });
+    suite.add("scatter_columns/i32/large_batch",
+              [] { return run<std::uint32_t>(DType::I32, 3, 1, 520); });
 }
