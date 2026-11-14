@@ -60,9 +60,9 @@ public:
     void prepare(const GraphInvocation& call) {
         auto& frame         = resources_.frame;
         const auto cuda     = device_.execution_view();
-        *frame.host_ingress = {};
-        *frame.host_commit  = {};
-        *frame.host_egress  = {};
+        frame.clear_host_ingress();
+        frame.clear_host_commit();
+        frame.clear_host_egress();
         const auto maximum  = resources_.decoder.text_kv.max_context() - 1;
         const auto frontier = std::min(maximum, std::max(1U, call.profile.min));
         const auto extent   = std::min(frame.spec.draft_window, maximum - frontier);
@@ -100,8 +100,8 @@ public:
             const auto ids = frame.decode_view(call.width, call.batch).ids;
             CUDA_CHECK(cudaMemsetAsync(ids.data, 0, ids.bytes(), cuda.stream()));
         }
-        CUDA_CHECK(cudaMemcpyAsync(frame.commit.data, frame.host_commit, sizeof(FrameCommit),
-                                   cudaMemcpyHostToDevice, cuda.stream()));
+        CUDA_CHECK(cudaMemcpyAsync(frame.commit.data, frame.host_commit_region.data,
+                                   frame.commit.bytes, cudaMemcpyHostToDevice, cuda.stream()));
         CUDA_CHECK(cudaMemsetAsync(frame.egress.data, 0, frame.egress.bytes, cuda.stream()));
         for (const auto offset : state_offsets_)
             resources_.state_images.storage().clear(offset, cuda);
@@ -137,8 +137,8 @@ public:
             CUDA_CHECK(cudaMemsetAsync(state.pending_features.data, 0,
                                        state.pending_features.bytes(), cuda.stream()));
         }
-        CUDA_CHECK(cudaMemcpyAsync(frame.ingress.data, frame.host_ingress, sizeof(FrameIngress),
-                                   cudaMemcpyHostToDevice, cuda.stream()));
+        CUDA_CHECK(cudaMemcpyAsync(frame.ingress.data, frame.host_ingress_region.data,
+                                   frame.ingress.bytes, cudaMemcpyHostToDevice, cuda.stream()));
         device_.synchronize();
     }
 
@@ -380,8 +380,8 @@ void Graphs::prepare(Resources& resources, const execution::Parameters& paramete
             auto& frame = resources.frame;
             for (std::uint32_t row = 0; row < batch; ++row)
                 frame.host_commit->accepted_columns[row] = spec_.draft_window + 1;
-            CUDA_CHECK(cudaMemcpyAsync(frame.commit.data, frame.host_commit, sizeof(FrameCommit),
-                                       cudaMemcpyHostToDevice, device.stream()));
+            CUDA_CHECK(cudaMemcpyAsync(frame.commit.data, frame.host_commit_region.data,
+                                       frame.commit.bytes, cudaMemcpyHostToDevice, device.stream()));
             resources.work.reset_peak();
             if (!observation.capturing()) {
                 bodies.mtp_commit(batch, nullptr, nullptr);

@@ -5,15 +5,48 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstring>
 #include <limits>
 #include <stdexcept>
-#include <type_traits>
 
 namespace ninfer::models::qwen3_5 {
 namespace {
 
 constexpr std::size_t kAlignment  = 256;
 constexpr std::int32_t kScoreTile = 1024;
+
+// Cursor over one frame region's lane tables: one contiguous table per member, back to back at
+// the member's natural alignment, sized by the frame's resolved concurrency.
+class FrameArraysCursor {
+public:
+    explicit FrameArraysCursor(std::uint32_t lanes) : lanes_(lanes) {
+        if (lanes == 0) throw std::invalid_argument("Qwen3.5 frame concurrency must be positive");
+    }
+
+    template <class T>
+    std::size_t table(std::size_t per_lane = 1) {
+        const auto alignment = alignof(T);
+        offset_              = (offset_ + alignment - 1) / alignment * alignment;
+        const auto at        = offset_;
+        offset_ += sizeof(T) * per_lane * lanes_;
+        return at;
+    }
+
+    [[nodiscard]] std::size_t finish() const {
+        constexpr auto alignment = alignof(std::max_align_t);
+        return (offset_ + alignment - 1) / alignment * alignment;
+    }
+
+private:
+    std::size_t offset_ = 0;
+    std::size_t lanes_  = 0;
+};
+
+template <class T>
+std::span<T> lane_span(MemorySpan region, std::size_t offset, std::uint32_t lanes) noexcept {
+    return {static_cast<T*>(static_cast<void*>(static_cast<std::byte*>(region.data) + offset)),
+            lanes};
+}
 
 TensorRegion add(LayoutBuilder& builder, DType dtype, std::initializer_list<std::int32_t> shape,
                  const char* label) {
@@ -61,6 +94,107 @@ Tensor prefix(const Tensor& tensor, std::initializer_list<std::int32_t> shape) {
 
 } // namespace
 
+FrameIngressLayout plan_frame_ingress(std::uint32_t lanes) {
+    FrameArraysCursor cursor(lanes);
+    FrameIngressLayout out;
+    out.lanes                     = lanes;
+    out.anchors                   = cursor.table<TokenId>();
+    out.frontiers                  = cursor.table<std::int32_t>();
+    out.backend_frontiers          = cursor.table<std::int32_t>();
+    out.extents                    = cursor.table<std::int32_t>();
+    out.valid_columns              = cursor.table<std::int32_t>();
+    out.proposal_valid_columns     = cursor.table<std::int32_t>();
+    out.budgets                    = cursor.table<std::int32_t>();
+    out.main_table_rows            = cursor.table<std::int32_t>();
+    out.backend_table_rows         = cursor.table<std::int32_t>();
+    out.state_source_offsets       = cursor.table<std::int64_t>();
+    out.state_destination_offsets  = cursor.table<std::int64_t>();
+    out.residency_slots            = cursor.table<std::int32_t>();
+    out.rope_deltas                = cursor.table<std::int32_t>();
+    out.sampling                   = cursor.table<ops::SamplingConfig>();
+    out.sampling_positions         = cursor.table<std::int32_t>();
+    out.history_skip               = cursor.table<std::int32_t>();
+    out.previous_rope              = cursor.table<std::int32_t>(3);
+    out.decode_positions           = cursor.table<std::int32_t>(16);
+    out.decode_rope                = cursor.table<std::int32_t>(48);
+    out.step_positions             = cursor.table<std::int32_t>(5);
+    out.step_valid                 = cursor.table<std::int32_t>(5);
+    out.step_rope                  = cursor.table<std::int32_t>(15);
+    out.bytes                      = cursor.finish();
+    return out;
+}
+
+FrameCommitLayout plan_frame_commit(std::uint32_t lanes) {
+    FrameArraysCursor cursor(lanes);
+    FrameCommitLayout out;
+    out.lanes                    = lanes;
+    out.state_destination_offsets = cursor.table<std::int64_t>();
+    out.last_columns              = cursor.table<std::int32_t>();
+    out.accepted_columns          = cursor.table<std::int32_t>();
+    out.count_columns             = cursor.table<std::int32_t>();
+    out.draft_append_starts       = cursor.table<std::int32_t>();
+    out.draft_append_ends         = cursor.table<std::int32_t>();
+    out.bytes                     = cursor.finish();
+    return out;
+}
+
+FrameEgressLayout plan_frame_egress(std::uint32_t lanes) {
+    FrameArraysCursor cursor(lanes);
+    FrameEgressLayout out;
+    out.lanes  = lanes;
+    out.tokens = cursor.table<TokenId>(16);
+    out.counts = cursor.table<std::int32_t>();
+    out.bytes  = cursor.finish();
+    return out;
+}
+
+FrameIngress FrameIngress::bind(MemorySpan region, const FrameIngressLayout& layout) noexcept {
+    const auto lanes = layout.lanes;
+    FrameIngress out;
+    out.anchors                    = lane_span<TokenId>(region, layout.anchors, lanes);
+    out.frontiers                  = lane_span<std::int32_t>(region, layout.frontiers, lanes);
+    out.backend_frontiers          = lane_span<std::int32_t>(region, layout.backend_frontiers, lanes);
+    out.extents                    = lane_span<std::int32_t>(region, layout.extents, lanes);
+    out.valid_columns              = lane_span<std::int32_t>(region, layout.valid_columns, lanes);
+    out.proposal_valid_columns     = lane_span<std::int32_t>(region, layout.proposal_valid_columns, lanes);
+    out.budgets                    = lane_span<std::int32_t>(region, layout.budgets, lanes);
+    out.main_table_rows            = lane_span<std::int32_t>(region, layout.main_table_rows, lanes);
+    out.backend_table_rows         = lane_span<std::int32_t>(region, layout.backend_table_rows, lanes);
+    out.state_source_offsets       = lane_span<std::int64_t>(region, layout.state_source_offsets, lanes);
+    out.state_destination_offsets  = lane_span<std::int64_t>(region, layout.state_destination_offsets, lanes);
+    out.residency_slots            = lane_span<std::int32_t>(region, layout.residency_slots, lanes);
+    out.rope_deltas                = lane_span<std::int32_t>(region, layout.rope_deltas, lanes);
+    out.sampling                   = lane_span<ops::SamplingConfig>(region, layout.sampling, lanes);
+    out.sampling_positions         = lane_span<std::int32_t>(region, layout.sampling_positions, lanes);
+    out.history_skip               = lane_span<std::int32_t>(region, layout.history_skip, lanes);
+    out.previous_rope              = lane_span<std::int32_t>(region, layout.previous_rope, 3 * lanes);
+    out.decode_positions           = lane_span<std::int32_t>(region, layout.decode_positions, 16 * lanes);
+    out.decode_rope                = lane_span<std::int32_t>(region, layout.decode_rope, 48 * lanes);
+    out.step_positions             = lane_span<std::int32_t>(region, layout.step_positions, 5 * lanes);
+    out.step_valid                 = lane_span<std::int32_t>(region, layout.step_valid, 5 * lanes);
+    out.step_rope                  = lane_span<std::int32_t>(region, layout.step_rope, 15 * lanes);
+    return out;
+}
+
+FrameCommit FrameCommit::bind(MemorySpan region, const FrameCommitLayout& layout) noexcept {
+    const auto lanes = layout.lanes;
+    FrameCommit out;
+    out.state_destination_offsets = lane_span<std::int64_t>(region, layout.state_destination_offsets, lanes);
+    out.last_columns             = lane_span<std::int32_t>(region, layout.last_columns, lanes);
+    out.accepted_columns         = lane_span<std::int32_t>(region, layout.accepted_columns, lanes);
+    out.count_columns            = lane_span<std::int32_t>(region, layout.count_columns, lanes);
+    out.draft_append_starts      = lane_span<std::int32_t>(region, layout.draft_append_starts, lanes);
+    out.draft_append_ends        = lane_span<std::int32_t>(region, layout.draft_append_ends, lanes);
+    return out;
+}
+
+FrameEgress FrameEgress::bind(MemorySpan region, const FrameEgressLayout& layout) noexcept {
+    FrameEgress out;
+    out.tokens = lane_span<TokenId>(region, layout.tokens, 16 * layout.lanes);
+    out.counts = lane_span<std::int32_t>(region, layout.counts, layout.lanes);
+    return out;
+}
+
 FrameLayout plan_frames(LayoutBuilder& builder, const FrameSpec& spec) {
     validate(spec);
     const auto batch = dimension(spec.batch_capacity);
@@ -74,9 +208,12 @@ FrameLayout plan_frames(LayoutBuilder& builder, const FrameSpec& spec) {
         std::max({out.staged_capacity, pack, static_cast<std::int32_t>(spec.mixed_tokens)});
     const auto inputs   = out.input_capacity;
     const auto staged   = out.staged_capacity;
-    out.ingress         = builder.add(sizeof(FrameIngress), kAlignment, "execution ingress");
-    out.commit          = builder.add(sizeof(FrameCommit), kAlignment, "execution commit");
-    out.egress          = builder.add(sizeof(FrameEgress), kAlignment, "execution egress");
+    out.ingress_arrays  = plan_frame_ingress(spec.batch_capacity);
+    out.commit_arrays   = plan_frame_commit(spec.batch_capacity);
+    out.egress_arrays   = plan_frame_egress(spec.batch_capacity);
+    out.ingress         = builder.add(out.ingress_arrays.bytes, kAlignment, "execution ingress");
+    out.commit          = builder.add(out.commit_arrays.bytes, kAlignment, "execution commit");
+    out.egress          = builder.add(out.egress_arrays.bytes, kAlignment, "execution egress");
     out.input_ids       = add(builder, DType::I32, {inputs}, "execution input ids");
     out.cache_positions = add(builder, DType::I32, {inputs}, "execution cache positions");
     out.rope_positions  = add(builder, DType::I32, {inputs, 3}, "execution rope positions");
@@ -134,9 +271,9 @@ FrameLayout plan_frames(LayoutBuilder& builder, const FrameSpec& spec) {
     }
 
     LayoutBuilder host;
-    out.host.ingress         = host.add(sizeof(FrameIngress), kAlignment, "Host execution ingress");
-    out.host.commit          = host.add(sizeof(FrameCommit), kAlignment, "Host execution commit");
-    out.host.egress          = host.add(sizeof(FrameEgress), kAlignment, "Host execution egress");
+    out.host.ingress         = host.add(out.ingress_arrays.bytes, kAlignment, "Host execution ingress");
+    out.host.commit          = host.add(out.commit_arrays.bytes, kAlignment, "Host execution commit");
+    out.host.egress          = host.add(out.egress_arrays.bytes, kAlignment, "Host execution egress");
     out.host.input_ids       = add(host, DType::I32, {inputs}, "Host input ids");
     out.host.cache_positions = add(host, DType::I32, {inputs}, "Host cache positions");
     out.host.rope_positions  = add(host, DType::I32, {inputs, 3}, "Host rope positions");
@@ -201,57 +338,56 @@ DFlashFrame::DFlashFrame(MemorySpan backing, const DFlashFrameLayout& layout)
 
 ExecutionFrame::ExecutionFrame(MemorySpan backing, const FrameLayout& layout)
     : spec(layout.spec), input_capacity(layout.input_capacity),
-      staged_capacity(layout.staged_capacity), host_storage(layout.host.bytes),
+      staged_capacity(layout.staged_capacity), ingress_arrays(layout.ingress_arrays),
+      commit_arrays(layout.commit_arrays), egress_arrays(layout.egress_arrays),
+      host_storage(layout.host.bytes),
       ingress(layout.ingress.bind(backing)), commit(layout.commit.bind(backing)),
       egress(layout.egress.bind(backing)), input_ids(layout.input_ids.bind(backing)),
       cache_positions(layout.cache_positions.bind(backing)),
       rope_positions(layout.rope_positions.bind(backing)), hidden(layout.hidden.bind(backing)) {
-    static_assert(std::is_trivially_copyable_v<FrameIngress>);
-    static_assert(std::is_trivially_copyable_v<FrameCommit>);
-    static_assert(std::is_trivially_copyable_v<FrameEgress>);
     const auto batch = static_cast<std::int32_t>(spec.batch_capacity);
     const auto width = static_cast<std::int32_t>(spec.draft_window + 1);
     const auto in    = [&](std::size_t offset) {
         return Tensor(ingress.subspan(offset), DType::I32, {batch});
     };
-    sampling_positions = in(offsetof(FrameIngress, sampling_positions));
-    history_skip       = in(offsetof(FrameIngress, history_skip));
+    sampling_positions = in(ingress_arrays.sampling_positions);
+    history_skip       = in(ingress_arrays.history_skip);
     previous_rope =
-        Tensor(ingress.subspan(offsetof(FrameIngress, previous_rope)), DType::I32, {batch, 3});
+        Tensor(ingress.subspan(ingress_arrays.previous_rope), DType::I32, {batch, 3});
     decode_positions =
-        Tensor(ingress.subspan(offsetof(FrameIngress, decode_positions)), DType::I32, {16 * batch});
+        Tensor(ingress.subspan(ingress_arrays.decode_positions), DType::I32, {16 * batch});
     decode_rope =
-        Tensor(ingress.subspan(offsetof(FrameIngress, decode_rope)), DType::I32, {16 * batch, 3});
-    anchors                = in(offsetof(FrameIngress, anchors));
-    frontiers              = in(offsetof(FrameIngress, frontiers));
-    backend_frontiers      = in(offsetof(FrameIngress, backend_frontiers));
-    extents                = in(offsetof(FrameIngress, extents));
-    valid_columns          = in(offsetof(FrameIngress, valid_columns));
-    proposal_valid_columns = in(offsetof(FrameIngress, proposal_valid_columns));
-    budgets                = in(offsetof(FrameIngress, budgets));
-    main_table_rows        = in(offsetof(FrameIngress, main_table_rows));
-    backend_table_rows     = in(offsetof(FrameIngress, backend_table_rows));
+        Tensor(ingress.subspan(ingress_arrays.decode_rope), DType::I32, {16 * batch, 3});
+    anchors                = in(ingress_arrays.anchors);
+    frontiers              = in(ingress_arrays.frontiers);
+    backend_frontiers      = in(ingress_arrays.backend_frontiers);
+    extents                = in(ingress_arrays.extents);
+    valid_columns          = in(ingress_arrays.valid_columns);
+    proposal_valid_columns = in(ingress_arrays.proposal_valid_columns);
+    budgets                = in(ingress_arrays.budgets);
+    main_table_rows        = in(ingress_arrays.main_table_rows);
+    backend_table_rows     = in(ingress_arrays.backend_table_rows);
     state_source_offsets =
-        Tensor(ingress.subspan(offsetof(FrameIngress, state_source_offsets)), DType::I64, {batch});
+        Tensor(ingress.subspan(ingress_arrays.state_source_offsets), DType::I64, {batch});
     state_destination_offsets = Tensor(
-        ingress.subspan(offsetof(FrameIngress, state_destination_offsets)), DType::I64, {batch});
-    residency_slots = in(offsetof(FrameIngress, residency_slots));
-    rope_deltas     = in(offsetof(FrameIngress, rope_deltas));
+        ingress.subspan(ingress_arrays.state_destination_offsets), DType::I64, {batch});
+    residency_slots = in(ingress_arrays.residency_slots);
+    rope_deltas     = in(ingress_arrays.rope_deltas);
     sampling        = static_cast<const ops::SamplingConfig*>(
-        ingress.subspan(offsetof(FrameIngress, sampling)).data);
+        ingress.subspan(ingress_arrays.sampling).data);
     const auto committed = [&](std::size_t offset) {
         return Tensor(commit.subspan(offset), DType::I32, {batch});
     };
     commit_destination_offsets = Tensor(
-        commit.subspan(offsetof(FrameCommit, state_destination_offsets)), DType::I64, {batch});
-    last_columns        = committed(offsetof(FrameCommit, last_columns));
-    accepted_columns    = committed(offsetof(FrameCommit, accepted_columns));
-    count_columns       = committed(offsetof(FrameCommit, count_columns));
-    draft_append_starts = committed(offsetof(FrameCommit, draft_append_starts));
-    draft_append_ends   = committed(offsetof(FrameCommit, draft_append_ends));
+        commit.subspan(commit_arrays.state_destination_offsets), DType::I64, {batch});
+    last_columns        = committed(commit_arrays.last_columns);
+    accepted_columns    = committed(commit_arrays.accepted_columns);
+    count_columns       = committed(commit_arrays.count_columns);
+    draft_append_starts = committed(commit_arrays.draft_append_starts);
+    draft_append_ends   = committed(commit_arrays.draft_append_ends);
     output_tokens =
-        Tensor(egress.subspan(offsetof(FrameEgress, tokens)), DType::I32, {width, batch});
-    output_counts = Tensor(egress.subspan(offsetof(FrameEgress, counts)), DType::I32, {batch});
+        Tensor(egress.subspan(egress_arrays.tokens), DType::I32, {width, batch});
+    output_counts = Tensor(egress.subspan(egress_arrays.counts), DType::I32, {batch});
     if (layout.logits) logits = layout.logits->bind(backing);
     if (layout.input_embeddings) input_embeddings = layout.input_embeddings->bind(backing);
     if (layout.visual_indices) visual_indices = layout.visual_indices->bind(backing);
@@ -263,12 +399,18 @@ ExecutionFrame::ExecutionFrame(MemorySpan backing, const FrameLayout& layout)
     if (layout.dflash) dflash.emplace(backing, *layout.dflash);
 
     const auto host      = host_storage.span();
-    host_ingress         = static_cast<FrameIngress*>(layout.host.ingress.bind(host).data);
-    host_commit          = static_cast<FrameCommit*>(layout.host.commit.bind(host).data);
-    host_egress          = static_cast<FrameEgress*>(layout.host.egress.bind(host).data);
-    *host_ingress        = {};
-    *host_commit         = {};
-    *host_egress         = {};
+    host_ingress_region  = layout.host.ingress.bind(host);
+    host_commit_region   = layout.host.commit.bind(host);
+    host_egress_region   = layout.host.egress.bind(host);
+    ingress_tables       = FrameIngress::bind(host_ingress_region, ingress_arrays);
+    commit_tables        = FrameCommit::bind(host_commit_region, commit_arrays);
+    egress_tables        = FrameEgress::bind(host_egress_region, egress_arrays);
+    host_ingress         = &ingress_tables;
+    host_commit          = &commit_tables;
+    host_egress          = &egress_tables;
+    clear_host_ingress();
+    clear_host_commit();
+    clear_host_egress();
     host_input_ids       = layout.host.input_ids.bind(host);
     host_cache_positions = layout.host.cache_positions.bind(host);
     host_rope_positions  = layout.host.rope_positions.bind(host);
@@ -282,15 +424,27 @@ ExecutionFrame::ExecutionFrame(MemorySpan backing, const FrameLayout& layout)
             return Tensor(span.subspan(offset), DType::I32,
                           {axes * batch, static_cast<int>(spec.draft_window)});
         };
-        mtp->step_positions      = bind_steps(ingress, offsetof(FrameIngress, step_positions), 1);
-        mtp->step_rope_positions = bind_steps(ingress, offsetof(FrameIngress, step_rope), 3);
-        mtp->step_valid_columns  = bind_steps(ingress, offsetof(FrameIngress, step_valid), 1);
-        const auto staging       = layout.host.ingress.bind(host);
-        host_step_positions      = bind_steps(staging, offsetof(FrameIngress, step_positions), 1);
-        host_step_rope_positions = bind_steps(staging, offsetof(FrameIngress, step_rope), 3);
-        host_step_valid_columns  = bind_steps(staging, offsetof(FrameIngress, step_valid), 1);
+        mtp->step_positions      = bind_steps(ingress, ingress_arrays.step_positions, 1);
+        mtp->step_rope_positions = bind_steps(ingress, ingress_arrays.step_rope, 3);
+        mtp->step_valid_columns  = bind_steps(ingress, ingress_arrays.step_valid, 1);
+        const auto staging       = host_ingress_region;
+        host_step_positions      = bind_steps(staging, ingress_arrays.step_positions, 1);
+        host_step_rope_positions = bind_steps(staging, ingress_arrays.step_rope, 3);
+        host_step_valid_columns  = bind_steps(staging, ingress_arrays.step_valid, 1);
     }
     if (layout.host.score_logprobs) host_score_logprobs = layout.host.score_logprobs->bind(host);
+}
+
+void ExecutionFrame::clear_host_ingress() noexcept {
+    std::memset(host_ingress_region.data, 0, host_ingress_region.bytes);
+}
+
+void ExecutionFrame::clear_host_commit() noexcept {
+    std::memset(host_commit_region.data, 0, host_commit_region.bytes);
+}
+
+void ExecutionFrame::clear_host_egress() noexcept {
+    std::memset(host_egress_region.data, 0, host_egress_region.bytes);
 }
 
 void ExecutionFrame::validate_input_shape(std::int32_t width, std::int32_t batch) const {
@@ -333,7 +487,8 @@ FrameInputView ExecutionFrame::host_decode_view(std::int32_t width, std::int32_t
     validate_input_shape(width, batch);
     if (width > 16) throw std::invalid_argument("Qwen3.5 decode exceeds its token capacity");
     const auto view = [&](auto& storage, std::initializer_list<std::int32_t> shape) {
-        return Tensor({storage.data(), sizeof(storage), Device::cpu(), true}, DType::I32, shape);
+        return Tensor({storage.data(), storage.size_bytes(), Device::cpu(), true}, DType::I32,
+                       shape);
     };
     return {width == 1 ? view(host_ingress->anchors, {1, batch}) : Tensor{},
             view(host_ingress->decode_positions, {width, batch}),

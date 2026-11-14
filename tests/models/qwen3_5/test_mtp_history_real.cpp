@@ -266,7 +266,8 @@ public:
             // Isolate embedding-coordinate alignment from image encoding. These exact embeddings
             // are consumed by Main and must also feed the shifted MTP token positions.
             manual = std::make_unique<q35::detail::ComputeOperation>(
-                runtime::ExecutionRequest<q35::ExecutionTypes>{{}, {}, {.operation = work}});
+                runtime::ExecutionRequest<q35::ExecutionTypes>{{}, {}, {.operation = work}},
+                native_.rank().max_concurrency);
             native_.rank().initialize_inputs(*manual);
             visual_storage =
                 DeviceBuffer(native_.device().device(), std::size_t(hidden) * count * 2);

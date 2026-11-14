@@ -52,8 +52,10 @@ ops::SamplingConfig RankProgramImpl::sampling_config(const ExecutionRow& row,
 }
 
 void RankProgramImpl::upload_ingress() {
-    CUDA_CHECK(cudaMemcpyAsync(resources.frame.ingress.data, resources.frame.host_ingress,
-                               sizeof(FrameIngress), cudaMemcpyHostToDevice, device.stream()));
+    CUDA_CHECK(cudaMemcpyAsync(resources.frame.ingress.data,
+                               resources.frame.host_ingress_region.data,
+                               resources.frame.ingress.bytes, cudaMemcpyHostToDevice,
+                               device.stream()));
 }
 
 void RankProgramImpl::upload_input(std::uint32_t width, std::uint32_t batch) {
@@ -112,7 +114,7 @@ void RankProgramImpl::initialize_forward(ComputeOperation& operation, const Forw
     // Rows execute one after another as a B=1 window in compact row 0. Only the operation's first
     // window starts from a clean ingress; later windows rebind every field they use (row binding,
     // valid_columns, sampling positions, previous RoPE) in place.
-    if (!index && !offset) *frame.host_ingress = {};
+    if (!index && !offset) frame.clear_host_ingress();
     bind_row(*frame.host_ingress, 0, row);
     frame.host_ingress->valid_columns[0] = static_cast<std::int32_t>(operation.width);
     if (work.sample != SamplePurpose::None)
@@ -184,7 +186,7 @@ void RankProgramImpl::initialize_packed_forward(ComputeOperation& operation,
                                                 const ForwardWork& work) {
     auto& frame         = resources.frame;
     const auto count    = static_cast<std::uint32_t>(work.rows.size());
-    *frame.host_ingress = {};
+    frame.clear_host_ingress();
     operation.segments.clear();
     operation.segments.reserve(count);
     std::uint32_t total = 0;
@@ -239,7 +241,7 @@ void RankProgramImpl::validate_packed_forward(const ForwardWork& work) const {
 
 void RankProgramImpl::initialize_decode(ComputeOperation& operation, const DecodeWork& work) {
     auto& frame         = resources.frame;
-    *frame.host_ingress = {};
+    frame.clear_host_ingress();
     operation.batch     = static_cast<std::uint32_t>(work.rows.size());
     for (std::size_t i = 0; i < work.rows.size(); ++i) {
         const auto& row = work.rows[i];
@@ -288,7 +290,7 @@ void RankProgramImpl::initialize_decode(ComputeOperation& operation, const Decod
 // up to its own extent.
 void RankProgramImpl::initialize_mixed(ComputeOperation& operation, const MixedWork& work) {
     auto& frame         = resources.frame;
-    *frame.host_ingress = {};
+    frame.clear_host_ingress();
     const auto rows     = static_cast<std::uint32_t>(work.decode.rows.size());
     const auto count    = static_cast<std::uint32_t>(work.prefill.rows.size());
     operation.mixed     = true;
@@ -432,7 +434,7 @@ void RankProgramImpl::initialize_inputs(ComputeOperation& operation) {
         operation.rows                = work->rows;
         operation.batch               = static_cast<std::uint32_t>(work->rows.size());
         operation.width               = draft_window + 1;
-        *resources.frame.host_ingress = {};
+        resources.frame.clear_host_ingress();
         for (std::size_t i = 0; i < work->rows.size(); ++i)
             bind_row(*resources.frame.host_ingress, i, work->rows[i]);
         upload_ingress();

@@ -2,12 +2,13 @@
 
 #include "core/buffer.h"
 #include "core/layout.h"
+#include "core/memory.h"
 #include "ninfer/ops/sampling.h"
 #include "ninfer/types.h"
 
-#include <array>
 #include <cstdint>
 #include <optional>
+#include <span>
 
 namespace ninfer::models::qwen3_5 {
 
@@ -33,41 +34,69 @@ struct FrameSpec {
     std::uint32_t control_token_limit = 0;
 };
 
+// Byte offsets of the lane tables of one frame region, resolved for its concurrency. One
+// layout serves the device region and the pinned host mirror of the same tables, so both bind
+// every member at the same offset.
+struct FrameIngressLayout {
+    std::uint32_t lanes = 0;
+    std::size_t anchors = 0, frontiers = 0, backend_frontiers = 0, extents = 0,
+        valid_columns = 0, proposal_valid_columns = 0, budgets = 0, main_table_rows = 0,
+        backend_table_rows = 0, state_source_offsets = 0, state_destination_offsets = 0,
+        residency_slots = 0, rope_deltas = 0, sampling = 0, sampling_positions = 0,
+        history_skip = 0, previous_rope = 0, decode_positions = 0, decode_rope = 0,
+        step_positions = 0, step_valid = 0, step_rope = 0;
+    std::size_t bytes = 0;
+};
+
+struct FrameCommitLayout {
+    std::uint32_t lanes = 0;
+    std::size_t state_destination_offsets = 0, last_columns = 0, accepted_columns = 0,
+        count_columns = 0, draft_append_starts = 0, draft_append_ends = 0;
+    std::size_t bytes = 0;
+};
+
+struct FrameEgressLayout {
+    std::uint32_t lanes = 0;
+    std::size_t tokens = 0, counts = 0;
+    std::size_t bytes = 0;
+};
+
+[[nodiscard]] FrameIngressLayout plan_frame_ingress(std::uint32_t lanes);
+[[nodiscard]] FrameCommitLayout plan_frame_commit(std::uint32_t lanes);
+[[nodiscard]] FrameEgressLayout plan_frame_egress(std::uint32_t lanes);
+
 // Arrays are compact-row indexed. Tensor views bind only the current exact-B prefix.
 struct FrameIngress {
-    std::array<TokenId, kMaximumConcurrency> anchors{};
-    std::array<std::int32_t, kMaximumConcurrency> frontiers{};
-    std::array<std::int32_t, kMaximumConcurrency> backend_frontiers{};
-    std::array<std::int32_t, kMaximumConcurrency> extents{};
-    std::array<std::int32_t, kMaximumConcurrency> valid_columns{};
-    std::array<std::int32_t, kMaximumConcurrency> proposal_valid_columns{};
-    std::array<std::int32_t, kMaximumConcurrency> budgets{};
-    std::array<std::int32_t, kMaximumConcurrency> main_table_rows{};
-    std::array<std::int32_t, kMaximumConcurrency> backend_table_rows{};
-    std::array<std::int64_t, kMaximumConcurrency> state_source_offsets{};
-    std::array<std::int64_t, kMaximumConcurrency> state_destination_offsets{};
-    std::array<std::int32_t, kMaximumConcurrency> residency_slots{};
-    std::array<std::int32_t, kMaximumConcurrency> rope_deltas{};
-    std::array<ops::SamplingConfig, kMaximumConcurrency> sampling{};
-    std::array<std::int32_t, kMaximumConcurrency> sampling_positions{}, history_skip{};
-    std::array<std::int32_t, 3 * kMaximumConcurrency> previous_rope{};
-    std::array<std::int32_t, 16 * kMaximumConcurrency> decode_positions{};
-    std::array<std::int32_t, 48 * kMaximumConcurrency> decode_rope{};
-    std::array<std::int32_t, 5 * kMaximumConcurrency> step_positions{}, step_valid{};
-    std::array<std::int32_t, 15 * kMaximumConcurrency> step_rope{};
+    std::span<TokenId> anchors;
+    std::span<std::int32_t> frontiers, backend_frontiers, extents, valid_columns;
+    std::span<std::int32_t> proposal_valid_columns, budgets, main_table_rows,
+        backend_table_rows;
+    std::span<std::int64_t> state_source_offsets, state_destination_offsets;
+    std::span<std::int32_t> residency_slots, rope_deltas;
+    std::span<ops::SamplingConfig> sampling;
+    std::span<std::int32_t> sampling_positions, history_skip;
+    std::span<std::int32_t> previous_rope, decode_positions, decode_rope;
+    std::span<std::int32_t> step_positions, step_valid, step_rope;
+
+    [[nodiscard]] static FrameIngress bind(MemorySpan region,
+                                           const FrameIngressLayout& layout) noexcept;
 };
 
 struct FrameCommit {
-    std::array<std::int64_t, kMaximumConcurrency> state_destination_offsets{};
-    std::array<std::int32_t, kMaximumConcurrency> last_columns{}, accepted_columns{};
-    std::array<std::int32_t, kMaximumConcurrency> count_columns{};
-    std::array<std::int32_t, kMaximumConcurrency> draft_append_starts{};
-    std::array<std::int32_t, kMaximumConcurrency> draft_append_ends{};
+    std::span<std::int64_t> state_destination_offsets;
+    std::span<std::int32_t> last_columns, accepted_columns, count_columns,
+        draft_append_starts, draft_append_ends;
+
+    [[nodiscard]] static FrameCommit bind(MemorySpan region,
+                                          const FrameCommitLayout& layout) noexcept;
 };
 
 struct FrameEgress {
-    std::array<TokenId, kMaximumConcurrency * 16> tokens{};
-    std::array<std::int32_t, kMaximumConcurrency> counts{};
+    std::span<TokenId> tokens;
+    std::span<std::int32_t> counts;
+
+    [[nodiscard]] static FrameEgress bind(MemorySpan region,
+                                          const FrameEgressLayout& layout) noexcept;
 };
 
 struct MtpFrameLayout {
@@ -109,6 +138,10 @@ struct FrameHostLayout {
 
 struct FrameLayout {
     FrameSpec spec;
+    // Byte layouts of the ingress/commit/egress lane tables, resolved for spec.batch_capacity.
+    FrameIngressLayout ingress_arrays;
+    FrameCommitLayout commit_arrays;
+    FrameEgressLayout egress_arrays;
     // Token columns of the Main input/output planes; staged_capacity bounds one window's
     // per-sequence consumers (visual embeddings, MTP history).
     std::int32_t input_capacity  = 0;
@@ -184,10 +217,19 @@ public:
     const FrameSpec spec;
     const std::int32_t input_capacity;
     const std::int32_t staged_capacity;
+    const FrameIngressLayout ingress_arrays;
+    const FrameCommitLayout commit_arrays;
+    const FrameEgressLayout egress_arrays;
     PinnedHostBuffer host_storage;
+    // Host mirrors over the pinned lane tables, one span per table; `host_ingress` and friends
+    // point at them so device-side code shares one spelling with the tensor bindings.
+    FrameIngress ingress_tables;
+    FrameCommit commit_tables;
+    FrameEgress egress_tables;
     FrameIngress* host_ingress = nullptr;
     FrameCommit* host_commit   = nullptr;
     FrameEgress* host_egress   = nullptr;
+    MemorySpan host_ingress_region, host_commit_region, host_egress_region;
     Tensor host_input_ids, host_cache_positions, host_rope_positions;
     Tensor host_visual_indices;
     Tensor host_control_tokens;
@@ -213,6 +255,18 @@ public:
 
 private:
     void validate_input_shape(std::int32_t width, std::int32_t batch) const;
+
+public:
+    // Byte offset of the egress counts table inside the egress region; a speculative readback
+    // copies it plus one count per row.
+    [[nodiscard]] std::size_t egress_counts_offset() const noexcept {
+        return egress_arrays.counts;
+    }
+    // Zero every lane table of one host mirror. Replaces the trivially copyable structs'
+    // value-initialization of the fixed-layout tables.
+    void clear_host_ingress() noexcept;
+    void clear_host_commit() noexcept;
+    void clear_host_egress() noexcept;
 };
 
 } // namespace ninfer::models::qwen3_5

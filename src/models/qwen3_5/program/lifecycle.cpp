@@ -20,6 +20,7 @@ RankProgramImpl::RankProgramImpl(const execution::Parameters& values, const Sequ
       context_counts(plan.causal_scoring ? 0
                                          : std::size_t(values.profile->public_tokens) *
                                                plan.max_concurrency * sizeof(std::int32_t)),
+      residencies(plan.max_concurrency),
       result_ready(context), drafts_ready(context), compute_retired(context),
       context_ready(context), prefill_timer(context), gpu_timer(context, plan.gpu_timing) {
     if (parameters.profile != plan.profile || parameters.profile->options != plan.features)
@@ -105,7 +106,7 @@ void RankProgramImpl::start(runtime::ExecutionRequest<ExecutionTypes>&& request)
     } else {
         if (compute) throw std::logic_error("Qwen3.5 compute frame is occupied");
         gpu_timer.begin();
-        compute = std::make_unique<ComputeOperation>(std::move(request));
+        compute = std::make_unique<ComputeOperation>(std::move(request), max_concurrency);
         compute_actions->submit(compute->request.work.context);
         initialize_inputs(*compute);
     }

@@ -13,7 +13,6 @@
 #include "models/qwen3_5/program/graphs.h"
 #include "models/qwen3_5/program/planning/startup.h"
 
-#include <array>
 #include <chrono>
 #include <deque>
 #include <memory>
@@ -73,7 +72,9 @@ struct ComputeOperation {
     std::uint32_t axis_tokens        = 0;
     bool graph_started = false;
     bool projected     = false;
-    std::array<std::uint32_t, kMaximumConcurrency> dead_positions{};
+    // Dead-position bitmap of constrained decode rows; one entry per lane of the resolved
+    // concurrency.
+    std::vector<std::uint32_t> dead_positions;
     std::optional<runtime::DecisionInput> decision;
     std::optional<Commit> commit;
     std::optional<Result> result;
@@ -84,7 +85,7 @@ struct ComputeOperation {
     std::vector<execution::SequenceSegment> segments;
     std::unique_ptr<execution::TextRun> text;
 
-    ComputeOperation(runtime::ExecutionRequest<ExecutionTypes>&&);
+    ComputeOperation(runtime::ExecutionRequest<ExecutionTypes>&&, std::uint32_t lanes);
     ~ComputeOperation();
 };
 
@@ -192,7 +193,8 @@ public:
     std::unique_ptr<context::ContextMigration> context_actions;
     std::unique_ptr<ContextOperation> context_operation;
     PinnedHostBuffer context_counts;
-    std::array<Residency, kMaximumConcurrency> residencies;
+    // One residency slot per lane of the resolved concurrency.
+    std::vector<Residency> residencies;
     std::size_t workspace_peak = 0;
     std::unique_ptr<ComputeOperation> compute;
     CudaCompletionEvent result_ready;

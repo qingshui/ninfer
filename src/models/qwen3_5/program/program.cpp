@@ -78,8 +78,9 @@ std::unique_ptr<RankProgram> create_rank_program(const execution::Parameters& pa
 
 namespace ninfer::models::qwen3_5::detail {
 
-ComputeOperation::ComputeOperation(runtime::ExecutionRequest<ExecutionTypes>&& value)
-    : request(std::move(value)), last_command(request.command) {}
+ComputeOperation::ComputeOperation(runtime::ExecutionRequest<ExecutionTypes>&& value,
+                                   std::uint32_t lanes)
+    : request(std::move(value)), last_command(request.command), dead_positions(lanes, 0) {}
 
 ComputeOperation::~ComputeOperation() = default;
 
@@ -140,7 +141,7 @@ void RankProgramImpl::validate_work(const Work& work, runtime::FrameKind kind) c
     auto validate_members = [&](const auto& rows, auto binding) {
         if (rows.empty() || rows.size() > max_concurrency)
             throw std::invalid_argument("Qwen3.5 work has invalid batch membership");
-        std::array<bool, kMaximumConcurrency> seen{};
+        std::vector<std::uint8_t> seen(max_concurrency, 0);
         for (const auto& value : rows) {
             const auto& row = binding(value);
             validate_row(row);
@@ -259,7 +260,7 @@ void RankProgramImpl::validate_decision(runtime::ExecutionTicket ticket,
     const auto& op = require_compute(ticket);
     if (!op.decision_requested || op.decision_supplied || input.stage != op.decision_stage)
         throw std::logic_error("Qwen3.5 decision input does not match the pending stage");
-    std::array<bool, kMaximumConcurrency> seen{};
+    std::vector<std::uint8_t> seen(max_concurrency, 0);
     const auto words = (parameters.profile->public_tokens + 31) / 32;
     for (const auto& row : input.rows) {
         if (row.member >= op.batch || seen[row.member] || !op.sampling[row.member].constrained ||

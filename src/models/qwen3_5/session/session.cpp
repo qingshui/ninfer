@@ -501,7 +501,9 @@ SessionImpl::SessionImpl(std::shared_ptr<const ModelDefinition> definition_in, S
       max_concurrency(plan.max_concurrency), prefill_chunk(plan.prefill_chunk),
       draft_window(plan.draft_window), speculative_backend(plan.speculative_backend),
       context_cache(plan.context_cache), vision_enabled(plan.profile->options.vision),
-      causal_scoring(plan.causal_scoring) {
+      causal_scoring(plan.causal_scoring),
+      sequences(plan.max_concurrency), requests(plan.max_concurrency),
+      lane_epochs(plan.max_concurrency, 0) {
     if (!definition || !plan.profile || plan.context.pools.empty() ||
         plan.pack_tokens < plan.prefill_chunk || plan.pack_segments == 0 ||
         plan.pack_segments > plan.max_concurrency)

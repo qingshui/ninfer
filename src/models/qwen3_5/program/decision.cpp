@@ -106,10 +106,12 @@ void RankProgramImpl::decide_decode(std::uint32_t batch_value, std::uint32_t wid
 }
 
 void RankProgramImpl::readback_decode(std::uint32_t batch, bool speculative) {
-    const auto bytes = speculative ? offsetof(FrameEgress, counts) + batch * sizeof(std::int32_t)
-                                   : batch * sizeof(TokenId);
-    CUDA_CHECK(cudaMemcpyAsync(resources.frame.host_egress, resources.frame.egress.data, bytes,
-                               cudaMemcpyDeviceToHost, device.stream()));
+    const auto bytes =
+        speculative
+            ? resources.frame.egress_counts_offset() + batch * sizeof(std::int32_t)
+            : batch * sizeof(TokenId);
+    CUDA_CHECK(cudaMemcpyAsync(resources.frame.host_egress_region.data, resources.frame.egress.data,
+                               bytes, cudaMemcpyDeviceToHost, device.stream()));
 }
 
 void RankProgramImpl::launch_decision(ComputeOperation& operation) {

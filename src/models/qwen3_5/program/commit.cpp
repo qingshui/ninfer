@@ -15,7 +15,7 @@ void RankProgramImpl::launch_commit(ComputeOperation& operation) {
     const bool generated = decode || (forward && forward->sample != SamplePurpose::None);
     const bool mtp       = decode && operation.speculative && backend == SpeculativeBackend::Mtp;
     bool count_tokens    = false;
-    *frame.host_commit   = {};
+    frame.clear_host_commit();
     for (std::uint32_t i = 0; generated && i < operation.batch; ++i) {
         const auto& row     = operation.rows[i];
         const auto accepted = value.rows[i].discarded ? 0 : value.rows[i].accepted_tokens;
@@ -32,8 +32,8 @@ void RankProgramImpl::launch_commit(ComputeOperation& operation) {
     }
     bool device_work = decode || count_tokens;
     if (device_work)
-        CUDA_CHECK(cudaMemcpyAsync(frame.commit.data, frame.host_commit, sizeof(FrameCommit),
-                                   cudaMemcpyHostToDevice, device.stream()));
+        CUDA_CHECK(cudaMemcpyAsync(frame.commit.data, frame.host_commit_region.data,
+                                   frame.commit.bytes, cudaMemcpyHostToDevice, device.stream()));
     if (decode) {
         const bool mtp_history =
             backend == SpeculativeBackend::Mtp && operation.speculative &&

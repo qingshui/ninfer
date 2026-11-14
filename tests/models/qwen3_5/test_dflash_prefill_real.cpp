@@ -183,13 +183,12 @@ void run(const char* artifact, SpeculativeBackend backend) {
     auto state_source = source_offset, state_destination = source_offset;
 
     const auto decode_binding = [&](std::int64_t offset, std::int32_t row) {
-        auto& frame                                      = resources.frame;
-        *frame.host_ingress                              = {};
+        auto& frame                          = resources.frame;
+        frame.clear_host_ingress();
         frame.host_ingress->state_destination_offsets[0] = offset;
         frame.host_ingress->backend_table_rows[0]        = row;
-        CUDA_CHECK(cudaMemcpyAsync(frame.ingress.data, frame.host_ingress,
-                                   sizeof(qwen::FrameIngress), cudaMemcpyHostToDevice,
-                                   device.stream()));
+        CUDA_CHECK(cudaMemcpyAsync(frame.ingress.data, frame.host_ingress_region.data,
+                                   frame.ingress.bytes, cudaMemcpyHostToDevice, device.stream()));
     };
     const auto prefill = [&](std::uint32_t count) {
         require(count && frontier + count <= tokens.size(), "fixture prefill exceeds its prompt");

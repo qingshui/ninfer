@@ -225,14 +225,16 @@ UnitDemand SessionImpl::next_unit(const SequenceState& state, const RequestContr
 }
 
 ResourceReservation SessionImpl::reserve_units(std::span<const ExecutionUnit> units) {
-    std::array<UnitDemand, kMaximumConcurrency> demands{};
-    std::array<UnitDemand, kMaximumConcurrency> coverage{};
-    std::array<std::uint32_t, kMaximumConcurrency> old_main{}, old_backend{};
-    std::array<std::uint32_t, kMaximumConcurrency> add_main{}, add_backend{};
+    // Lane-indexed tables, one entry per lane of the resolved concurrency.
+    const auto lanes = static_cast<std::size_t>(max_concurrency);
+    std::vector<UnitDemand> demands(lanes);
+    std::vector<UnitDemand> coverage(lanes);
+    std::vector<std::uint32_t> old_main(lanes, 0), old_backend(lanes, 0);
+    std::vector<std::uint32_t> add_main(lanes, 0), add_backend(lanes, 0);
     // Growth of a decode unit out to the reserve horizon; only lanes in `horizon` use it.
-    std::array<std::uint32_t, kMaximumConcurrency> horizon_main{}, horizon_backend{};
-    std::array<bool, kMaximumConcurrency> horizon{};
-    std::array<bool, kMaximumConcurrency> seen{};
+    std::vector<std::uint32_t> horizon_main(lanes, 0), horizon_backend(lanes, 0);
+    std::vector<std::uint8_t> horizon(lanes, 0);
+    std::vector<std::uint8_t> seen(lanes, 0);
     for (std::size_t index = 0; index < units.size(); ++index) {
         const auto& unit = units[index];
         if (!valid_sequence(unit.sequence)) {
@@ -325,11 +327,13 @@ ResourceReservation SessionImpl::reserve_units(std::span<const ExecutionUnit> un
     }
     struct Bundle {
         ContextDemand demand;
-        std::array<context::ContextDemandId, kMaximumConcurrency> main, backend;
+        std::vector<context::ContextDemandId> main, backend;
     };
 
     const auto build = [&](bool with_horizon) {
         Bundle bundle;
+        bundle.main.resize(lanes);
+        bundle.backend.resize(lanes);
         for (const auto& unit : units) {
             const auto lane = this->lane(unit.sequence);
             if (requests[lane].permit) continue;
@@ -374,7 +378,7 @@ ResourceReservation SessionImpl::reserve_units(std::span<const ExecutionUnit> un
     auto& backend_ids = bundle.backend;
     auto reserved = directory.reserve(bundle.demand);
     if (!reserved) return {.assessment = std::move(reserved.assessment)};
-    std::array<bool, kMaximumConcurrency> added{};
+    std::vector<std::uint8_t> added(lanes, 0);
     try {
         for (const auto& unit : units) {
             const auto lane = this->lane(unit.sequence);

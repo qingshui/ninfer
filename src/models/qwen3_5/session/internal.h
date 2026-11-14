@@ -8,7 +8,6 @@
 #include "models/common/qwen/recovery_store.h"
 #include "models/common/qwen/vision/control.h"
 
-#include <array>
 #include <deque>
 #include <memory>
 #include <optional>
@@ -447,9 +446,10 @@ public:
     const ContextCacheOptions context_cache;
     const bool vision_enabled;
     const bool causal_scoring;
-    std::array<SequenceState, kMaximumConcurrency> sequences;
-    std::array<RequestControl, kMaximumConcurrency> requests;
-    std::array<std::uint64_t, kMaximumConcurrency> lane_epochs{};
+    // Lane tables, one entry per lane of the resolved concurrency; allocated at construction.
+    std::vector<SequenceState> sequences;
+    std::vector<RequestControl> requests;
+    std::vector<std::uint64_t> lane_epochs;
     std::uint64_t next_sequence = 1;
     std::uint64_t context_mutations_ = 0;
     mutable context::RecoveryIndex<> recovery_index{directory.metadata_budget()};
@@ -568,8 +568,8 @@ public:
     void append_decode_row(Execution&, DecodeWork&, SequenceHandle,
                            const runtime::RoundBudget&, bool constrained);
     // Settle and adopt the prefill segments of a mixed execution together with its decode rows.
-    void prepare_segments(Execution&, std::array<bool, kMaximumConcurrency>& recovery);
-    void adopt_segments(Execution&, const std::array<bool, kMaximumConcurrency>& recovery) noexcept;
+    void prepare_segments(Execution&, std::span<bool> recovery);
+    void adopt_segments(Execution&, std::span<const bool> recovery) noexcept;
     [[nodiscard]] std::optional<runtime::ExecutionTicket>
     submit_execution(Execution&&, runtime::ExecutionReservation, Work&&);
 

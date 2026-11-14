@@ -216,7 +216,7 @@ void SessionImpl::receive_result(runtime::ResultReady<ExecutionTypes>&& event) {
 void SessionImpl::commit_completed_unit() {
     auto& current      = *execution;
     current.settlement = std::make_unique<context::ContextTransaction>(directory);
-    std::array<bool, kMaximumConcurrency> recovery{};
+    const auto recovery = std::make_unique<bool[]>(max_concurrency);
     Commit physical;
     physical.rows.reserve(current.members.size());
     for (std::size_t b = 0; b < current.members.size(); ++b) {
@@ -275,8 +275,13 @@ CommitResult SessionImpl::commit(PendingBatch&& pending,
     }
     CommitResult result;
     result.row_count = decisions.size();
-    std::array<bool, kMaximumConcurrency> recovery{};
-    std::array<bool, kMaximumConcurrency> segment_recovery{};
+    result.rows.resize(decisions.size());
+    result.capture_ready.resize(decisions.size());
+    // Lane-indexed recovery marks; one bool per lane of the resolved concurrency.
+    const auto recovery        = std::make_unique<bool[]>(max_concurrency);
+    const auto segment_recovery = std::make_unique<bool[]>(max_concurrency);
+    const auto recovery_span        = std::span<bool>(recovery.get(), max_concurrency);
+    const auto segment_recovery_span = std::span<bool>(segment_recovery.get(), max_concurrency);
     try {
         current.decisions.assign(decisions.begin(), decisions.end());
         current.settlement = std::make_unique<context::ContextTransaction>(directory);
@@ -298,7 +303,7 @@ CommitResult SessionImpl::commit(PendingBatch&& pending,
         }
         Commit physical;
         physical.rows.reserve(decisions.size());
-        if (current.kind == OperationKind::Mixed) prepare_segments(current, segment_recovery);
+        if (current.kind == OperationKind::Mixed) prepare_segments(current, segment_recovery_span);
         for (std::size_t b = 0; b < decisions.size(); ++b) {
             const auto& d = decisions[b];
             const auto l  = lane(current.members[first + b]);
@@ -325,7 +330,7 @@ CommitResult SessionImpl::commit(PendingBatch&& pending,
         executor().fail(error.what());
         throw;
     }
-    if (current.kind == OperationKind::Mixed) adopt_segments(current, segment_recovery);
+    if (current.kind == OperationKind::Mixed) adopt_segments(current, segment_recovery_span);
     for (std::size_t b = 0; b < decisions.size(); ++b) {
         const auto& d = decisions[b];
         const auto l  = lane(current.members[first + b]);
@@ -391,9 +396,10 @@ DiscardResult SessionImpl::discard(PendingBatch&& pending) noexcept {
         if (current.kind == OperationKind::Mixed) {
             // The decode rows are dropped but their segments completed: commit every decode row
             // as discarded so the segments' State and KV settle and keep their progress.
-            std::array<bool, kMaximumConcurrency> recovery{};
+            const auto recovery = std::make_unique<bool[]>(max_concurrency);
+            const auto recovery_span = std::span<bool>(recovery.get(), max_concurrency);
             current.settlement = std::make_unique<context::ContextTransaction>(directory);
-            prepare_segments(current, recovery);
+            prepare_segments(current, recovery_span);
             current.settlement->prepare_actions();
             Commit physical;
             physical.rows.assign(current.members.size() - first, CommitRow{0, true, true});
@@ -401,7 +407,7 @@ DiscardResult SessionImpl::discard(PendingBatch&& pending) noexcept {
             (void)executor().commit(current.ticket, std::move(physical));
             current.settlement->mark_submitted();
             current.settlement->adopt();
-            adopt_segments(current, recovery);
+            adopt_segments(current, recovery_span);
         } else {
             executor().discard(current.ticket);
         }
@@ -414,8 +420,7 @@ DiscardResult SessionImpl::discard(PendingBatch&& pending) noexcept {
 
 // A mixed execution settles its prefill segments with its decode rows, because both share one
 // device commit. The segments advance exactly as a completed prefill would.
-void SessionImpl::prepare_segments(Execution& current,
-                                   std::array<bool, kMaximumConcurrency>& recovery) {
+void SessionImpl::prepare_segments(Execution& current, std::span<bool> recovery) {
     for (std::size_t b = 0; b < current.decode_begin; ++b) {
         const auto l = lane(current.members[b]);
         recovery[b]  = prepare_settlement(l, current.completed[b], requests[l].lifecycle,
@@ -424,7 +429,7 @@ void SessionImpl::prepare_segments(Execution& current,
 }
 
 void SessionImpl::adopt_segments(Execution& current,
-                                 const std::array<bool, kMaximumConcurrency>& recovery) noexcept {
+                                 std::span<const bool> recovery) noexcept {
     for (std::size_t b = 0; b < current.decode_begin; ++b) {
         const auto l   = lane(current.members[b]);
         auto& request  = requests[l];

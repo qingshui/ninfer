@@ -273,8 +273,9 @@ struct CommitRowResult {
 };
 
 struct CommitResult {
-    std::array<CommitRowResult, kMaximumConcurrency> rows{};
-    std::array<bool, kMaximumConcurrency> capture_ready{};
+    // One entry per committed decode row; sized by the execution's row count.
+    std::vector<CommitRowResult> rows;
+    std::vector<bool> capture_ready;
     std::size_t row_count = 0;
 };
 
