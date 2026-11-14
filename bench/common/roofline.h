@@ -50,6 +50,14 @@ inline constexpr Roofline kRoofline{
     .mxfp8_f32_tflops = 249.52,
     .nvfp4_f32_tflops = 499.02,
 };
+#elif NINFER_TARGET_B200
+// Nominal HBM3e spec only (8 stacks, 8 TB/s); streaming-read and tensor-rate
+// calibrations are unestablished for the SM100 production paths (plain mma
+// forms), so those references stay absent until measured.
+inline constexpr Roofline kRoofline{
+    .target     = "b200",
+    .memory_gbs = 8000.0,
+};
 #endif
 
 // Console uses "-"; CSV callers pass "" so absent references stay empty fields.
