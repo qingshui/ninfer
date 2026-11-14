@@ -84,3 +84,4 @@ id_rsa*
 /plugins/
 /tools/bench/gate_last_result.json
 /log/autodevx.*
+metrics.json
