@@ -71,11 +71,20 @@ public:
                                      ? 0
                                      : options.speculative.draft_tokens),
           pending_timeout_(std::chrono::milliseconds(options.pending_timeout_ms)),
-          resources_(options.context_cache.enabled, std::move(context_cost)) {
+          resources_(options.context_cache.enabled, std::move(context_cost)),
+          slots_(options.max_concurrency),
+          capture_decisions_(options.max_concurrency),
+          scheduler_(options.max_concurrency),
+          control_executed_(options.max_concurrency),
+          reserved_units_(options.max_concurrency),
+          current_decode_lanes_(options.max_concurrency) {
         if (max_concurrency_ == 0 || max_concurrency_ > kMaximumConcurrency ||
             options.max_pending_requests == 0 || pending_timeout_.count() <= 0) {
             throw std::invalid_argument("Engine core bounds are invalid");
         }
+        // The resolved lane count sizes every lane table of the engine and its executor before
+        // any execution can start.
+        instance_.executor->configure_decode_statistics(max_concurrency_);
         scheduler_.configure_prefill(prefill_pacing(instance_.session->prefill_pack_tokens(),
                                                     prefill_chunk_, max_concurrency_));
         cumulative_stats_.context_transfers.kv.resize(instance_.session->kv_pools().size());
@@ -402,7 +411,8 @@ private:
         std::vector<ResidencyId> residencies;
         std::vector<std::uint32_t> lanes;
         std::vector<bool> cancelled;
-        std::array<bool, kMaximumConcurrency> progressed{};
+        // Whether each row of the flight produced committed progress.
+        std::vector<bool> progressed;
         std::optional<std::uint64_t> retired_ns;
         bool service_accounted = false;
         std::vector<TokenId> control_tokens;
@@ -421,9 +431,14 @@ private:
         std::uint32_t lane = 0;
     };
 
+    // The resident requests of a cycle boundary, sized to the lane capacity.
     struct ActiveExposureSet {
-        std::array<ActiveExposure, kMaximumConcurrency> entries{};
+        std::vector<ActiveExposure> entries;
         std::size_t size = 0;
+
+        ActiveExposureSet() = default;
+
+        explicit ActiveExposureSet(std::uint32_t lanes) : entries(lanes) {}
     };
 
     struct HostPhaseMeasurement {
@@ -657,11 +672,11 @@ private:
 
     void complete_cancelled(const std::shared_ptr<Request>& request);
 
-    [[nodiscard]] std::array<bool, kMaximumConcurrency> snapshot_cancellations() const noexcept;
+    [[nodiscard]] std::vector<bool> snapshot_cancellations() const noexcept;
 
     bool settle_terminal_requests(HostPhaseMeasurement& boundary);
 
-    void cancel_active_requests(const std::array<bool, kMaximumConcurrency>& cancelled_at_boundary,
+    void cancel_active_requests(const std::vector<bool>& cancelled_at_boundary,
                                 HostPhaseMeasurement& boundary);
 
     [[nodiscard]] bool expire_pending_requests();
@@ -738,7 +753,7 @@ private:
 
     void reserve_resident_units(ReservationScope scope = ReservationScope::Round);
 
-    using LaneSlots = std::array<std::shared_ptr<Request>, kMaximumConcurrency>;
+    using LaneSlots = std::vector<std::shared_ptr<Request>>;
 
     // The lanes that can take a prefill/replay unit in this reservation pass: resident lanes
     // without a pending capture, cancellation or Session execution, and not blocked by a
@@ -838,11 +853,11 @@ private:
     std::uint64_t next_request_id_        = 1;
     std::uint64_t submitted_requests_     = 0;
     std::uint64_t next_publication_order_ = 1;
-    std::array<std::shared_ptr<Request>, kMaximumConcurrency> slots_{};
+    std::vector<std::shared_ptr<Request>> slots_;
     std::optional<MaterializingRequest> materializing_;
     std::optional<AdmissionDecision> admission_decision_;
     std::uint64_t admission_generation_ = 1;
-    std::array<std::optional<CaptureDecision>, kMaximumConcurrency> capture_decisions_;
+    std::vector<std::optional<CaptureDecision>> capture_decisions_;
     std::shared_ptr<Request> context_owner_;
     std::deque<DeferredSettlement> deferred_settlements_;
     std::optional<bool> pass_blocked_;
@@ -851,15 +866,15 @@ private:
     std::optional<ComputeFlight> compute_;
     std::optional<ComputeFlight> retiring_;
     CycleStep cycle_step_ = CycleStep::Boundary;
-    std::array<bool, kMaximumConcurrency> control_executed_{};
-    std::array<std::optional<UnitPermit>, kMaximumConcurrency> reserved_units_{};
+    std::vector<bool> control_executed_{};
+    std::vector<std::optional<UnitPermit>> reserved_units_{};
     std::atomic<bool> admission_check_pending_{false};
     std::atomic<std::uint64_t> schedule_revision_{0};
     std::uint64_t published_revision_          = 0;
     Clock::time_point pending_deadline_        = Clock::time_point::max();
     std::uint64_t worker_accounted_elapsed_ns_ = 0;
     HostWorkClass current_host_work_class_     = HostWorkClass::Control;
-    std::array<std::uint32_t, kMaximumConcurrency> current_decode_lanes_{};
+    std::vector<std::uint32_t> current_decode_lanes_{};
     std::size_t current_decode_lane_count_ = 0;
     RuntimeStats cumulative_stats_;
     RuntimeStats stats_snapshot_;

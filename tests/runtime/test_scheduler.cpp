@@ -61,7 +61,9 @@ struct Request {
 
 using Scheduler  = ninfer::runtime::Scheduler<Request>;
 using RequestPtr = std::shared_ptr<Request>;
-using Slots      = std::array<RequestPtr, ninfer::kMaximumConcurrency>;
+// Lane slot tables are runtime-sized; tests carry their own capacity.
+constexpr std::uint32_t kSlots = 6;
+using Slots                     = std::array<RequestPtr, kSlots>;
 
 void require(bool condition, const char* message) {
     if (!condition) { throw std::runtime_error(message); }
@@ -76,7 +78,7 @@ RequestPtr request(std::uint64_t id, Request::Phase phase = Request::Phase::Wait
 }
 
 void test_fifo_bypass_survives_pressure() {
-    Scheduler scheduler;
+    Scheduler scheduler(kSlots);
     const auto head = request(10);
     std::deque<RequestPtr> fresh{head, request(11), request(12), request(13)};
 
@@ -129,7 +131,7 @@ void test_fifo_bypass_survives_pressure() {
 }
 
 void test_scan_progress_and_waiter_barrier() {
-    Scheduler scheduler;
+    Scheduler scheduler(kSlots);
     std::deque<RequestPtr> fresh{request(1), request(2), request(3),
                                  request(4), request(5), request(6)};
     std::vector<std::uint64_t> seen;
@@ -193,7 +195,7 @@ void test_scan_progress_and_waiter_barrier() {
 }
 
 void test_scan_keeps_unexamined_candidates() {
-    Scheduler scheduler;
+    Scheduler scheduler(kSlots);
     std::deque<RequestPtr> fresh{request(1), request(2), request(3), request(4)};
     scheduler.begin_admission_scan();
     const auto first = scheduler.fresh_candidates(fresh, 2);
@@ -221,7 +223,7 @@ void admit(Scheduler& scheduler, const RequestPtr& value) {
 }
 
 void test_pressure_handoff_and_fair_service() {
-    Scheduler scheduler;
+    Scheduler scheduler(kSlots);
     Slots slots{};
     auto a = slots[0] = request(10, Request::Phase::Decode);
     auto b = slots[1] = request(20, Request::Phase::Decode);
@@ -273,7 +275,7 @@ void test_pressure_handoff_and_fair_service() {
 }
 
 void test_recovery_cost_has_a_bounded_service_allowance() {
-    Scheduler scheduler;
+    Scheduler scheduler(kSlots);
     auto a = request(1), b = request(2);
     admit(scheduler, a);
     admit(scheduler, b);
@@ -290,7 +292,7 @@ void test_recovery_cost_has_a_bounded_service_allowance() {
 }
 
 void test_bounded_service_under_continuous_contention() {
-    Scheduler scheduler;
+    Scheduler scheduler(kSlots);
     std::array<RequestPtr, 4> requests{request(1), request(2), request(3), request(4)};
     for (const auto& value : requests) admit(scheduler, value);
     scheduler.require_progress(1);
@@ -307,10 +309,8 @@ void test_bounded_service_under_continuous_contention() {
             "continuous contention starved a request");
 }
 
-ninfer::runtime::PrefillUnitTokens units_of(std::uint32_t tokens) {
-    ninfer::runtime::PrefillUnitTokens units{};
-    units.fill(tokens);
-    return units;
+ninfer::runtime::PrefillUnitTokens units_of(std::uint32_t tokens, std::uint32_t lanes) {
+    return ninfer::runtime::PrefillUnitTokens(lanes, tokens);
 }
 
 using ninfer::runtime::PrefillPacing;
@@ -322,13 +322,13 @@ PrefillPacing throughput(std::uint32_t tokens, std::uint32_t units) {
 }
 
 void test_prefill_replay_round_robin() {
-    Scheduler scheduler;
+    Scheduler scheduler(kSlots);
     Slots slots{};
     slots[0]         = request(1, Request::Phase::Decode);
     slots[1]         = request(2, Request::Phase::Prefill);
     slots[2]         = request(3, Request::Phase::Replay);
     slots[3]         = request(4, Request::Phase::Prefill);
-    const auto units = units_of(16);
+    const auto units = units_of(16, kSlots);
     for (const std::uint32_t expected : {1U, 2U, 3U, 1U}) {
         const auto lane = scheduler.next_prefill(slots, 4, units);
         require(lane == expected, "prefill and replay did not receive rotating execution units");
@@ -347,7 +347,7 @@ void test_prefill_replay_round_robin() {
 }
 
 void test_prefill_cycle_budget() {
-    Scheduler scheduler;
+    Scheduler scheduler(kSlots);
     scheduler.configure_prefill(throughput(100, 3));
     require(scheduler.prefill_pacing().throughput_units_per_cycle == 3 &&
                 scheduler.prefill_regime() == PrefillRegime::Throughput &&
@@ -361,7 +361,7 @@ void test_prefill_cycle_budget() {
     slots[3] = request(3, Request::Phase::Prefill);
 
     // The first unit is admitted even when it alone exceeds the token allowance.
-    auto units = units_of(0);
+    auto units = units_of(0, kSlots);
     units[1]   = 150;
     units[2]   = 30;
     units[3]   = 30;
@@ -391,7 +391,7 @@ void test_prefill_cycle_budget() {
 
     // The unit-count limit applies even when tokens remain.
     scheduler.begin_prefill_cycle(false);
-    units = units_of(1);
+    units = units_of(1, kSlots);
     for (unsigned n = 0; n < 3; ++n) {
         const auto lane = scheduler.next_prefill(slots, 4, units);
         require(lane.has_value(), "unit within the count limit was refused");
@@ -426,7 +426,7 @@ void run_cycles(Scheduler& scheduler, CycleRun run, bool (*waiting)(std::uint32_
         std::uint32_t tokens = 0;
         std::uint64_t ns     = 0;
         for (;;) {
-            auto limits = units_of(0);
+            auto limits = units_of(0, kSlots);
             for (std::uint32_t lane = 0; lane < run.lanes; ++lane)
                 if (slots[lane]) limits[lane] = std::min(run.chunk, run.left[lane]);
             const auto caps = scheduler.prefill_unit_caps(limits);
@@ -469,7 +469,7 @@ void run_cycles(Scheduler& scheduler, CycleRun run, bool (*waiting)(std::uint32_
 
 void test_no_lane_starves_across_regimes() {
     for (std::uint32_t lanes = 2; lanes <= 6; ++lanes) {
-        Scheduler scheduler;
+        Scheduler scheduler(kSlots);
         scheduler.configure_prefill({.throughput_tokens_per_cycle = 256,
                                      .throughput_units_per_cycle  = 4,
                                      .interleave_ns               = 3'000'000,
@@ -492,7 +492,7 @@ void test_no_lane_starves_across_regimes() {
 
 
 void test_decode_and_control_membership() {
-    Scheduler scheduler;
+    Scheduler scheduler(kSlots);
     Slots slots{};
     slots[0]                      = request(1, Request::Phase::Decode);
     slots[0]->budget->tokens      = 11;
@@ -519,6 +519,37 @@ void test_decode_and_control_membership() {
             "compact control membership changed committed control spans or request order");
 }
 
+// Lane tables are sized by the configured concurrency, not by any fixed upper bound: a
+// scheduler with more than 16 lanes admits, caps and charges lanes beyond the old ceiling
+// exactly like the lanes below it.
+void test_lane_tables_follow_the_configured_capacity() {
+    constexpr std::uint32_t lanes = 20;
+    Scheduler scheduler(lanes);
+    scheduler.configure_prefill(throughput(64, 8));
+    std::vector<RequestPtr> slots(lanes);
+    for (std::uint32_t lane = 16; lane < lanes; ++lane)
+        slots[lane] = request(lane, Request::Phase::Prefill);
+
+    auto limits = units_of(0, lanes);
+    for (std::uint32_t lane = 16; lane < lanes; ++lane) limits[lane] = 16;
+    const auto caps = scheduler.prefill_unit_caps(limits);
+    require(caps.size() == lanes, "caps table did not follow the configured capacity");
+    require(scheduler.next_prefill(slots, lanes, caps) == 16,
+            "a lane beyond the old ceiling was not schedulable");
+    require(caps[16] == 16, "a lane beyond the old ceiling received no unit cap");
+    scheduler.prefill_executed(16, lanes, 16, 1000);
+    require(scheduler.prefill_cost_ns_per_token(16).value_or(0) != 0,
+            "the cost estimate of a lane beyond the old ceiling was dropped");
+    require(scheduler.next_prefill(slots, lanes, caps) == 17,
+            "round robin did not continue past the old ceiling");
+
+    slots[19] = request(100, Request::Phase::Decode);
+    const auto round = scheduler.build_round_membership(slots, lanes);
+    require(round.size == 1 && round.lanes[0] == 19 &&
+                round.budgets[0].generated_tokens_remaining == 8,
+            "decode membership lost a lane beyond the old ceiling");
+}
+
 } // namespace
 
 int main() {
@@ -533,6 +564,7 @@ int main() {
         test_prefill_cycle_budget();
         test_no_lane_starves_across_regimes();
         test_decode_and_control_membership();
+        test_lane_tables_follow_the_configured_capacity();
         std::cout << "ok\n";
         return 0;
     } catch (const std::exception& error) {

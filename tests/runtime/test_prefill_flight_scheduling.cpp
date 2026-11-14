@@ -49,7 +49,9 @@ struct Request {
 
 using Scheduler  = ninfer::runtime::Scheduler<Request>;
 using RequestPtr = std::shared_ptr<Request>;
-using Slots      = std::array<RequestPtr, ninfer::kMaximumConcurrency>;
+// Lane slot tables are runtime-sized; tests carry their own capacity.
+constexpr std::uint32_t kSlots = 6;
+using Slots                     = std::array<RequestPtr, kSlots>;
 
 void require(bool condition, const char* message) {
     if (!condition) throw std::runtime_error(message);
@@ -76,7 +78,7 @@ std::uint32_t run_cycle_as_flights(Scheduler& scheduler, Slots& slots, std::uint
     scheduler.begin_prefill_cycle(false);
     std::uint32_t executed = 0;
     for (;;) {
-        ninfer::runtime::PrefillUnitTokens limits{};
+        ninfer::runtime::PrefillUnitTokens limits(kSlots, 0);
         for (std::uint32_t lane = 0; lane < lanes; ++lane)
             if (slots[lane]) limits[lane] = std::min(chunk, left[lane]);
         const auto caps   = scheduler.prefill_unit_caps(limits);
@@ -106,7 +108,7 @@ void test_flights_do_not_starve_and_gap_is_bounded() {
     constexpr std::uint32_t chunk = 128;
     for (std::uint32_t lanes = 2; lanes <= 6; ++lanes) {
         for (const std::uint32_t budget : {32U, 100U, 128U, 256U, 512U}) {
-            Scheduler scheduler;
+            Scheduler scheduler(kSlots);
             scheduler.configure_prefill(PrefillPacing{.throughput_tokens_per_cycle = budget});
             Slots slots{};
             std::array<std::uint32_t, 6> left{900, 128, 40, 513, 300, 1024};
@@ -135,13 +137,13 @@ void test_flights_do_not_starve_and_gap_is_bounded() {
 
 // Concurrent lanes advance together in a cycle when the budget allows it.
 void test_budget_lets_several_lanes_advance_per_cycle() {
-    Scheduler scheduler;
+    constexpr std::uint32_t four = 4;
+    Scheduler scheduler(four);
     scheduler.configure_prefill(PrefillPacing{.throughput_tokens_per_cycle = 512});
     Slots slots{};
     for (std::uint32_t lane = 0; lane < 4; ++lane)
         slots[lane] = request(lane + 1, Request::Phase::Prefill);
-    ninfer::runtime::PrefillUnitTokens limits{};
-    limits.fill(128);
+    ninfer::runtime::PrefillUnitTokens limits(four, 128);
     const auto caps   = scheduler.prefill_unit_caps(limits);
     const auto flight = scheduler.prefill_candidates(slots, 4, caps);
     require(flight.size == 4, "ample budget still limited the cycle to fewer lanes");

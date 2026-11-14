@@ -18,12 +18,12 @@ void EngineCore<Instance>::commit_pending(PendingBatch&& pending, ComputeFlight 
         throw std::logic_error("pending batch returned an invalid ragged layout");
     }
 
-    std::array<CommitDecision, kMaximumConcurrency> decisions{};
-    std::array<FinishReason, kMaximumConcurrency> finish_reasons{};
-    std::array<ContinuationAction, kMaximumConcurrency> continuations{};
-    std::array<std::size_t, kMaximumConcurrency> generated_sizes{};
-    std::array<bool, kMaximumConcurrency> cancelled{};
-    std::array<bool, kMaximumConcurrency> failed{};
+    std::vector<CommitDecision> decisions(row_count);
+    std::vector<FinishReason> finish_reasons(row_count);
+    std::vector<ContinuationAction> continuations(row_count);
+    std::vector<std::size_t> generated_sizes(row_count, 0);
+    std::vector<bool> cancelled(row_count, false);
+    std::vector<bool> failed(row_count, false);
     bool generated_staged         = false;
     const auto rollback_generated = [&]() {
         for (std::size_t row = 0; row < row_count; ++row) {
@@ -345,6 +345,7 @@ EngineCore<Instance>::freeze_members(std::span<const std::uint32_t> lanes, UnitK
     flight.residencies.reserve(lanes.size());
     flight.lanes.assign(lanes.begin(), lanes.end());
     flight.cancelled.reserve(lanes.size());
+    flight.progressed.assign(lanes.size(), false);
     for (const auto lane : lanes) {
         const auto& request = slots_.at(lane);
         if (!request || !request->sequence || !request->residency || !request->lane ||
@@ -369,7 +370,8 @@ template <class Instance>
         throw std::logic_error("a replaying lane cannot share an execution");
     }
     auto flight = freeze_members(lanes, replay ? UnitKind::Replay : UnitKind::Prefill);
-    std::array<bool, kMaximumConcurrency> constrained{};
+    // The Session reads a contiguous constrained flag per segment.
+    auto constrained = std::make_unique<bool[]>(flight.requests.size());
     for (std::size_t row = 0; row < flight.requests.size(); ++row) {
         constrained[row] = flight.requests[row]->output.constrained();
     }
@@ -380,7 +382,7 @@ template <class Instance>
     if (replay) {
         ticket = instance_.session->start_replay(flight.sequences.front());
     } else if (const auto started = instance_.session->start_prefill(
-                   flight.sequences, {constrained.data(), flight.requests.size()})) {
+                   flight.sequences, {constrained.get(), flight.requests.size()})) {
         ticket   = started->ticket;
         segments = started->segments;
     }
@@ -395,6 +397,7 @@ template <class Instance>
     flight.residencies.resize(segments);
     flight.lanes.resize(segments);
     flight.cancelled.resize(segments);
+    flight.progressed.resize(segments);
     flight.ticket = *ticket;
     compute_.emplace(std::move(flight));
     for (const auto lane : lanes) reserved_units_[lane].reset();
@@ -404,13 +407,14 @@ template <class Instance>
 template <class Instance>
 [[nodiscard]] bool EngineCore<Instance>::start_decode(const RoundMembership& membership) {
     auto flight = freeze_members(membership.lane_span(), UnitKind::Decode);
-    std::array<bool, kMaximumConcurrency> constrained{};
+    // The Session reads a contiguous constrained flag per row.
+    auto constrained = std::make_unique<bool[]>(flight.requests.size());
     for (std::size_t row = 0; row < flight.requests.size(); ++row) {
         constrained[row] = flight.requests[row]->output.constrained();
     }
     ExecutionCallScope call(*this);
     const auto ticket = instance_.session->start_decode(
-        flight.sequences, membership.budget_span(), {constrained.data(), flight.requests.size()});
+        flight.sequences, membership.budget_span(), {constrained.get(), flight.requests.size()});
     call.finish();
     if (!ticket) return false;
     flight.ticket = *ticket;
@@ -443,7 +447,7 @@ template <class Instance>
     for (const auto& request : flight.requests) {
         flight.generated_sizes.push_back(request->generated.size());
     }
-    std::array<std::optional<std::uint32_t>, kMaximumConcurrency> splits{};
+    std::vector<std::optional<std::uint32_t>> splits(flight.requests.size());
     try {
         EnginePhaseScope phase(*this, EngineHostPhase::CommitOutput);
         for (std::size_t row = 0; row < flight.requests.size(); ++row) {
@@ -519,7 +523,7 @@ void EngineCore<Instance>::supply_decision(ExecutionTicket ticket,
     DecisionInput input;
     input.stage = decision.stage;
     input.rows.reserve(decision.rows.size());
-    std::array<bool, kMaximumConcurrency> seen{};
+    std::vector<bool> seen(compute_->requests.size(), false);
     const std::size_t words_per_position = (std::size_t(decision.vocabulary) + 31) / 32;
     for (const auto& row : decision.rows) {
         if (row.member >= compute_->requests.size() || seen[row.member]) {
@@ -730,7 +734,7 @@ void EngineCore<Instance>::fail_all(std::exception_ptr error) noexcept {
         pending.swap(pending_);
         measurement = std::move(measurement_);
     }
-    scheduler_ = Scheduling{};
+    scheduler_ = Scheduling{max_concurrency_};
     const std::shared_ptr<Request> materializing_request =
         materializing_ ? materializing_->request : nullptr;
     // Native retires all transfer readers before any external checkpoint owner is destroyed.

@@ -25,7 +25,7 @@ std::uint64_t EngineCore<Instance>::elapsed_ns(Clock::time_point started,
 
 template <class Instance>
 typename EngineCore<Instance>::ActiveExposureSet EngineCore<Instance>::active_exposure_set() const {
-    ActiveExposureSet result;
+    ActiveExposureSet result(max_concurrency_);
     for (std::uint32_t lane = 0; lane < max_concurrency_; ++lane) {
         if (slots_[lane] == nullptr) { continue; }
         result.entries[result.size++] = ActiveExposure{.request = slots_[lane], .lane = lane};
@@ -329,8 +329,12 @@ void EngineCore<Instance>::publish_runtime_stats() {
     published_snapshot_.stamp   = {published_snapshot_.stamp.sequence + 1, observation_time_ns()};
     published_snapshot_.runtime = snapshot;
     published_snapshot_.executions = instance_.executor->execution_statistics();
-    const auto batches = instance_.executor->decode_statistics().first(max_concurrency_);
+    const auto decode_counters     = instance_.executor->decode_statistics();
+    const auto batches             = decode_counters.first(
+        std::min<std::size_t>(decode_counters.size(), max_concurrency_));
     published_snapshot_.decode_by_batch.assign(batches.begin(), batches.end());
+    // Batch rows beyond what the executor observed stay zero counters.
+    published_snapshot_.decode_by_batch.resize(max_concurrency_);
     published_snapshot_.in_flight = execution_observations_;
     published_snapshot_.status    = status;
     published_snapshot_.progress_owner = scheduler_.progress_owner();

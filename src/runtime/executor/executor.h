@@ -44,11 +44,22 @@ public:
     [[nodiscard]] std::span<const ExecutionCounters> decode_statistics() const noexcept {
         return decode_statistics_;
     }
+
+    // Sizes the per-batch-row decode histogram for the resolved engine concurrency. The Engine
+    // calls this once at construction, before any execution starts; executions observed without
+    // a configuration grow the table to their own row count.
+    void configure_decode_statistics(std::uint32_t lanes) {
+        decode_statistics_.resize(lanes);
+    }
+
 protected:
     void observe_execution(const ExecutionSample& sample) {
         accumulate(execution_statistics_, sample);
-        if (sample.work.kind == ExecutionKind::Decode)
-            decode_statistics_.at(sample.work.rows - 1).observe(sample);
+        if (sample.work.kind == ExecutionKind::Decode) {
+            const std::size_t rows = sample.work.rows;
+            if (decode_statistics_.size() < rows) { decode_statistics_.resize(rows); }
+            decode_statistics_.at(rows - 1).observe(sample);
+        }
     }
 
     void observe_retirement(std::uint32_t rank, const RankExecutionObservation& value,
@@ -77,7 +88,7 @@ protected:
     std::vector<RankSnapshot> observations_;
     std::vector<RankDescriptor> rank_descriptions_;
     ExecutionStatistics execution_statistics_{};
-    std::array<ExecutionCounters, kMaximumConcurrency> decode_statistics_{};
+    std::vector<ExecutionCounters> decode_statistics_{};
 };
 
 } // namespace ninfer::runtime

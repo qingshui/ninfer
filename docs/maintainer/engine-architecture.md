@@ -82,6 +82,12 @@ lane 的复用不改变旧 ticket 的成员身份。暂停保存请求的输出�
 Control、紧凑 Decode 和分块 Prefill/Replay 共享这套生命周期。Prefill 内部的媒体和数学分段
 由模型推进，不自动形成新的调度轮次。缓存与抢占规则见[Context 管理](context-management.md)。
 
+执行层所有按 lane 下标的槽位表（请求驻留、捕获决策、执行许可、取消快照、解码成员、
+prefill 单元上界、逐 batch 解码观测）都在引擎构造期按解析后的并发容量分配；共享上限
+`kMaximumConcurrency` 只作校验，不再作为任何表尺寸。各 lane 的调度语义（游标轮转、
+准入、公平性、prefill pacing）只依赖下标，与容量数值无关，因此 1 与上限之间的任意
+lane 数行为一致。
+
 Session 组合 Context 预留与 Executor 额度后，才进入不可撤销的目录准备。许可包含后续决定、
 提交或丢弃所需的资源；不能计算完再竞争用于提交的空间。尚未提交的独立预留可以撤销；
 已经接受的 COW、映射和传输必须履行到完成边界。

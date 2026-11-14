@@ -519,9 +519,9 @@ EngineCore<Instance>::lane_terminal_blocked(const Request& request) const noexce
 }
 
 template <class Instance>
-[[nodiscard]] std::array<bool, kMaximumConcurrency>
+[[nodiscard]] std::vector<bool>
 EngineCore<Instance>::snapshot_cancellations() const noexcept {
-    std::array<bool, kMaximumConcurrency> cancelled{};
+    std::vector<bool> cancelled(max_concurrency_, false);
     for (std::uint32_t lane = 0; lane < max_concurrency_; ++lane) {
         if (slots_[lane] != nullptr) {
             cancelled[lane] = slots_[lane]->cancelled.load(std::memory_order_acquire);
@@ -605,8 +605,7 @@ bool EngineCore<Instance>::settle_terminal_requests(HostPhaseMeasurement& bounda
 
 template <class Instance>
 void EngineCore<Instance>::cancel_active_requests(
-    const std::array<bool, kMaximumConcurrency>& cancelled_at_boundary,
-    HostPhaseMeasurement& boundary) {
+    const std::vector<bool>& cancelled_at_boundary, HostPhaseMeasurement& boundary) {
     const SettlementPass pass(*this);
     for (std::uint32_t lane = 0; lane < max_concurrency_; ++lane) {
         const auto request = slots_[lane];

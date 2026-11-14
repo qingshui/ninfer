@@ -858,7 +858,7 @@ typename EngineCore<Instance>::LaneSlots EngineCore<Instance>::prefill_slots() c
 
 template <class Instance>
 PrefillUnitTokens EngineCore<Instance>::prefill_unit_limits(const LaneSlots& slots) const {
-    PrefillUnitTokens limits{};
+    PrefillUnitTokens limits(max_concurrency_, 0);
     for (std::uint32_t lane = 0; lane < max_concurrency_; ++lane) {
         const auto& request = slots[lane];
         if (!request || !(request->is_prefilling() || request->is_replaying())) continue;
@@ -886,7 +886,7 @@ PrefillUnitTokens EngineCore<Instance>::prefill_unit_caps(const LaneSlots& slots
     // An exclusive lane runs alone, so the lanes ahead of it in cursor order do not spend its cap.
     if (const auto exclusive = exclusive_prefill_lane(slots);
         exclusive && limits[*exclusive] != 0) {
-        PrefillUnitTokens alone{};
+        PrefillUnitTokens alone(max_concurrency_, 0);
         alone[*exclusive] = limits[*exclusive];
         caps[*exclusive]  = scheduler_.prefill_unit_caps(alone)[*exclusive];
     }
@@ -935,7 +935,7 @@ EngineCore<Instance>::next_prefill(const LaneSlots& candidates,
                                    const PrefillUnitTokens& caps) const {
     // A continuing sequence keeps the lane, but its units still spend the cycle allowance.
     if (const auto lane = continuation_prefill_lane(candidates)) {
-        LaneSlots only{};
+        LaneSlots only(candidates.size());
         only[*lane] = candidates[*lane];
         return scheduler_.next_prefill(only, max_concurrency_, caps);
     }
@@ -968,7 +968,7 @@ EngineCore<Instance>::next_prefill_lanes(const LaneSlots& candidates,
 
 template <class Instance>
 void EngineCore<Instance>::reserve_resident_units(ReservationScope scope) {
-    reserved_units_.fill(std::nullopt);
+    std::fill(reserved_units_.begin(), reserved_units_.end(), std::nullopt);
     const auto owner = scheduler_.progress_owner();
     std::optional<std::uint32_t> priority;
     for (std::uint32_t lane = 0; lane < max_concurrency_; ++lane) {
@@ -994,7 +994,7 @@ void EngineCore<Instance>::reserve_resident_units(ReservationScope scope) {
     const auto prefill  = priority_prefill ? priority_prefill : next_prefill(eligible, caps);
     // Prefilling lanes that may share the first prefill lane's execution: the lanes the cycle
     // allowance admits behind it. An exclusive lane and a replaying lane run alone.
-    std::array<bool, kMaximumConcurrency> joinable{};
+    std::vector<bool> joinable(max_concurrency_, false);
     std::optional<std::uint32_t> pack_head;
     const auto pack_limit = prefill_pack_limit();
     if (prefill && pack_limit > 1 && slots_[*prefill]->is_prefilling() &&
@@ -1116,7 +1116,7 @@ template <class Instance>
 
 template <class Instance>
 void EngineCore<Instance>::begin_cycle(HostPhaseMeasurement& boundary) {
-    control_executed_.fill(false);
+    std::fill(control_executed_.begin(), control_executed_.end(), false);
     // Tails recorded while a context operation was in flight run before anything else in this
     // cycle, and in particular before admission can select a source.
     flush_deferred_settlements();
@@ -1224,7 +1224,7 @@ template <class Instance>
         switch (cycle_step_) {
         case CycleStep::Control: {
             auto all = scheduler_.build_control_membership(slots_, max_concurrency_);
-            ControlMembership selected;
+            ControlMembership selected(max_concurrency_);
             selected.row_stride = all.row_stride;
             for (std::size_t row = 0; row < all.size; ++row) {
                 if (!unit_runnable(all.lanes[row])) continue;
@@ -1243,7 +1243,7 @@ template <class Instance>
         }
         case CycleStep::Decode: {
             const auto all = scheduler_.build_round_membership(slots_, max_concurrency_);
-            RoundMembership selected;
+            RoundMembership selected(max_concurrency_);
             for (std::size_t row = 0; row < all.size; ++row) {
                 if (!unit_runnable(all.lanes[row]) || control_executed_[all.lanes[row]]) continue;
                 selected.lanes[selected.size]     = all.lanes[row];
@@ -1266,7 +1266,7 @@ template <class Instance>
             }
             reserve_resident_units(ReservationScope::Prefill);
             auto eligible = slots_;
-            PrefillUnitTokens caps{};
+            PrefillUnitTokens caps(max_concurrency_, 0);
             for (std::uint32_t lane = 0; lane < max_concurrency_; ++lane) {
                 if (!unit_runnable(lane)) {
                     eligible[lane].reset();

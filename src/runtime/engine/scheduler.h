@@ -4,7 +4,6 @@
 #include "runtime/contract/execution.h"
 
 #include <algorithm>
-#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -55,12 +54,19 @@ struct PrefillPacing {
 // (`limits`) it is the most a lane could process: the Engine fills it from its prefill chunk and
 // the lane's remaining suffix, and 0 marks a lane that takes no part. As an output
 // (`prefill_unit_caps`) it is the upper bound the unit may process; 0 means the allowance
-// admits no unit for that lane in this cycle.
-using PrefillUnitTokens = std::array<std::uint32_t, kMaximumConcurrency>;
+// admits no unit for that lane in this cycle. The table is runtime-sized: one entry per lane
+// of the configured concurrency.
+using PrefillUnitTokens = std::vector<std::uint32_t>;
 
+// Membership tables are allocated for the lane capacity of the pass that builds them; entries
+// beyond `size` are unused capacity.
 struct PrefillMembership {
-    std::array<std::uint32_t, kMaximumConcurrency> lanes{};
+    std::vector<std::uint32_t> lanes;
     std::size_t size = 0;
+
+    PrefillMembership() = default;
+
+    explicit PrefillMembership(std::uint32_t capacity) : lanes(capacity, 0) {}
 
     [[nodiscard]] bool empty() const noexcept { return size == 0; }
 
@@ -80,11 +86,22 @@ public:
     using PrefillUnitTokens = ::ninfer::runtime::PrefillUnitTokens;
     using PrefillMembership = ::ninfer::runtime::PrefillMembership;
 
+    // `lanes` is the resolved engine concurrency; every lane-indexed table of the Scheduler
+    // is allocated for it.
+    explicit Scheduler(std::uint32_t lanes) : lanes_(lanes), prefill_cost_ns_(lanes, 0) {}
+
+    [[nodiscard]] std::uint32_t lanes() const noexcept { return lanes_; }
+
     struct RoundMembership {
-        std::array<std::uint32_t, kMaximumConcurrency> lanes{};
-        std::array<SequenceHandle, kMaximumConcurrency> sequences{};
-        std::array<RoundBudget, kMaximumConcurrency> budgets{};
+        std::vector<std::uint32_t> lanes;
+        std::vector<SequenceHandle> sequences;
+        std::vector<RoundBudget> budgets;
         std::size_t size = 0;
+
+        RoundMembership() = default;
+
+        explicit RoundMembership(std::uint32_t capacity)
+            : lanes(capacity, 0), sequences(capacity), budgets(capacity) {}
 
         [[nodiscard]] bool empty() const noexcept { return size == 0; }
 
@@ -102,11 +119,16 @@ public:
     };
 
     struct ControlMembership {
-        std::array<std::uint32_t, kMaximumConcurrency> lanes{};
-        std::array<SequenceHandle, kMaximumConcurrency> sequences{};
+        std::vector<std::uint32_t> lanes;
+        std::vector<SequenceHandle> sequences;
         std::vector<TokenId> tokens;
         std::uint32_t row_stride = 0;
         std::size_t size         = 0;
+
+        ControlMembership() = default;
+
+        explicit ControlMembership(std::uint32_t capacity)
+            : lanes(capacity, 0), sequences(capacity) {}
 
         [[nodiscard]] bool empty() const noexcept { return size == 0; }
 
@@ -122,7 +144,7 @@ public:
     template <class Slots>
     [[nodiscard]] RoundMembership build_round_membership(const Slots& slots,
                                                          std::uint32_t max_concurrency) const {
-        RoundMembership membership;
+        RoundMembership membership(max_concurrency);
         for (std::uint32_t lane = 0; lane < max_concurrency; ++lane) {
             const auto& request = slots[lane];
             if (request == nullptr || !request->is_decode_ready() || request->capture_pending) {
@@ -153,7 +175,7 @@ public:
     template <class Slots>
     [[nodiscard]] ControlMembership build_control_membership(const Slots& slots,
                                                              std::uint32_t max_concurrency) const {
-        ControlMembership membership;
+        ControlMembership membership(max_concurrency);
         for (std::uint32_t lane = 0; lane < max_concurrency; ++lane) {
             const auto& request = slots[lane];
             if (request == nullptr || !request->is_control_ready() || request->capture_pending) {
@@ -286,7 +308,7 @@ public:
     // The ns/token estimate of a lane; nullopt until a unit of the lane has been reported.
     [[nodiscard]] std::optional<std::uint64_t>
     prefill_cost_ns_per_token(std::uint32_t lane) const noexcept {
-        if (lane >= kMaximumConcurrency || prefill_cost_ns_[lane] == 0) return std::nullopt;
+        if (lane >= prefill_cost_ns_.size() || prefill_cost_ns_[lane] == 0) return std::nullopt;
         return prefill_cost_ns_[lane];
     }
 
@@ -295,15 +317,15 @@ public:
     // reaches gets 0, and so does every lane behind it.
     [[nodiscard]] PrefillUnitTokens
     prefill_unit_caps(const PrefillUnitTokens& limits) const noexcept {
-        PrefillUnitTokens caps{};
+        PrefillUnitTokens caps(lanes_, 0);
         const bool interleave     = prefill_regime_ == PrefillRegime::Interleave;
         const std::uint64_t grain = prefill_pacing_.unit_granularity;
         std::uint64_t tokens_left = prefill_tokens_left_;
         std::uint64_t ns_left     = prefill_ns_left_;
         std::uint64_t units_left  = prefill_units_remaining();
         bool first                = prefill_units_started_ == 0;
-        for (std::uint32_t offset = 0; offset < kMaximumConcurrency; ++offset) {
-            const std::uint32_t lane = (prefill_cursor_ + offset) % kMaximumConcurrency;
+        for (std::uint32_t offset = 0; offset < lanes_; ++offset) {
+            const std::uint32_t lane = (prefill_cursor_ + offset) % lanes_;
             if (limits[lane] == 0) continue;
             if (units_left == 0 || tokens_left == 0 || (!first && interleave && ns_left == 0))
                 break;
@@ -349,7 +371,7 @@ public:
     [[nodiscard]] PrefillMembership
     prefill_candidates(const Slots& slots, std::uint32_t concurrency,
                        const PrefillUnitTokens& caps) const noexcept {
-        PrefillMembership membership;
+        PrefillMembership membership(concurrency);
         std::uint64_t charged_tokens = 0;
         std::uint64_t charged_ns     = 0;
         for (std::uint32_t offset = 0; offset < concurrency; ++offset) {
@@ -378,7 +400,7 @@ public:
                                    ? std::numeric_limits<std::uint64_t>::max()
                                    : prefill_debt_ns_ + elapsed_ns;
         }
-        if (lane < kMaximumConcurrency && tokens != 0 && elapsed_ns != 0) {
+        if (lane < prefill_cost_ns_.size() && tokens != 0 && elapsed_ns != 0) {
             const std::uint64_t sample =
                 std::max<std::uint64_t>(1, (elapsed_ns + tokens / 2) / tokens);
             auto& cost = prefill_cost_ns_[lane];
@@ -388,7 +410,7 @@ public:
 
     // The lane no longer belongs to the request whose units produced its estimate.
     void prefill_lane_released(std::uint32_t lane) noexcept {
-        if (lane < kMaximumConcurrency) prefill_cost_ns_[lane] = 0;
+        if (lane < prefill_cost_ns_.size()) prefill_cost_ns_[lane] = 0;
     }
 
     // Queue/capacity changes start a bounded pass. Ordinary decode cycles only continue
@@ -549,6 +571,8 @@ public:
     static constexpr std::uint64_t maximum_service_ns = 4 * service_quantum_ns;
 
 private:
+    // The configured lane capacity; fixed after construction except for the failure reset.
+    std::uint32_t lanes_;
     PrefillPacing prefill_pacing_;
     PrefillRegime prefill_regime_ = PrefillRegime::Throughput;
     std::uint32_t prefill_cursor_ = 0;
@@ -558,8 +582,8 @@ private:
     std::uint64_t prefill_ns_left_       = std::numeric_limits<std::uint64_t>::max();
     // Prefill time run since the last cycle without a waiting lane, less what was repaid.
     std::uint64_t prefill_debt_ns_ = 0;
-    // ns/token estimate per lane; 0 = none.
-    std::array<std::uint64_t, kMaximumConcurrency> prefill_cost_ns_{};
+    // ns/token estimate per lane; 0 = none. Allocated for the configured lanes.
+    std::vector<std::uint64_t> prefill_cost_ns_;
 
     template <class Slot>
     [[nodiscard]] static bool prefill_eligible(const Slot& request) noexcept {

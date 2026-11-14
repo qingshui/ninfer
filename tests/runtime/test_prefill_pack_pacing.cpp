@@ -30,7 +30,9 @@ struct Request {
 };
 
 using Scheduler = ninfer::runtime::Scheduler<Request>;
-using Slots     = std::array<std::shared_ptr<Request>, ninfer::kMaximumConcurrency>;
+// Lane slot tables are runtime-sized; tests carry their own capacity.
+constexpr std::uint32_t kSlots = 3;
+using Slots     = std::array<std::shared_ptr<Request>, kSlots>;
 using ninfer::runtime::PrefillPacing;
 using ninfer::runtime::PrefillRegime;
 using ninfer::runtime::PrefillUnitTokens;
@@ -65,14 +67,14 @@ PrefillPacing pacing() {
 
 // Segments never sum past the pack capacity; capacity exhaustion drops trailing lanes.
 void test_throughput_membership_fits_pack() {
-    Scheduler scheduler;
+    Scheduler scheduler(kSlots);
     scheduler.configure_prefill(pacing());
     scheduler.begin_prefill_cycle(false);
     require(scheduler.prefill_regime() == PrefillRegime::Throughput, "regime");
     require(scheduler.prefill_tokens_remaining() == kPack, "throughput token allowance");
 
     const auto slots = prefilling_lanes(3);
-    PrefillUnitTokens limits{};
+    PrefillUnitTokens limits(kSlots, 0);
     limits[0] = limits[1] = limits[2] = kChunk;
     const auto caps                   = scheduler.prefill_unit_caps(limits);
     const auto members                = scheduler.prefill_candidates(slots, 3, caps);
@@ -91,14 +93,14 @@ void test_throughput_membership_fits_pack() {
 
 // Executed units are charged to the cycle allowance; a drained allowance admits nothing more.
 void test_charging_and_regimes() {
-    Scheduler scheduler;
+    Scheduler scheduler(kSlots);
     scheduler.configure_prefill(pacing());
     scheduler.begin_prefill_cycle(false);
     scheduler.prefill_executed(0, 3, kChunk, 1'000'000);
     require(scheduler.prefill_tokens_remaining() == kPack - kChunk, "tokens not charged");
     scheduler.prefill_executed(1, 3, kChunk, 1'000'000);
     require(scheduler.prefill_tokens_remaining() == 0, "tokens not drained");
-    PrefillUnitTokens limits{};
+    PrefillUnitTokens limits(kSlots, 0);
     limits[2]       = kChunk;
     const auto caps = scheduler.prefill_unit_caps(limits);
     require(caps[2] == 0, "drained allowance still admits a unit");
