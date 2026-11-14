@@ -96,5 +96,10 @@ void launch_split(const Tensor& x, Weights weights, std::span<const Tensor> outp
 }
 } // namespace
 
+void bf16_split_n20480_k3072_dispatch(const Tensor& x, const Weight& weight,
+                                      std::span<const Tensor> outputs, cudaStream_t stream) {
+    launch_split(x, Weights{weight}, outputs, nullptr, stream);
+}
+
 const SplitShape kBf16SplitN20480K3072{20480, 3072, kSplitRows<12288, 8192>, launch_split};
 } // namespace ninfer::ops::detail::linear_split

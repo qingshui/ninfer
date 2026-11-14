@@ -34,9 +34,12 @@ ninfer::PromptInput to_prompt_input(const GenerationRequest& req,
 // sampler is resolved from the request's SamplingParams over the server defaults;
 // Explicit request fields override startup defaults, including temperature. Prefix-reuse
 // participation is resolved by GenerationService and supplied explicitly because
-// operational requests do not inherit the external-traffic policy.
+// operational requests do not inherit the external-traffic policy. publish_continuation
+// separately controls whether the request's final context is retained as a source later
+// requests may adopt; a request may adopt a source without publishing its own result.
 ninfer::RequestOptions to_request_options(const GenerationRequest& req,
                                           const product::ServeOptions& server,
-                                          bool allow_prefix_reuse);
+                                          bool allow_prefix_reuse,
+                                          bool publish_prefix_continuation = true);
 
 } // namespace ninfer::serve

@@ -22,12 +22,17 @@ std::string sse_error_event(const ApiError& error) {
 }
 
 // One Chat Completions request fans out to one prepared request per requested sample. This owner
-// keeps every prepared sample and its transport flags alive across the chunked-content provider.
+// keeps the prepared samples and their transport flags alive across the chunked-content provider.
+// The first sample is prepared before the response starts; later samples are prepared while the
+// response streams, each only after the previous sample's generation completed, so every sample
+// adopts the previous sample's published prompt source instead of the Engine prefilling the same
+// prompt again. `generation` keeps the request that renders that shared prompt.
 struct ChatGenerationStream {
-    explicit ChatGenerationStream(std::vector<PreparedRequest> requests)
-        : prepared(std::move(requests)) {}
+    ChatGenerationStream(std::vector<PreparedRequest> requests, GenerationRequest generation)
+        : prepared(std::move(requests)), generation(std::move(generation)) {}
 
     std::vector<PreparedRequest> prepared;
+    GenerationRequest generation;
     std::atomic<bool> cancelled{false};
     std::atomic<bool> started{false};
 };
@@ -65,18 +70,23 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
                                 .output_tokens_explicit = request.output_tokens_explicit};
     observations_.preparing(req_id, "openai_chat_completions", metadata);
     std::vector<PreparedRequest> prepared;
+    ninfer::GenerationObservationOptions observation;
     try {
-        ninfer::GenerationObservationOptions observation{
+        observation = ninfer::GenerationObservationOptions{
             .constraint_timings = true,
             .live_timings       = request.stream && request.timings_per_token,
             .prompt_progress    = request.stream && request.return_progress,
             .scheduling         = scheduling_observer(req_id, metadata.http_request_id),
             .first_token        = first_token_observer(req_id),
         };
-        prepared = service_->prepare_samples(
-            request.generation, request.sample_count,
+        // The first sample is prepared up front; later samples of one request are prepared
+        // only after the previous sample's generation completed, so each adopts the previous
+        // sample's published prompt source instead of the Engine prefilling the same prompt
+        // once per sample.
+        prepared.push_back(service_->prepare_sample(
+            request.generation, request.sample_count, 0,
             request.stream ? GenerationConsumerMode::Streaming : GenerationConsumerMode::Aggregate,
-            std::move(observation), [&req] { return client_disconnected(req); });
+            observation, [&req] { return client_disconnected(req); }));
     } catch (const ApiException& exception) {
         record_request_rejected(make_request_rejection_log_context(
             req_id, "openai_chat_completions", request.generation, metadata, exception.error()));
@@ -106,10 +116,22 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
                                              [&req] { return client_disconnected(req); });
             }
         } else {
-            outcomes.reserve(prepared.size());
-            for (PreparedRequest& sample : prepared) {
+            outcomes.reserve(static_cast<std::size_t>(request.sample_count));
+            for (int index = 0; index < request.sample_count; ++index) {
+                if (static_cast<int>(prepared.size()) <= index) {
+                    // The previous sample completed; prepare this one now so it adopts the
+                    // previous sample's published prompt source. The last sample publishes
+                    // nothing: no later sample adopts its result, so the request leaves no
+                    // retained source behind.
+                    prepared.push_back(service_->prepare_sample(
+                        request.generation, request.sample_count, index,
+                        GenerationConsumerMode::Aggregate, observation,
+                        [&req] { return client_disconnected(req); }, {},
+                        index + 1 < request.sample_count));
+                }
                 outcomes.push_back(
-                    service_->run(sample, nullptr, [&req] { return client_disconnected(req); }));
+                    service_->run(prepared.back(), nullptr,
+                                  [&req] { return client_disconnected(req); }));
             }
         }
     } catch (const ApiException& exception) {
@@ -148,8 +170,11 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
         const bool return_progress    = request.return_progress;
         const bool timings_per_token  = request.timings_per_token;
         const bool include_usage      = request.include_usage;
-        const std::size_t sample_count = prepared.size();
-        auto stream = std::make_shared<ChatGenerationStream>(std::move(prepared));
+        // The first sample is already prepared; the provider prepares each later sample
+        // only after the previous sample's generation completed.
+        const std::size_t sample_count = static_cast<std::size_t>(request.sample_count);
+        auto stream = std::make_shared<ChatGenerationStream>(std::move(prepared),
+                                                             std::move(request.generation));
         std::vector<std::shared_ptr<OpenAIChatStream>> encoders;
         encoders.reserve(sample_count);
         for (std::size_t index = 0; index < sample_count; ++index) {
@@ -162,7 +187,7 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
         res.set_chunked_content_provider(
             "text/event-stream",
             [this, identity, stream, encoders, lifecycle, return_progress, timings_per_token,
-             include_usage](std::size_t, httplib::DataSink& sink) -> bool {
+             include_usage, observation, sample_count](std::size_t, httplib::DataSink& sink) -> bool {
                 if (stream->started.exchange(true, std::memory_order_acq_rel)) {
                     sink.done();
                     return true;
@@ -206,6 +231,19 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
                 try {
                     outcomes.reserve(encoders.size());
                     for (std::size_t index = 0; index < encoders.size(); ++index) {
+                        if (stream->prepared.size() <= index) {
+                            // The previous sample's generation completed; prepare this sample
+                            // now so it adopts the previous sample's published prompt source
+                            // instead of the Engine prefilling the same prompt again. The
+                            // last sample publishes nothing: no later sample adopts its
+                            // result, so the request leaves no retained source behind.
+                            const auto sample_index = static_cast<int>(stream->prepared.size());
+                            stream->prepared.push_back(service_->prepare_sample(
+                                stream->generation, static_cast<int>(sample_count), sample_index,
+                                GenerationConsumerMode::Streaming, observation,
+                                [stream] { return stream->cancelled.load(std::memory_order_acquire); },
+                                {}, sample_index < static_cast<int>(sample_count) - 1));
+                        }
                         OpenAIChatStream& encoder = *encoders[index];
                         StreamSink output;
                         output.on_start = [&](const ninfer::GenerationStart& start) {

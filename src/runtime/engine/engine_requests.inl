@@ -472,6 +472,13 @@ void EngineCore<Instance>::apply_settlement(const DeferredSettlement& settlement
         if (settlement.checkpoint) {
             resources_.publish(*instance_.session, settlement.owner, *settlement.checkpoint);
         }
+        if (settlement.base && !settlement.base->summary().publish_continuation) {
+            // A finished request that publishes nothing ends the lineage it took over: no
+            // later request adopts its result, so release the lineage instead of retaining
+            // its last published donor.
+            resources_.abandon(*instance_.session, settlement.owner);
+            return;
+        }
         resources_.finish(*instance_.session, settlement.owner, *settlement.base,
                           settlement.publication_order);
         return;

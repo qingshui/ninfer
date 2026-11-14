@@ -59,6 +59,13 @@ __device__ __forceinline__ unsigned nvfp4_pair_bf16_scaled(std::uint8_t code, un
 #endif
 }
 
+// One UE4M3 block-scale byte of a four-block scale word, widened to a BF16 pair. The
+// scale byte duplicates into both halves, so a pair shares one block's scale.
+__device__ __forceinline__ unsigned nvfp4_block_scale_pair(unsigned word, int block) {
+    const unsigned scale = (word >> (block * 8)) & 0xFF;
+    return fp8_e4m3x2_to_bf16x2_bits(scale | (scale << 8));
+}
+
 __device__ __forceinline__ unsigned nvfp4_scaled_pair_bf16(std::uint8_t code, std::uint8_t scale) {
     const auto pair = static_cast<std::uint16_t>(scale | (static_cast<unsigned>(scale) << 8));
     return nvfp4_pair_bf16_scaled(code, fp8_e4m3x2_to_bf16x2_bits(pair));

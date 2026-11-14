@@ -182,58 +182,46 @@ __device__ __forceinline__ void mma_nvfp4_e4m3(float& c0, float& c1, float& c2, 
                                                unsigned b0, unsigned b1, unsigned sfa,
                                                unsigned sfb) {
 #if NINFER_TARGET_B200
-    // SM100 emulation of the SM120 NVFP4 block-scale form: decode the E2M1
-    // fragments and apply the per-16-column UE4M3 scales in FP32. Fragment layout
-    // (g = lane/4, t = lane%4): a0/a2 = row g, a1/a3 = row g+8 with k columns
-    // 8t..8t+7 and 32+8t..32+8t+7; b0/b1 = column g with the same k columns;
-    // c0/c1 = row g, c2/c3 = row g+8 at columns 2t and 2t+1. Lane 4r+0/4r+2 supply
-    // the row-r scale word and lane 4r+1/4r+3 the row-(r+8) one; byte b of a scale
-    // word covers k block b (16 columns per block). Lane 4c supplies the column-c
-    // scale word. E2M1 products are exact in FP32; scales are applied per k block.
+    // SM100 has no mma.sync NVFP4 block-scale form (tcgen05 owns it there). Decode the
+    // E2M1 fragments to BF16 with the UE4M3 block scales folded in and issue the plain
+    // BF16 m16n8k16 form once per 16-column scale block. Folding is exact: an E2M1
+    // significand (two bits) times an E4M3 significand (four bits) fits BF16's eight, so
+    // the scaled products match the SM120 block-scale form's semantics.
+    // Fragment layout (g = lane/4, t = lane%4): a0/a2 = row g, a1/a3 = row g+8 with k
+    // columns 8t..8t+7 and 32+8t..32+8t+7; b0/b1 = column g with the same k columns;
+    // c0/c1 = row g, c2/c3 = row g+8 at columns 2t and 2t+1. Lane 4r+0/4r+2 supply the
+    // row-r scale word and lane 4r+1/4r+3 the row-(r+8) one; byte b of a scale word
+    // covers k block b (16 columns). Lane 4c supplies the column-c scale word.
+    // Byte t of a fragment register holds the k pair (8*octet + 2t, 8*octet + 2t + 1);
+    // the plain BF16 form's m16n8k16 tile for block `chunk` needs the pairs at chunk
+    // offsets 0 and 8, so it sources octets 2*(chunk&1) and 2*(chunk&1)+1 of the quad.
     const int lane = static_cast<int>(threadIdx.x) & 31;
     const int g = lane >> 2, t = lane & 3;
-    const unsigned sa_g_word = __shfl_sync(0xFFFFFFFFu, sfa, g << 2);
-    const unsigned sa_g8_word = __shfl_sync(0xFFFFFFFFu, sfa, (g << 2) | 1);
-    const unsigned sb_0_word = __shfl_sync(0xFFFFFFFFu, sfb, (t << 1) << 2);
-    const unsigned sb_1_word = __shfl_sync(0xFFFFFFFFu, sfb, ((t << 1) | 1) << 2);
-    float sa_g[4], sa_g8[4], sb_0[4], sb_1[4];
+    constexpr unsigned mask = 0xFFFFFFFFu;
+    const unsigned wa_g  = __shfl_sync(mask, sfa, g << 2);
+    const unsigned wa_g8 = __shfl_sync(mask, sfa, (g << 2) | 1);
+    const unsigned wb_g  = __shfl_sync(mask, sfb, g << 2);
+    const unsigned shift = static_cast<unsigned>(t) * 8;
 #pragma unroll
-    for (int block = 0; block < 4; ++block) {
-        sa_g[block] = common::decode_ue4m3((sa_g_word >> (block * 8)) & 0xFF);
-        sa_g8[block] = common::decode_ue4m3((sa_g8_word >> (block * 8)) & 0xFF);
-        sb_0[block] = common::decode_ue4m3((sb_0_word >> (block * 8)) & 0xFF);
-        sb_1[block] = common::decode_ue4m3((sb_1_word >> (block * 8)) & 0xFF);
+    for (int chunk = 0; chunk < 4; ++chunk) {
+        const int source = (g << 2) | (chunk & 1) * 2;
+        const unsigned sa_g  = nvfp4_block_scale_pair(wa_g, chunk);
+        const unsigned sa_g8 = nvfp4_block_scale_pair(wa_g8, chunk);
+        const unsigned sb_g  = nvfp4_block_scale_pair(wb_g, chunk);
+        const unsigned a_low  = __shfl_sync(mask, chunk < 2 ? a0 : a2, source);
+        const unsigned a_high = __shfl_sync(mask, chunk < 2 ? a0 : a2, source + 1);
+        const unsigned a8_low  = __shfl_sync(mask, chunk < 2 ? a1 : a3, source);
+        const unsigned a8_high = __shfl_sync(mask, chunk < 2 ? a1 : a3, source + 1);
+        const unsigned b_low  = __shfl_sync(mask, chunk < 2 ? b0 : b1, source);
+        const unsigned b_high = __shfl_sync(mask, chunk < 2 ? b0 : b1, source + 1);
+        mma_bf16(c0, c1, c2, c3,
+                 nvfp4_pair_bf16_scaled((a_low >> shift) & 0xFF, sa_g),
+                 nvfp4_pair_bf16_scaled((a8_low >> shift) & 0xFF, sa_g8),
+                 nvfp4_pair_bf16_scaled((a_high >> shift) & 0xFF, sa_g),
+                 nvfp4_pair_bf16_scaled((a8_high >> shift) & 0xFF, sa_g8),
+                 nvfp4_pair_bf16_scaled((b_low >> shift) & 0xFF, sb_g),
+                 nvfp4_pair_bf16_scaled((b_high >> shift) & 0xFF, sb_g));
     }
-    float sum_g0 = 0.0F, sum_g1 = 0.0F, sum_g8_0 = 0.0F, sum_g8_1 = 0.0F;
-#pragma unroll
-    for (int j = 0; j < 8; ++j) {
-        const unsigned av = __shfl_sync(0xFFFFFFFFu, j < 4 ? a0 : a2, (g << 2) | (j & 3));
-        const unsigned av8 = __shfl_sync(0xFFFFFFFFu, j < 4 ? a1 : a3, (g << 2) | (j & 3));
-        const unsigned bv = __shfl_sync(0xFFFFFFFFu, j < 4 ? b0 : b1, ((t << 1) << 2) | (j & 3));
-        const unsigned bv1 = __shfl_sync(0xFFFFFFFFu, j < 4 ? b0 : b1,
-                                         (((t << 1) | 1) << 2) | (j & 3));
-        float pd0 = 0.0F, pd1 = 0.0F, pd8_0 = 0.0F, pd8_1 = 0.0F;
-#pragma unroll
-        for (int i = 0; i < 8; ++i) {
-            const float a0v = common::decode_e2m1((av >> (i * 4)) & 0xF);
-            const float a1v = common::decode_e2m1((av8 >> (i * 4)) & 0xF);
-            const float b0v = common::decode_e2m1((bv >> (i * 4)) & 0xF);
-            const float b1v = common::decode_e2m1((bv1 >> (i * 4)) & 0xF);
-            pd0 = fmaf(a0v, b0v, pd0);
-            pd1 = fmaf(a0v, b1v, pd1);
-            pd8_0 = fmaf(a1v, b0v, pd8_0);
-            pd8_1 = fmaf(a1v, b1v, pd8_1);
-        }
-        const int block = j >> 1;
-        sum_g0 = fmaf(pd0, sa_g[block] * sb_0[block], sum_g0);
-        sum_g1 = fmaf(pd1, sa_g[block] * sb_1[block], sum_g1);
-        sum_g8_0 = fmaf(pd8_0, sa_g8[block] * sb_0[block], sum_g8_0);
-        sum_g8_1 = fmaf(pd8_1, sa_g8[block] * sb_1[block], sum_g8_1);
-    }
-    c0 += sum_g0;
-    c1 += sum_g1;
-    c2 += sum_g8_0;
-    c3 += sum_g8_1;
 #else
     constexpr unsigned short kScaleBlockId  = 0;
     constexpr unsigned short kScaleThreadId = 0;

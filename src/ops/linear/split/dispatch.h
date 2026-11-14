@@ -57,4 +57,10 @@ const SplitBiasShape& select_split_bias_shape(QType type, int n, int k, LinearPo
 const SplitShape& select_split_shape(ProjectionProfile weights,
                                      std::span<const std::int32_t> output_rows);
 const SplitShape& select_split_shape(ProjectionProfile weights, std::span<const Tensor> outputs);
+
+// Single-parent A16 dispatch for the Qwen3.5-122B GDN input projection ({qkv, z} segmentation),
+// reused by the GDN input-conv Op for its decode and snapshot paths. The caller owns operand
+// validation; the route needs no workspace.
+void bf16_split_n20480_k3072_dispatch(const Tensor& x, const Weight& weight,
+                                      std::span<const Tensor> outputs, cudaStream_t stream);
 } // namespace ninfer::ops::detail::linear_split

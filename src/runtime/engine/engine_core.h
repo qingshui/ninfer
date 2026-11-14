@@ -144,19 +144,23 @@ public:
     //    than kInterleaveNs of predicted time; a lane without an estimate starts with
     //    kInterleaveColdTokens.
     //  - kInterleaveNs bounds the decode stall that the prefill work in front of a decode round
-    //    may cause. The single 1024-token chunk per cycle that preceded this pacing cost 50 ms at
-    //    depth 0 and 125 ms at 160K (measured prefill cost per token: 48 us at depth 0, 77 us at
-    //    64K, 106 us at 128K, 120 us at 160K). 100 ms is that chunk at the middle of the contexts
-    //    served beside decode, so a shallow cycle spends it on one whole chunk and a deep one on
-    //    fewer tokens than the old chunk. A flight also has a fixed cost of roughly 14 ms
+    //    may cause, and with it the pacing of request completion: a request needs one decode
+    //    round per output token, so the bound is one cycle's prefill share, not a whole chunk.
+    //    The single 1024-token chunk per cycle that preceded this pacing cost 50 ms at depth 0
+    //    and 125 ms at 160K (measured prefill cost per token: 48 us at depth 0, 77 us at 64K,
+    //    106 us at 128K, 120 us at 160K). A flight also has a fixed cost of roughly 14 ms
     //    (inferred from flights of a few hundred tokens) that the measured ns/token spreads over
-    //    its tokens.
+    //    its tokens; 100 ms keeps that fixed share bounded for deep-context models (400 us/token
+    //    and up) while still spending a shallow cycle on most of a small-model chunk. A smaller
+    //    budget fragments prefill into more flights, each paying the same fixed host submission
+    //    cost again, and measured slower end to end (mini load: 1.28 req/s at 40 ms vs 1.57 req/s
+    //    at 100 ms).
     //  - Time-derived units are multiples of kUnitGranularity, the chunk alignment.
-    //  - Debt: a decode round takes 4-6 ms alone, but a lane that shares every cycle with 100 ms
-    //    of prefill decodes at about a twentieth of its solo rate, for as long as the prefill
+    //  - Debt: a decode round takes 4-6 ms alone, but a lane that shares every cycle with the
+    //    prefill budget decodes at a fraction of its solo rate, for as long as the prefill
     //    lasts (tens of seconds at 128K-200K contexts). The Scheduler counts the prefill time
     //    that ran beside a waiting lane as a debt. kInterleaveDebtCapNs lets a short request
-    //    prefill without waiting (three 100 ms cycles), and each Interleave cycle repays
+    //    prefill without waiting (several interleave cycles), and each Interleave cycle repays
     //    kInterleaveRepayNs, about a quarter of a 15-20 ms decode-only cycle, so a long prefill
     //    keeps about a fifth of the time while a lane decodes.
     static constexpr std::uint64_t kInterleaveNs         = 100'000'000;

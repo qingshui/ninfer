@@ -79,7 +79,7 @@ RequestBasePlan Session::plan_request(qwen::PreparedPrompt&& prompt,
                      options.requested_output_tokens <= p.shape.max_context - count + 1
                           ? FinishReason::OutputLimit
                           : FinishReason::ContextCapacity,
-                      plan->reuse};
+                      plan->reuse && options.publish_prefix_continuation};
     plan->sampling = options.sampling;
     auto identity  = std::make_shared<detail::Identity>();
     identity->tokens = input.token_ids;

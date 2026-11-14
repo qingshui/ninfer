@@ -61,6 +61,10 @@ WeightProfile describe_profile(const ProjectionProfile& weights) {
         if (w.qtype == QType::FP8_E4M3FN_ROW_BF16) return {Format::Fp8, {5120, 6144}, w.policy};
         if (w.qtype == QType::NVFP4) return {Format::Nvfp4, {5120, 6144}, w.policy};
     }
+    // Qwen3.5-122B keeps the GDN qkvz projection in BF16; the decode and snapshot paths reuse
+    // the Main prefill split kernels through the {qkv, z} segmentation.
+    if (w.qtype == QType::BF16 && w.n == 20480 && w.k == 3072)
+        return {Format::Bf16, {3072, 8192}, w.policy};
     if (w.qtype == QType::FP8_E4M3FN_ROW_FP32)
         throw std::invalid_argument("GDN input: unsupported qtype fp8_e4m3fn_row_fp32");
     throw std::invalid_argument("GDN input: unsupported single-parent weight geometry");
@@ -89,6 +93,16 @@ void validate_weights(const WeightOperands& weights) {
     case Format::Nvfp4:
         (void)common::validate_nvfp4_weight(*weights.first, "GDN input");
         break;
+    case Format::Bf16: {
+        const auto& w = *weights.first;
+        if (w.layout != QuantLayout::Contiguous || w.ndim != 2 || w.shape[0] != w.n ||
+            w.shape[1] != w.k || w.padded_shape[0] != w.n || w.padded_shape[1] != w.k ||
+            w.group != 0 || w.group_size != 0 || w.scales || w.qhigh || w.high_plane_bytes != 0 ||
+            w.payload_bytes < std::uint64_t(w.n) * w.k * 2 ||
+            !common::operand::aligned(w.qdata, 16))
+            throw std::invalid_argument("GDN input: invalid BF16 weight representation");
+        break;
+    }
     }
 }
 
@@ -100,7 +114,10 @@ void validate_interval(std::int32_t first, std::int32_t last) {
 void validate_batch_interval(Publication publication, std::int32_t batch, std::int32_t first,
                              std::int32_t last) {
     validate_interval(first, last);
-    if (batch < 1 || batch > 8 || (batch > 1 && last > 16) ||
+    // The materialized route (projection plus the sequential projected convolution) serves any
+    // row count; the fused kernels select only single-row or small-column batches, so the
+    // batch bound is the engine's sixteen decode lanes.
+    if (batch < 1 || batch > 16 || (batch > 1 && last > 16) ||
         (publication == Publication::Record && (first < 2 || last > 16)))
         throw std::invalid_argument("GDN convolution: unsupported batch/token interval");
 }

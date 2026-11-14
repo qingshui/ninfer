@@ -83,6 +83,13 @@ inline constexpr std::uint32_t kDefaultServeMaxTokens     = 8192;
 inline constexpr std::size_t kDefaultMaxRequestBytes      = 384ULL << 20;
 inline constexpr std::size_t kDefaultResponseStoreRecords = 1024;
 inline constexpr std::size_t kDefaultResponseStoreBytes   = 256ULL << 20;
+// Serving admission defaults: fill every decode lane the engine supports and hold
+// arriving request bursts in the pending queue (a client disconnect still cancels) rather
+// than answering 429 while lanes free up moments later. Pending slots count sequences, so
+// the pool covers a full n>1 concurrency wave (for example 130 clients x n=4 = 520).
+inline constexpr std::uint32_t kDefaultServeMaxConcurrency      = 8;
+inline constexpr std::uint32_t kDefaultServeMaxPendingRequests  = 1024;
+inline constexpr std::uint32_t kDefaultServePendingTimeoutMs    = 300000;
 
 struct ServeOptions {
     bool help_requested  = false;

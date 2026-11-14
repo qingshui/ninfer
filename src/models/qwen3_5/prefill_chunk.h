@@ -23,15 +23,18 @@ inline constexpr std::uint32_t kHostExpertsPrefillChunk = 4096;
 // no copy of this value.
 inline constexpr std::uint32_t kPrefillPackChunks = 2;
 
-// Explicit EngineOptions::prefill_chunk wins over the placement default. The result is clamped to
-// max_context and must be a multiple of kPrefillChunkAlignment.
+// Explicit EngineOptions::prefill_chunk wins over the placement default. The result is clamped
+// to max_context and must be a multiple of kPrefillChunkAlignment; a max_context that is not
+// itself aligned keeps the largest aligned chunk that fits (a chunk is batching granularity,
+// never a context bound, so rounding down preserves every contract).
 [[nodiscard]] inline std::uint32_t resolve_prefill_chunk(const EngineOptions& options,
                                                          WeightPlacement placement) {
     const auto base  = options.prefill_chunk != 0                  ? options.prefill_chunk
                        : placement == WeightPlacement::HostExperts ? kHostExpertsPrefillChunk
                                                                    : kResidentPrefillChunk;
-    const auto chunk = std::min(base, options.max_context);
-    if (chunk == 0 || chunk % kPrefillChunkAlignment != 0)
+    const auto room = options.max_context / kPrefillChunkAlignment * kPrefillChunkAlignment;
+    const auto chunk = std::min(base, room);
+    if (chunk == 0)
         throw std::invalid_argument("prefill_chunk must be a nonzero multiple of " +
                                     std::to_string(kPrefillChunkAlignment));
     return chunk;

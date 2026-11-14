@@ -400,7 +400,11 @@ public:
                 index_.record_adoption(*choice.source_role, choice.source.reused_tokens);
         }
         for (const auto handle : retired) { forget(handle); }
-        if (!enabled_ || !base.summary().publish_continuation) {
+        // A request that publishes nothing still takes over the lineage of the source it
+        // adopts: the lineage ends with that adopter, and its settlement releases the whole
+        // chain. Without the takeover the last publishing donor of a finished group would
+        // stay retained although no later request can adopt it.
+        if (!enabled_ || (!base.summary().publish_continuation && !choice.take_over)) {
             for (const auto handle : carried) { release_unreferenced(session, handle); }
             return 0;
         }

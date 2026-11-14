@@ -122,6 +122,12 @@ void dispatch(const Tensor& projected, const Tensor& conv_weight,
                                        key, value, publish, stream);
         return;
     }
+    if (projected.ne[0] == 12288 && query.ne[0] == 2048 && key.ne[0] == 2048 &&
+        value.ne[0] == 8192) {
+        launch<12288, 2048, 2048, 8192>(projected, conv_weight, state_read, valid_columns, query,
+                                        key, value, publish, stream);
+        return;
+    }
 #if NINFER_TARGET_SPARK
     if (projected.ne[0] == 5120 && query.ne[0] == 1024 && key.ne[0] == 1024 &&
         value.ne[0] == 3072) {

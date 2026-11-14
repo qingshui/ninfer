@@ -67,7 +67,7 @@ RequestBasePlan Session::plan_request(PreparedPrompt&& prompt,
                      options.requested_output_tokens <= p.shape.max_context - count + 1
                           ? FinishReason::OutputLimit
                           : FinishReason::ContextCapacity,
-                      plan->reuse};
+                      plan->reuse && options.publish_prefix_continuation};
     plan->sampling = options.sampling;
     plan->identity =
         std::make_shared<detail::Identity>(input, static_cast<std::uint32_t>(p.shape.kv_storage));

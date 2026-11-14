@@ -23,6 +23,9 @@ struct ResolvedExecutionOptions {
     ResolvedSamplingParameters sampling;
     std::uint32_t requested_output_tokens = 0;
     bool allow_prefix_reuse               = true;
+    // See ExecutionOptions::publish_prefix_continuation: publishing a final context as a reuse
+    // source is independent of adopting one.
+    bool publish_prefix_continuation      = true;
     ThinkingControlOptions thinking;
 };
 

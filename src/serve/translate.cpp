@@ -299,12 +299,14 @@ ninfer::PromptInput to_prompt_input(const GenerationRequest& request,
 
 ninfer::RequestOptions to_request_options(const GenerationRequest& request,
                                           const product::ServeOptions& server,
-                                          bool allow_prefix_reuse) {
+                                          bool allow_prefix_reuse,
+                                          bool publish_prefix_continuation) {
     ninfer::RequestOptions options;
     options.constraint                        = request.constraint;
     options.tool_choice                       = request.tool_choice;
     options.execution.requested_output_tokens = static_cast<std::uint32_t>(request.max_tokens);
     options.execution.allow_prefix_reuse      = allow_prefix_reuse;
+    options.execution.publish_prefix_continuation = publish_prefix_continuation;
     options.execution.thinking.budget         = request.thinking_budget
                                                     ? request.thinking_budget
                                                     : server.launch.generation.thinking_budget;

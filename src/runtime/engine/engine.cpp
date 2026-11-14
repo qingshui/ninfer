@@ -27,9 +27,11 @@ runtime::ResolvedRequestOptions resolve_request_options(const SamplingPreset& pr
     }
     runtime::ResolvedRequestOptions resolved;
     resolved.execution.sampling = runtime::resolve_sampling(preset, options.execution.sampling);
-    resolved.execution.requested_output_tokens = options.execution.requested_output_tokens;
-    resolved.execution.allow_prefix_reuse      = options.execution.allow_prefix_reuse;
-    resolved.execution.thinking                = options.execution.thinking;
+    resolved.execution.requested_output_tokens  = options.execution.requested_output_tokens;
+    resolved.execution.allow_prefix_reuse       = options.execution.allow_prefix_reuse;
+    resolved.execution.publish_prefix_continuation =
+        options.execution.publish_prefix_continuation;
+    resolved.execution.thinking = options.execution.thinking;
     resolved.stop                              = std::move(options.stop);
     resolved.output                            = options.output;
     resolved.constraint                        = options.constraint;

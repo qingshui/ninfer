@@ -119,16 +119,22 @@ public:
                                           ninfer::GenerationObservationOptions observation = {},
                                           std::function<bool()> is_cancelled               = {},
                                           ContextCacheHints context_cache = {}) const;
-    // Prepares `sample_count` independently sampled sequences for one request. Every sequence
-    // renders the same prompt, so the Engine's prefix reuse shares their prefill. A request or
-    // server-configured fixed seed is offset per sample so the sequences stay independently
-    // sampled; without a fixed seed each preparation draws a fresh random seed.
-    [[nodiscard]] std::vector<PreparedRequest>
-    prepare_samples(const GenerationRequest& req, int sample_count,
-                    GenerationConsumerMode consumer_mode,
-                    ninfer::GenerationObservationOptions observation = {},
-                    std::function<bool()> is_cancelled               = {},
-                    ContextCacheHints context_cache = {}) const;
+    // Prepares one independently sampled sequence of a request that asked for `sample_count`
+    // sequences: every sequence renders the same prompt, so the Engine's prefix reuse shares
+    // their prefill. Later sequences are prepared only after the previous sequence's
+    // generation completed, so each adopts the previous sequence's published prompt source
+    // instead of the Engine prefilling the same prompt again. `publish_source` publishes the
+    // prepared sequence's final context as a source the next sequence adopts; the last
+    // sequence of a request publishes nothing, so a finished request leaves no retained
+    // source behind. A request or server-configured fixed seed is offset per sample so the
+    // sequences stay independently sampled; without a fixed seed each preparation draws a
+    // fresh random seed.
+    [[nodiscard]] PreparedRequest
+    prepare_sample(const GenerationRequest& req, int sample_count, int index,
+                   GenerationConsumerMode consumer_mode,
+                   ninfer::GenerationObservationOptions observation = {},
+                   std::function<bool()> is_cancelled               = {},
+                   ContextCacheHints context_cache = {}, bool publish_source = true) const;
     [[nodiscard]] int count_prompt_tokens(const GenerationRequest& req,
                                           std::function<bool()> is_cancelled = {}) const;
 
@@ -162,7 +168,8 @@ private:
     prepare_impl(const GenerationRequest& req, GenerationConsumerMode consumer_mode,
                  ninfer::GenerationObservationOptions observation,
                  std::function<bool()> is_cancelled, ContextCacheHints context_cache,
-                 CacheParticipation cache_participation, DeadlinePolicy deadline_policy) const;
+                 CacheParticipation cache_participation, DeadlinePolicy deadline_policy,
+                 bool publish_source) const;
     [[nodiscard]] std::shared_ptr<RequestLifetime>
     acquire_request_lifetime(DeadlinePolicy deadline_policy) const;
 

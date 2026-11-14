@@ -1,4 +1,5 @@
 #include "core/platform.h"
+#include "ops/linear/split/dispatch.h"
 #include "ops/linear_attention/gated_delta_net/input_conv/execute.h"
 #include "ops/linear_attention/gated_delta_net/input_conv/fp8/launch.h"
 #include "ops/linear_attention/gated_delta_net/input_conv/nvfp4/launch.h"
@@ -34,6 +35,13 @@ void launch_projection(const Tensor& x, const WeightOperands& weights, Projected
         else
             launch_nvfp4_gdn_input_a16(x, w, out.qkv, out.z, stream);
         break;
+    case Format::Bf16: {
+        // The BF16 projection reuses the Main prefill split kernels ({qkv, z} segmentation)
+        // with the same column-count dispatch; no transient workspace is needed.
+        const std::array<Tensor, 2> outputs{out.qkv, out.z};
+        linear_split::bf16_split_n20480_k3072_dispatch(x, w, outputs, stream);
+        break;
+    }
     }
 }
 

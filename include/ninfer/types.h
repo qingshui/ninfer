@@ -250,6 +250,11 @@ struct ExecutionOptions {
     SamplingOverrides sampling;
     std::uint32_t requested_output_tokens = 0;
     bool allow_prefix_reuse               = true;
+    // Publish this request's final context as a source later requests may adopt. Adopting a
+    // source does not require publishing: a request may reuse an earlier prompt source and
+    // still leave nothing retained. The owning protocol clears this when it knows no later
+    // request can adopt the result, so a finished group of samples holds no cache space.
+    bool publish_prefix_continuation      = true;
     ThinkingControlOptions thinking;
 };
 

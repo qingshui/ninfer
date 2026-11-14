@@ -588,8 +588,23 @@ LaunchOptions default_launch_options(EntryPoint entry) {
         if (entry == EntryPoint::Cli) { options.engine.context_cache.enabled = false; }
         options.engine.context_cache.host_capacity_bytes = 0;
         options.generation.sampling.seed                 = 0;
-    } else
+    } else {
         options.generation.max_tokens = kDefaultServeMaxTokens;
+        // A server fills its execution lanes and queues arriving bursts instead of rejecting
+        // them: clients send whole concurrency waves at once, and a request rejected while a
+        // lane frees up moments later is a service failure, not backpressure. The default
+        // lane budget is the engine's maximum; explicit TOML/CLI values still override these.
+        options.engine.max_concurrency      = kDefaultServeMaxConcurrency;
+        options.engine.max_pending_requests = kDefaultServeMaxPendingRequests;
+        options.engine.pending_timeout_ms   = kDefaultServePendingTimeoutMs;
+        // No Host cache tier by default. Under saturation the device pool frees least
+        // recently used contexts directly; demoting whole contexts to the Host to preserve
+        // them for reads that never come stalls admission behind device-to-host transfers
+        // (measured: a full device pool sustains ~2 req/s with releases, ~0.1 with
+        // demotions under a 130-client unique-prompt load). Explicit configuration still
+        // enables Host backing for workloads that read retained prefixes.
+        options.engine.context_cache.host_capacity_bytes = 0;
+    }
     return options;
 }
 

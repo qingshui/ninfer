@@ -94,8 +94,9 @@ RequestBasePlan SessionImpl::plan_request(qwen::PreparedPromptData&& prompt,
                                                : FinishReason::ContextCapacity;
     base->sampling                       = options.sampling;
     base->allow_prefix_reuse             = options.allow_prefix_reuse && prompt.identity.reusable;
-    base->summary.publish_continuation =
-        options.allow_prefix_reuse && prompt.identity.reusable && context_cache.enabled;
+    base->summary.publish_continuation = options.allow_prefix_reuse &&
+                                         options.publish_prefix_continuation &&
+                                         prompt.identity.reusable && context_cache.enabled;
     if (prompt.has_media()) {
         if (!plan.vision_max_features) {
             throw std::logic_error("Vision prompt has no startup workspace plan");

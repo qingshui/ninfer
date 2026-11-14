@@ -37,7 +37,7 @@ constexpr FieldSpec kFields[] = {
      "Collect result/commit CUDA stream intervals at existing completion boundaries.",
      Scope::Common},
     {Field::MaxConcurrency, "engine.max_concurrency", "--max-concurrency", "", "N",
-     "Resident execution lanes (1..8)."},
+     "Resident execution lanes (1..16)."},
     {Field::MaxPendingRequests, "engine.max_pending_requests", "--max-pending-requests", "", "N",
      "Pending request capacity (16)."},
     {Field::PendingTimeout, "engine.pending_timeout", "--pending-timeout", "", "DURATION",
