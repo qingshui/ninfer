@@ -141,9 +141,11 @@ void RankProgramImpl::launch_decision(ComputeOperation& operation) {
             project_decode(operation.batch, operation.width);
             gpu_timer.end_target();
         }
-        if (graphs) {
-            (void)graphs->start(operation.speculative ? GraphPhase::Accept : GraphPhase::Sample,
-                                operation.batch, operation.rows.front().main_frontier,
+        const auto phase = operation.speculative ? GraphPhase::Accept : GraphPhase::Sample;
+        // A decision bucket pads its batch through the zeroed host row state and the batch-sized
+        // readback; an uncovered batch decides through the eager path below.
+        if (graphs && graphs->captured_batch(phase, operation.batch)) {
+            (void)graphs->start(phase, operation.batch, operation.rows.front().main_frontier,
                                 device.execution_view());
         } else {
             decide_decode(operation.batch, operation.width);

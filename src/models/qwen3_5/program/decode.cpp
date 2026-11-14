@@ -106,7 +106,10 @@ void RankProgramImpl::begin_draft(ComputeOperation& operation) {
         maximum = std::max(maximum, operation.rows[row].main_frontier);
     }
     if (!graphs) gpu_timer.begin_draft();
-    if (graphs) {
+    // A draft bucket pads its batch through the zeroed host row state; an uncovered batch drafts
+    // through the eager path below.
+    const bool draft_bucket = graphs && graphs->captured_batch(GraphPhase::Draft, operation.batch);
+    if (draft_bucket) {
         (void)graphs->start(GraphPhase::Draft, operation.batch, maximum, device.execution_view());
     } else if (backend == SpeculativeBackend::Mtp) {
         begin_mtp_draft(operation);
@@ -214,14 +217,19 @@ void RankProgramImpl::begin_target(ComputeOperation& operation) {
             operation.attention.valid_positions += frame.host_ingress->valid_columns[row];
     auto input = forward ? frame.input_view(width, batch) : frame.decode_view(width, batch);
     if (!forward && graphs) {
-        const auto phase       = operation.speculative ? GraphPhase::Verify : GraphPhase::Main;
-        std::uint32_t frontier = 0;
-        for (const auto& row : operation.rows) frontier = std::max(frontier, row.main_frontier);
-        operation.graph_started = true;
-        operation.projected     = true;
-        operation.row_finished =
-            graphs->start(phase, operation.batch, frontier, device.execution_view());
-        return;
+        const auto phase = operation.speculative ? GraphPhase::Verify : GraphPhase::Main;
+        // The target bucket pads its batch through the zeroed host row state (a GDN Main graph
+        // only replays its exact batch); an uncovered batch runs the eager traversal below, which
+        // computes the same rows without graph replay.
+        if (graphs->captured_batch(phase, operation.batch)) {
+            std::uint32_t frontier = 0;
+            for (const auto& row : operation.rows) frontier = std::max(frontier, row.main_frontier);
+            operation.graph_started = true;
+            operation.projected     = true;
+            operation.row_finished =
+                graphs->start(phase, operation.batch, frontier, device.execution_view());
+            return;
+        }
     }
     execution::TextInputs inputs{input.ids,
                                  input.cache_positions,

@@ -48,6 +48,11 @@ struct GraphBodies {
     std::function<void(std::uint32_t, DecodeGraphSection*, DecodeGraphSection*)> mtp_commit;
 };
 
+// Capture bucket sequence of one batch capacity: the powers of two up to the capacity, then the
+// capacity itself (not repeated when it is a power of two). Graphs are captured once per bucket
+// and replayed for every batch a bucket covers.
+[[nodiscard]] std::vector<std::uint32_t> graph_capture_buckets(std::uint32_t batch_capacity);
+
 class Graphs {
 public:
     explicit Graphs(GraphSpec spec);
@@ -55,6 +60,12 @@ public:
                  GraphPreparation&);
     [[nodiscard]] bool start(GraphPhase, std::uint32_t batch, std::uint32_t frontier,
                              CudaExecutionView);
+    // Smallest captured bucket whose graph can replay `batch` rows of the phase; zero when the
+    // phase must run its eager path instead. Every batch of a captured phase replays at a bucket,
+    // with its padding rows held inert by the zeroed host row state; the one exception is a
+    // width-one Main graph over GDN layers, whose per-row State update has no row mask, so only
+    // its exact bucket sizes are covered and other batches replay eager.
+    [[nodiscard]] std::uint32_t captured_batch(GraphPhase, std::uint32_t batch) const;
     [[nodiscard]] bool poll();
     void cancel();
     void clear();
@@ -95,9 +106,18 @@ private:
     };
 
     GraphSpec spec_;
+    // One entry per capture bucket, in graph_capture_buckets order; start and commit_mtp resolve
+    // a batch into its covering bucket before indexing it.
+    std::vector<std::uint32_t> buckets_;
+    // Whether a width-one Main graph tolerates padded rows: without GDN layers its per-row update
+    // is masked entirely by the zeroed host row state.
+    bool pads_main_                        = false;
     std::vector<Batch> batches_;
-    execution::TextGraph* pending_ = nullptr;
-    std::size_t workspace_peak_    = 0;
+    execution::TextGraph* pending_         = nullptr;
+    std::size_t workspace_peak_            = 0;
+
+    [[nodiscard]] std::uint32_t covering_bucket(std::uint32_t batch) const noexcept;
+    [[nodiscard]] std::size_t bucket_index(std::uint32_t bucket) const noexcept;
 };
 
 [[nodiscard]] std::vector<GraphProfile> target_graph_profiles(std::uint32_t capacity,

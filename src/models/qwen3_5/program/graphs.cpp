@@ -224,12 +224,22 @@ std::vector<GraphProfile> draft_graph_profiles(const GraphSpec& spec) {
     return {};
 }
 
+std::vector<std::uint32_t> graph_capture_buckets(std::uint32_t batch_capacity) {
+    if (!batch_capacity) throw std::invalid_argument("graph batch capacity must be positive");
+    std::vector<std::uint32_t> buckets;
+    for (std::uint64_t size = 1; size < batch_capacity; size <<= 1)
+        buckets.push_back(static_cast<std::uint32_t>(size));
+    buckets.push_back(batch_capacity);
+    return buckets;
+}
+
 Graphs::Graphs(GraphSpec spec) : spec_(spec) {
     if (!spec.capacity || !spec.batch_capacity || spec.batch_capacity > kMaximumConcurrency ||
         spec.draft_window > 15 ||
         (spec.backend == SpeculativeBackend::None) != (spec.draft_window == 0)) {
         throw std::invalid_argument("Qwen3.5 graph geometry is invalid");
     }
+    buckets_ = graph_capture_buckets(spec.batch_capacity);
 }
 
 void Graphs::SegmentFamily::instantiate(CudaExecutionView cuda) {
@@ -290,12 +300,16 @@ void Graphs::prepare(Resources& resources, const execution::Parameters& paramete
     std::optional<moe::Schedule::Preparation> preparation;
     if (resources.moe) preparation.emplace(*resources.moe);
     PreparationInputs inputs(resources, device);
-    batches_.resize(spec_.batch_capacity);
+    batches_.resize(buckets_.size());
+    // A width-one Main graph writes each row's GDN State transition; with GDN layers that write
+    // carries no row mask, so its buckets replay only their exact batch (see captured_batch).
+    pads_main_ = !parameters.profile->config.text.gdn.has_value();
     const auto ordinary_profiles = target_graph_profiles(spec_.capacity, 1);
     const auto verify_profiles   = target_graph_profiles(spec_.capacity, spec_.draft_window + 1);
     const auto draft_profiles    = draft_graph_profiles(spec_);
-    for (std::uint32_t batch = 1; batch <= spec_.batch_capacity; ++batch) {
-        auto& target            = batches_[batch - 1];
+    for (std::size_t bucket = 0; bucket < buckets_.size(); ++bucket) {
+        const auto batch = buckets_[bucket];
+        auto& target     = batches_[bucket];
         const auto prepare_main = [&](GraphPhase phase, execution::TextGraph& graph,
                                       std::uint32_t width, const auto& profiles) {
             const auto call = invocation(phase, batch, width, profiles.front(), spec_.capacity);
@@ -405,11 +419,38 @@ void Graphs::prepare(Resources& resources, const execution::Parameters& paramete
     resources.work.reset();
 }
 
+std::uint32_t Graphs::covering_bucket(std::uint32_t batch) const noexcept {
+    const auto found = std::lower_bound(buckets_.begin(), buckets_.end(), batch);
+    return found != buckets_.end() ? *found : 0;
+}
+
+std::size_t Graphs::bucket_index(std::uint32_t bucket) const noexcept {
+    return static_cast<std::size_t>(
+        std::lower_bound(buckets_.begin(), buckets_.end(), bucket) - buckets_.begin());
+}
+
+std::uint32_t Graphs::captured_batch(GraphPhase phase, std::uint32_t batch) const {
+    if (!batch || batch > spec_.batch_capacity || batches_.empty()) return 0;
+    if (phase == GraphPhase::Main && !pads_main_) {
+        // The width-one StepUpdate writes every row's destination GDN State unconditionally, so a
+        // padded row would corrupt the State slot the zeroed host row state names; only an exact
+        // bucket size replays, other batches take the eager path.
+        const auto found = std::find(buckets_.begin(), buckets_.end(), batch);
+        return found != buckets_.end() ? batch : 0;
+    }
+    // Every other phase holds its padded rows inert through the zeroed host row state: the verify
+    // graphs only record valid columns and leave the master State unchanged, the draft graphs
+    // append nothing for rows with zero frontiers, and the decision graphs write rows that the
+    // batch-sized readback never copies back.
+    return covering_bucket(batch);
+}
+
 bool Graphs::start(GraphPhase phase, std::uint32_t batch, std::uint32_t frontier,
                    CudaExecutionView cuda) {
     if (pending_) throw std::logic_error("a Qwen3.5 graph phase is already pending");
-    if (!batch || batch > batches_.size()) throw std::out_of_range("graph batch is unprepared");
-    auto& family               = batches_[batch - 1];
+    const auto bucket = captured_batch(phase, batch);
+    if (!bucket) throw std::out_of_range("graph batch is unprepared");
+    auto& family               = batches_[bucket_index(bucket)];
     execution::TextGraph* text = nullptr;
     switch (phase) {
     case GraphPhase::Main:
@@ -449,7 +490,11 @@ bool Graphs::poll() {
 
 void Graphs::commit_mtp(std::uint32_t batch, bool repair, bool counts, CudaExecutionView cuda) {
     if (pending_) throw std::logic_error("MTP history cannot precede its completed target");
-    auto& commit = batches_.at(batch - 1).mtp_commit;
+    if (!batch || batch > spec_.batch_capacity || batches_.empty())
+        throw std::out_of_range("graph batch is unprepared");
+    // The commit graphs pad to their bucket like every masked phase: a padded row commits nothing
+    // through its zeroed host commit state (no fold, no scatter, no token counts).
+    auto& commit = batches_[bucket_index(covering_bucket(batch))].mtp_commit;
     commit.repair.set_enabled(commit.executable, repair);
     commit.counts.set_enabled(commit.executable, counts);
     commit.executable.launch(cuda.stream());
