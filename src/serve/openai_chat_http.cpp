@@ -8,9 +8,12 @@
 #include <cstddef>
 #include <cstdint>
 #include <exception>
+#include <functional>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -21,18 +24,15 @@ std::string sse_error_event(const ApiError& error) {
     return "data: " + make_error_body(error) + "\n\n";
 }
 
-// One Chat Completions request fans out to one prepared request per requested sample. This owner
-// keeps the prepared samples and their transport flags alive across the chunked-content provider.
-// The first sample is prepared before the response starts; later samples are prepared while the
-// response streams, each only after the previous sample's generation completed, so every sample
-// adopts the previous sample's published prompt source instead of the Engine prefilling the same
-// prompt again. `generation` keeps the request that renders that shared prompt.
+// One Chat Completions request fans out to one prepared request per requested sample. Every
+// sample is prepared up front and consumed exactly once; all samples render the same prompt, so
+// the Engine's prefix reuse and context cache share their prefill. This owner keeps the
+// prepared samples and their transport flags alive across the chunked-content provider.
 struct ChatGenerationStream {
-    ChatGenerationStream(std::vector<PreparedRequest> requests, GenerationRequest generation)
-        : prepared(std::move(requests)), generation(std::move(generation)) {}
+    explicit ChatGenerationStream(std::vector<PreparedRequest> requests)
+        : prepared(std::move(requests)) {}
 
     std::vector<PreparedRequest> prepared;
-    GenerationRequest generation;
     std::atomic<bool> cancelled{false};
     std::atomic<bool> started{false};
 };
@@ -47,6 +47,48 @@ GenerationOutcome aggregate_outcomes(const std::vector<GenerationOutcome>& outco
         aggregate.reasoning_tokens += outcomes[index].reasoning_tokens;
     }
     return aggregate;
+}
+
+// Runs every prepared sample of one request in parallel, one thread per sample, and returns one
+// outcome per sample in sample order. A failing sample signals its siblings to stop; the
+// first-originating failure is rethrown only after every sample settled, so cancellation errors
+// raised by the stop signal never mask the failure that caused it.
+std::vector<GenerationOutcome>
+run_parallel_samples(GenerationService& service, std::vector<PreparedRequest>& prepared,
+                     const std::function<bool()>& is_cancelled) {
+    std::vector<GenerationOutcome> outcomes(prepared.size());
+    std::vector<std::thread> workers;
+    workers.reserve(prepared.size());
+    std::atomic<bool> stop{false};
+    std::atomic<bool> failure_recorded{false};
+    std::exception_ptr failure;
+    const auto run_sample = [&](std::size_t index) {
+        try {
+            outcomes[index] = service.run(
+                prepared[index], nullptr,
+                [&] {
+                    return stop.load(std::memory_order_acquire) ||
+                           (is_cancelled && is_cancelled());
+                });
+        } catch (...) {
+            if (!failure_recorded.exchange(true, std::memory_order_acq_rel)) {
+                failure = std::current_exception();
+            }
+            stop.store(true, std::memory_order_release);
+        }
+    };
+    try {
+        for (std::size_t index = 0; index < prepared.size(); ++index) {
+            workers.emplace_back(run_sample, index);
+        }
+    } catch (...) {
+        stop.store(true, std::memory_order_release);
+        for (std::thread& worker : workers) { worker.join(); }
+        throw;
+    }
+    for (std::thread& worker : workers) { worker.join(); }
+    if (failure) { std::rethrow_exception(failure); }
+    return outcomes;
 }
 
 } // namespace
@@ -79,14 +121,16 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
             .scheduling         = scheduling_observer(req_id, metadata.http_request_id),
             .first_token        = first_token_observer(req_id),
         };
-        // The first sample is prepared up front; later samples of one request are prepared
-        // only after the previous sample's generation completed, so each adopts the previous
-        // sample's published prompt source instead of the Engine prefilling the same prompt
-        // once per sample.
-        prepared.push_back(service_->prepare_sample(
-            request.generation, request.sample_count, 0,
-            request.stream ? GenerationConsumerMode::Streaming : GenerationConsumerMode::Aggregate,
-            observation, [&req] { return client_disconnected(req); }));
+        // All samples of one request are prepared up front and run in parallel: every sample
+        // renders the same prompt, so the Engine's prefix reuse and context cache share their
+        // prefill instead of the request chaining one sample's published source into the next.
+        prepared.reserve(static_cast<std::size_t>(request.sample_count));
+        for (int index = 0; index < request.sample_count; ++index) {
+            prepared.push_back(service_->prepare_sample(
+                request.generation, request.sample_count, index,
+                request.stream ? GenerationConsumerMode::Streaming : GenerationConsumerMode::Aggregate,
+                observation, [&req] { return client_disconnected(req); }));
+        }
     } catch (const ApiException& exception) {
         record_request_rejected(make_request_rejection_log_context(
             req_id, "openai_chat_completions", request.generation, metadata, exception.error()));
@@ -116,23 +160,8 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
                                              [&req] { return client_disconnected(req); });
             }
         } else {
-            outcomes.reserve(static_cast<std::size_t>(request.sample_count));
-            for (int index = 0; index < request.sample_count; ++index) {
-                if (static_cast<int>(prepared.size()) <= index) {
-                    // The previous sample completed; prepare this one now so it adopts the
-                    // previous sample's published prompt source. The last sample publishes
-                    // nothing: no later sample adopts its result, so the request leaves no
-                    // retained source behind.
-                    prepared.push_back(service_->prepare_sample(
-                        request.generation, request.sample_count, index,
-                        GenerationConsumerMode::Aggregate, observation,
-                        [&req] { return client_disconnected(req); }, {},
-                        index + 1 < request.sample_count));
-                }
-                outcomes.push_back(
-                    service_->run(prepared.back(), nullptr,
-                                  [&req] { return client_disconnected(req); }));
-            }
+            outcomes = run_parallel_samples(*service_, prepared,
+                                            [&req] { return client_disconnected(req); });
         }
     } catch (const ApiException& exception) {
         lifecycle->failure(make_generation_request_failure(exception.error()));
@@ -167,17 +196,15 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
     }
 
     try {
-        const bool return_progress    = request.return_progress;
-        const bool timings_per_token  = request.timings_per_token;
-        const bool include_usage      = request.include_usage;
-        // The first sample is already prepared; the provider prepares each later sample
-        // only after the previous sample's generation completed.
-        const std::size_t sample_count = static_cast<std::size_t>(request.sample_count);
-        auto stream = std::make_shared<ChatGenerationStream>(std::move(prepared),
-                                                             std::move(request.generation));
+        const bool return_progress   = request.return_progress;
+        const bool timings_per_token = request.timings_per_token;
+        const bool include_usage     = request.include_usage;
+        // Every sample is already prepared; the provider runs them in parallel and interleaves
+        // their SSE chunks by choice index.
+        auto stream = std::make_shared<ChatGenerationStream>(std::move(prepared));
         std::vector<std::shared_ptr<OpenAIChatStream>> encoders;
-        encoders.reserve(sample_count);
-        for (std::size_t index = 0; index < sample_count; ++index) {
+        encoders.reserve(stream->prepared.size());
+        for (std::size_t index = 0; index < stream->prepared.size(); ++index) {
             encoders.push_back(std::make_shared<OpenAIChatStream>(
                 identity, include_usage, timings_per_token, return_progress,
                 static_cast<int>(index)));
@@ -187,7 +214,7 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
         res.set_chunked_content_provider(
             "text/event-stream",
             [this, identity, stream, encoders, lifecycle, return_progress, timings_per_token,
-             include_usage, observation, sample_count](std::size_t, httplib::DataSink& sink) -> bool {
+             include_usage](std::size_t, httplib::DataSink& sink) -> bool {
                 if (stream->started.exchange(true, std::memory_order_acq_rel)) {
                     sink.done();
                     return true;
@@ -226,27 +253,25 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
                     return send_error(error);
                 }
 
-                std::vector<GenerationOutcome> outcomes;
-                bool cancelled = false;
-                try {
-                    outcomes.reserve(encoders.size());
-                    for (std::size_t index = 0; index < encoders.size(); ++index) {
-                        if (stream->prepared.size() <= index) {
-                            // The previous sample's generation completed; prepare this sample
-                            // now so it adopts the previous sample's published prompt source
-                            // instead of the Engine prefilling the same prompt again. The
-                            // last sample publishes nothing: no later sample adopts its
-                            // result, so the request leaves no retained source behind.
-                            const auto sample_index = static_cast<int>(stream->prepared.size());
-                            stream->prepared.push_back(service_->prepare_sample(
-                                stream->generation, static_cast<int>(sample_count), sample_index,
-                                GenerationConsumerMode::Streaming, observation,
-                                [stream] { return stream->cancelled.load(std::memory_order_acquire); },
-                                {}, sample_index < static_cast<int>(sample_count) - 1));
-                        }
+                // One worker per sample consumes its prepared request; the shared transport
+                // mutex keeps every SSE chunk atomic, so chunks of different choices interleave
+                // by arrival while each choice keeps its own event order. A failing sample
+                // signals its siblings to stop; the first-originating failure is rethrown after
+                // every sample settled.
+                const std::size_t sample_count = encoders.size();
+                std::vector<GenerationOutcome> outcomes(sample_count);
+                std::mutex write_mutex;
+                std::atomic<bool> stop{false};
+                std::atomic<bool> failure_recorded{false};
+                std::exception_ptr failure;
+                std::vector<std::thread> workers;
+                workers.reserve(sample_count);
+                const auto run_sample = [&](std::size_t index) {
+                    try {
                         OpenAIChatStream& encoder = *encoders[index];
                         StreamSink output;
                         output.on_start = [&](const ninfer::GenerationStart& start) {
+                            const std::lock_guard lock(write_mutex);
                             encoder.note_start(start);
                             if (return_progress) {
                                 render_and_write(
@@ -255,39 +280,66 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
                         };
                         if (return_progress) {
                             output.on_progress = [&](const ninfer::PromptProgress& progress) {
+                                const std::lock_guard lock(write_mutex);
                                 render_and_write(transport,
                                                  [&] { return encoder.prompt_progress(progress); });
                             };
                         }
                         if (timings_per_token) {
                             output.on_timing = [&](const ninfer::GenerationTimingObservation& timing) {
+                                const std::lock_guard lock(write_mutex);
                                 encoder.note_timing(timing);
                             };
                         }
                         output.on_content = [&](const std::string& text) {
+                            const std::lock_guard lock(write_mutex);
                             render_and_write(transport,
                                              [&] { return encoder.content_delta(text); });
                         };
                         output.on_reasoning = [&](const std::string& text) {
+                            const std::lock_guard lock(write_mutex);
                             render_and_write(transport,
                                              [&] { return encoder.reasoning_delta(text); });
                         };
                         output.on_tool_start = [&](const ninfer::ToolCallStart& event) {
+                            const std::lock_guard lock(write_mutex);
                             render_and_write(transport, [&] { return encoder.tool_start(event); });
                         };
                         output.on_tool_arguments = [&](const ninfer::ToolArgumentsDelta& event) {
+                            const std::lock_guard lock(write_mutex);
                             render_and_write(transport,
                                              [&] { return encoder.tool_arguments(event); });
                         };
                         output.on_tool_end = [&](const ninfer::ToolCallEnd& event) {
+                            const std::lock_guard lock(write_mutex);
                             render_and_write(transport, [&] { return encoder.tool_end(event); });
                         };
-                        output.is_cancelled = [&] { return transport.poll(); };
-
-                        outcomes.push_back(service_->run(stream->prepared[index], &output));
-                        cancelled |=
-                            outcomes.back().finish_reason == ninfer::FinishReason::Cancelled;
+                        output.is_cancelled = [&] {
+                            const std::lock_guard lock(write_mutex);
+                            return stop.load(std::memory_order_acquire) || transport.poll();
+                        };
+                        outcomes[index] = service_->run(stream->prepared[index], &output);
+                    } catch (...) {
+                        if (!failure_recorded.exchange(true, std::memory_order_acq_rel)) {
+                            failure = std::current_exception();
+                        }
+                        stop.store(true, std::memory_order_release);
                     }
+                };
+                try {
+                    try {
+                        for (std::size_t index = 0; index < sample_count; ++index) {
+                            workers.emplace_back(run_sample, index);
+                        }
+                    } catch (...) {
+                        // Thread creation failed: stop and settle already-started samples before
+                        // leaving, so no worker outlives this provider invocation.
+                        stop.store(true, std::memory_order_release);
+                        for (std::thread& worker : workers) { worker.join(); }
+                        throw;
+                    }
+                    for (std::thread& worker : workers) { worker.join(); }
+                    if (failure) { std::rethrow_exception(failure); }
                 } catch (const ClientDisconnected&) {
                     lifecycle->failure(
                         make_client_disconnected_failure(RequestFailurePhase::Transport));
@@ -313,6 +365,10 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
                     return send_error(error);
                 }
 
+                bool cancelled = false;
+                for (const GenerationOutcome& outcome : outcomes) {
+                    cancelled |= outcome.finish_reason == ninfer::FinishReason::Cancelled;
+                }
                 lifecycle->done(aggregate_outcomes(outcomes));
                 if (cancelled || stream->cancelled.load(std::memory_order_acquire)) {
                     lifecycle->response_failure(

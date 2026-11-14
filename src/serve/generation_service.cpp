@@ -390,8 +390,7 @@ PreparedRequest GenerationService::prepare(const GenerationRequest& request,
 PreparedRequest GenerationService::prepare_sample(
     const GenerationRequest& request, int sample_count, int index,
     GenerationConsumerMode consumer_mode, ninfer::GenerationObservationOptions observation,
-    std::function<bool()> is_cancelled, ContextCacheHints context_cache,
-    bool publish_source) const {
+    std::function<bool()> is_cancelled, ContextCacheHints context_cache) const {
     if (sample_count < 1 || index < 0 || index >= sample_count) {
         throw std::logic_error("sample index outside the request's sample count");
     }
@@ -401,11 +400,15 @@ PreparedRequest GenerationService::prepare_sample(
     if (index != 0 && fixed_seed) {
         sample.sampling.seed = *fixed_seed + static_cast<std::uint64_t>(index);
     }
+    // A single-sample request still publishes its final context as a continuation source so a
+    // follow-up request can adopt the conversation prefix. A multi-sample request renders
+    // divergent completions in parallel, none of which is the conversation's continuation, so
+    // no sample publishes and the finished request leaves no retained source behind.
     return prepare_impl(sample, consumer_mode, std::move(observation), std::move(is_cancelled),
                         std::move(context_cache),
                         options_.launch.engine.context_cache.enabled ? CacheParticipation::ReadWrite
                                                                      : CacheParticipation::Disabled,
-                        DeadlinePolicy::ClientPendingTimeout, publish_source);
+                        DeadlinePolicy::ClientPendingTimeout, sample_count == 1);
 }
 
 PreparedRequest GenerationService::prepare_impl(const GenerationRequest& request,
@@ -415,7 +418,7 @@ PreparedRequest GenerationService::prepare_impl(const GenerationRequest& request
                                                 ContextCacheHints context_cache,
                                                 CacheParticipation cache_participation,
                                                 DeadlinePolicy deadline_policy,
-                                                bool publish_source) const {
+                                                bool publish_prefix_continuation) const {
     is_cancelled = preparation_cancellation(std::move(is_cancelled));
     PreparedRequest prepared;
     prepared.constraint_param = request.constraint_param;
@@ -423,7 +426,7 @@ PreparedRequest GenerationService::prepare_impl(const GenerationRequest& request
     const PromptOptionInputs semantics = collect_prompt_options(request, options_);
     ninfer::RequestOptions request_options =
         to_request_options(request, options_, cache_participation == CacheParticipation::ReadWrite,
-                           publish_source);
+                           publish_prefix_continuation);
     prepared.thinking_budget     = request_options.execution.thinking.budget;
     prepared.reasoning_effort    = semantics.reasoning_effort;
     prepared.preserve_thinking   = semantics.preserve_thinking ? semantics.preserve_thinking
