@@ -89,7 +89,12 @@ ConstructedModel construct_model(EngineOptions& options) {
     // Session planning and graph capture need a concrete lane count, so automatic lane fitting
     // (Generation zero) plans at the shared ceiling: the Engine replaces this provisional value
     // with the capacity-fitted lane count once construction has resolved the context capacity.
-    if (options.max_concurrency == 0) options.max_concurrency = kMaximumConcurrency;
+    // The flag keeps the provisional fact visible to model planning, which may fit the session's
+    // lane-count-derived resources to the device budget below the ceiling.
+    if (options.max_concurrency == 0) {
+        options.max_concurrency     = kMaximumConcurrency;
+        options.automatic_lane_fitting = true;
+    }
     if (options.deployment) {
         validate_deployment(*options.deployment);
         if (options.deployment->ranks.size() == 1)

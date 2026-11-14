@@ -1,4 +1,5 @@
 #include "ops/softmax_attention/dense/causal_cache/bf16/plan.h"
+#include "ninfer/types.h"
 #include "ops/softmax_attention/kernels/causal/operands.h"
 #include "ops/softmax_attention/kernels/causal/partition.h"
 #include <algorithm>
@@ -8,9 +9,10 @@ namespace ninfer::ops::detail {
 namespace {
 constexpr int kGroupedPrefillMaxWidth = 256;
 constexpr int kTiledQueryRows          = 64;
-// The Hq=32, Hkv=2 service profile carries the full concurrent decode pool.
+// The Hq=32, Hkv=2 service profile spans the full engine concurrency ceiling.
 constexpr int plan_batch_limit(int heads) {
-    return heads == 32 ? 520 : heads == 8 ? 16 : 8;
+    return heads == 32 ? static_cast<int>(ninfer::kMaximumConcurrency)
+                       : heads == 8 ? 16 : 8;
 }
 
 // The tiled kernel has no KV split: one CTA per 64-query tile and head walks every visible key.

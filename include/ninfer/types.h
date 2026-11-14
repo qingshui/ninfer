@@ -170,6 +170,12 @@ struct EngineOptions {
     // Engine clamps the lane count from that estimate and reports the resolved value. Causal
     // Scoring normalizes to a single lane.
     std::uint32_t max_concurrency      = 1;
+    // True while max_concurrency holds the provisional ceiling that construct_model substituted
+    // for the automatic-lane-fitting zero. The session still needs a concrete lane count during
+    // construction, so model planning may fit lane-count-derived resources (context pool working
+    // sets, KV table rows, graph capture buckets) to the device budget below the ceiling; the
+    // Engine bounds the resolved lane count by the constructed session's lane capacity.
+    bool automatic_lane_fitting        = false;
     std::uint32_t max_pending_requests = 16;
     std::uint32_t pending_timeout_ms   = 30000;
     // Zero uses 4096 for Qwen4Exp or CPU expert offload, otherwise 1024.

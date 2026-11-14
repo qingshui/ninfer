@@ -61,6 +61,51 @@ std::uint32_t page_count(std::uint32_t capacity) {
     return 1U + (capacity - 1U) / static_cast<std::uint32_t>(kPagedKVPageSize);
 }
 
+// Largest session lane count whose lane-scaled working sets hold in `budget` beside the fixed
+// session reservation. The reservation is measured at the provisional ceiling, which bounds
+// the fitted count's own fixed share from above. Returns `inputs.max_concurrency` when the
+// ceiling already fits, or when no smaller lane count helps (the budget cannot hold even one
+// lane's working set, so the caller's feasibility check reports the shortfall).
+std::uint32_t fitted_session_lanes(const SequencePlanningInputs& inputs,
+                                   const ContextPoolGeometry& geometry, std::size_t fixed_bytes,
+                                   std::size_t budget) {
+    const auto demand_bytes = [&](std::uint32_t states, std::uint32_t main, std::uint32_t backend) {
+        std::vector<RecordRequest> demand{{geometry.spec_classes[0], states}};
+        demand.push_back({geometry.spec_classes[1], main});
+        if (geometry.spec_classes.size() > 2)
+            demand.push_back({geometry.spec_classes[2], backend});
+        return geometry.required_bytes(demand);
+    };
+    const auto transition    = inputs.speculative_backend == SpeculativeBackend::None ? 0U : 1U;
+    const auto maximum_pages = page_count(inputs.capacity);
+    const auto short_pages   = page_count(static_cast<std::uint32_t>(std::min<std::uint64_t>(
+                                     inputs.capacity,
+                                     std::uint64_t(inputs.prefill_chunk) + inputs.draft_window + 1))) +
+                           transition;
+    const auto maximum_bytes = demand_bytes(1 + transition, maximum_pages + transition,
+                                            maximum_pages + transition);
+    const auto concurrent_bytes = [&](std::uint32_t lanes) {
+        auto bytes = demand_bytes(lanes * (1 + transition), lanes * short_pages,
+                                  lanes * short_pages);
+        if (inputs.context_cache.enabled)
+            bytes = std::max(bytes, demand_bytes(lanes + 1 + transition, maximum_pages + lanes,
+                                                 maximum_pages + lanes));
+        return bytes;
+    };
+    const auto fits = [&](std::uint32_t lanes) {
+        return fixed_bytes + std::max(maximum_bytes, concurrent_bytes(lanes)) <= budget;
+    };
+    if (fits(inputs.max_concurrency) || inputs.max_concurrency == 1 || !fits(1))
+        return inputs.max_concurrency;
+    std::uint32_t low = 1, high = inputs.max_concurrency - 1;
+    while (low < high) {
+        const auto middle = low + (high - low + 1) / 2;
+        if (fits(middle)) low = middle;
+        else high = middle - 1;
+    }
+    return low;
+}
+
 ResourceLayout persistent_layout(const SequencePlanImpl& plan) {
     const auto& profile = *plan.profile;
     const auto& config  = profile.config.text;
@@ -705,7 +750,8 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
 std::unique_ptr<qwen3_5::detail::SequencePlannerImpl>
 make_sequence_planner_impl(std::shared_ptr<const execution::ModelProfile> profile,
                            DeviceContext& device, const EngineOptions& options,
-                           std::shared_ptr<const moe::Plan> moe) {
+                           std::shared_ptr<const moe::Plan> moe,
+                           std::optional<std::size_t> context_budget) {
     validate_target_options(*profile, device, options);
     const auto chunk    = std::min(options.prefill_chunk, options.max_context);
     const bool scoring  = options.purpose == EnginePurpose::CausalScoring;
@@ -757,6 +803,23 @@ make_sequence_planner_impl(std::shared_ptr<const execution::ModelProfile> profil
     auto& capacity         = planner->capacity_plan;
     capacity.records       = base->persistent.context_records();
     const auto geometry    = describe_context_pool(capacity.records);
+    // Automatic lane fitting plans the session at the provisional shared ceiling, which a
+    // state-dense target cannot hold: one GDN State image rides every resident lane, so the
+    // ceiling's lane-scaled working sets exceed any single-device budget. Fit the session's
+    // lane capacity — and with it the KV table rows, graph capture buckets and decode workspace
+    // derived from the lane count — to the largest count whose working sets hold in the offered
+    // budget. The Engine still resolves the operational lane count from the constructed context
+    // capacity, bounded by this fitted capacity.
+    if (context_budget && options.automatic_lane_fitting && !inputs.causal_scoring) {
+        const auto lanes = fitted_session_lanes(inputs, geometry,
+                                                base->device_reservation_bytes, *context_budget);
+        if (lanes < inputs.max_concurrency) {
+            inputs.max_concurrency = lanes;
+            planner->inputs        = inputs;
+            base                   = build_sequence_candidate(inputs, 0);
+            capacity.records       = base->persistent.context_records();
+        }
+    }
     const auto working_set = [&](std::string name, std::uint32_t states, std::uint32_t main,
                                  std::uint32_t backend) {
         runtime::ContextStartupWorkingSet set{std::move(name)};

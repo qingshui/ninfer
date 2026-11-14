@@ -90,6 +90,13 @@ prepare_program(const Setup& setup, RankModelInstance<typename Setup::Types>& in
     StartupPhaseScope phase(options.startup_observer, StartupPhase::ProgramInitialize);
     for (unsigned attempts = 0; attempts < 2; ++attempts) {
         auto& startup             = plan.startup;
+        // Graph calibration re-plans against the graph reserve, which may fit the session's
+        // lane capacity below the value chosen before calibration. The sequence moves into the
+        // Program below, so the provisional automatic-fitting ceiling syncs down to the final
+        // session's lane capacity while the sequence still owns it.
+        if (options.automatic_lane_fitting)
+            options.max_concurrency =
+                std::min(options.max_concurrency, startup.sequence.max_concurrency());
         const auto explicit_bytes = startup.sequence.device_reservation_bytes();
         const auto host_bytes     = startup.sequence.host_capacity_bytes();
         const auto retained =
@@ -231,6 +238,14 @@ BuiltModel<typename Setup::Types> build_local_model(const artifact::Reader& read
     if (!candidate)
         throw std::invalid_argument(
             "Device budget cannot hold model weights and required execution resources");
+    // Automatic lane fitting plans the session at the shared ceiling, which a state-dense target
+    // may not hold: model planning may fit the session's lane capacity to the device budget
+    // below it. Every later consumer of the lane count inside construction — graph calibration
+    // probes, capture keys, the Engine's operational fit — follows the session's lane capacity,
+    // so the provisional value syncs down to it here.
+    if (options.automatic_lane_fitting)
+        options.max_concurrency =
+            std::min(options.max_concurrency, candidate->sequence.max_concurrency());
     binding.complete();
     using Types = typename Setup::Types;
     std::unique_ptr<RankModelInstance<Types>> instance;
@@ -275,6 +290,9 @@ BuiltModel<typename Setup::Types> build_local_model(const artifact::Reader& read
         candidate = choose(device_memory_snapshot(device.device()));
         if (!candidate)
             throw std::invalid_argument("Device budget cannot hold model execution resources");
+        if (options.automatic_lane_fitting)
+            options.max_concurrency =
+                std::min(options.max_concurrency, candidate->sequence.max_concurrency());
     }
     memory.context_capacities.front().available_after_weights_bytes = available_after_weights;
     memory.context_capacities.front().available_after_startup_bytes =

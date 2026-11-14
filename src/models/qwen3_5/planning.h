@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -137,13 +138,15 @@ private:
 
     friend SequencePlanner make_sequence_planner(std::shared_ptr<const execution::ModelProfile>,
                                                  DeviceContext&, const EngineOptions&,
-                                                 std::shared_ptr<const moe::Plan>);
+                                                 std::shared_ptr<const moe::Plan>,
+                                                 std::optional<std::size_t>);
 };
 
 [[nodiscard]] SessionPlan plan_session(const SequencePlan&);
-[[nodiscard]] SequencePlanner make_sequence_planner(std::shared_ptr<const execution::ModelProfile>,
-                                                    DeviceContext&, const EngineOptions&,
-                                                    std::shared_ptr<const moe::Plan> = {});
+[[nodiscard]] SequencePlanner
+make_sequence_planner(std::shared_ptr<const execution::ModelProfile>, DeviceContext&,
+                      const EngineOptions&, std::shared_ptr<const moe::Plan> = {},
+                      std::optional<std::size_t> context_budget = {});
 [[nodiscard]] SequencePlanner make_sequence_planner(const execution::Parameters&, DeviceContext&,
                                                     const EngineOptions&);
 [[nodiscard]] std::unique_ptr<RankProgram>

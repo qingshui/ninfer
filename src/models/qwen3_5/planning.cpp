@@ -118,9 +118,10 @@ SequencePlanner make_sequence_planner(const execution::Parameters& parameters,
 
 SequencePlanner make_sequence_planner(std::shared_ptr<const execution::ModelProfile> profile,
                                       DeviceContext& device, const EngineOptions& options,
-                                      std::shared_ptr<const moe::Plan> moe) {
-    auto impl =
-        detail::make_sequence_planner_impl(std::move(profile), device, options, std::move(moe));
+                                      std::shared_ptr<const moe::Plan> moe,
+                                      std::optional<std::size_t> context_budget) {
+    auto impl = detail::make_sequence_planner_impl(std::move(profile), device, options,
+                                                   std::move(moe), context_budget);
     auto spec                    = context_spec(*impl->minimum);
     impl->capacity_plan.metadata = context::ContextDirectory::metadata_plan(spec);
     auto& metadata               = impl->capacity_plan.metadata;

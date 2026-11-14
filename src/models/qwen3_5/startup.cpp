@@ -48,7 +48,10 @@ Startup::plan(DeviceContext& device, const EngineOptions& options, WeightPlaceme
     const auto& policy           = options.context_capacity;
     constexpr bool shared_memory = NINFER_SHARED_PHYSICAL_MEMORY != 0;
     auto prototype               = host_experts ? offload_ : nullptr;
-    auto planner                 = make_sequence_planner(profile, device, trial, prototype);
+    // The offered budget is the planning authority for automatic lane fitting: the session's
+    // lane capacity fits to it when the provisional ceiling does not hold.
+    auto planner                 = make_sequence_planner(profile, device, trial, prototype,
+                                                          available);
     const auto& capacity_plan    = planner.capacity_plan();
     const auto required_context  = policy.mode == ContextCapacityMode::Explicit
                                        ? runtime::ContextCapacity{policy.explicit_bytes}
@@ -67,7 +70,7 @@ Startup::plan(DeviceContext& device, const EngineOptions& options, WeightPlaceme
                  options.max_concurrency * (options.speculative.draft_tokens + 1)));
     auto moe = offload_->resolve(available - required_bytes, max_tokens, options.moe.cpu_workers);
     if (!moe) return std::nullopt;
-    auto final                 = make_sequence_planner(profile, device, trial, moe);
+    auto final                 = make_sequence_planner(profile, device, trial, moe, available);
     const auto& final_capacity = final.capacity_plan();
     if (final_capacity.reservation_bytes(required_context) +
             (shared_memory ? final_capacity.control_bytes(required_context) : 0) >

@@ -51,6 +51,10 @@ struct ExecutionPlan {
     [[nodiscard]] std::size_t host_capacity_bytes() const { return host_context_bytes; }
 
     [[nodiscard]] std::size_t context_capacity() const { return capacity.device_bytes; }
+
+    // Lane capacity the session was planned for; the Engine bounds a capacity-fitted lane
+    // count by it.
+    [[nodiscard]] std::uint32_t max_concurrency() const { return shape.max_concurrency; }
 };
 
 [[nodiscard]] ExecutionShape describe_execution_shape(const EngineOptions&);

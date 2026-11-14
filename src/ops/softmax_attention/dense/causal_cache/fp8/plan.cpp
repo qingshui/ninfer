@@ -1,4 +1,5 @@
 #include "ops/softmax_attention/dense/causal_cache/fp8/plan.h"
+#include "ninfer/types.h"
 #include "ops/softmax_attention/kernels/causal/operands.h"
 #include "ops/softmax_attention/dense/causal_cache/fp8/instances.h"
 #include <algorithm>
@@ -24,9 +25,10 @@ constexpr int grouped_token_limit(int heads) {
                : 64 / (heads == 24 ? 6 : heads == 32 ? 16 : 8);
 }
 
-// The Hq=32, Hkv=2 service profile carries the full concurrent decode pool.
+// The Hq=32, Hkv=2 service profile spans the full engine concurrency ceiling.
 constexpr int plan_batch_limit(int heads) {
-    return heads == 32 ? 520 : heads == 8 ? 16 : 8;
+    return heads == 32 ? static_cast<int>(ninfer::kMaximumConcurrency)
+                       : heads == 8 ? 16 : 8;
 }
 
 // Minimize waves per KV partition, retaining fewer partitions on a tie.

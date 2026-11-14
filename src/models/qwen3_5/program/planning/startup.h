@@ -87,7 +87,8 @@ struct SequencePlannerImpl {
 [[nodiscard]] std::unique_ptr<qwen3_5::detail::SequencePlannerImpl>
 make_sequence_planner_impl(std::shared_ptr<const execution::ModelProfile> profile,
                            DeviceContext& device, const EngineOptions& options,
-                           std::shared_ptr<const moe::Plan> moe = {});
+                           std::shared_ptr<const moe::Plan> moe = {},
+                           std::optional<std::size_t> context_budget = {});
 [[nodiscard]] std::unique_ptr<SequencePlanImpl>
 finalize_sequence_plan_impl(std::unique_ptr<qwen3_5::detail::SequencePlannerImpl> planner,
                             runtime::ContextCapacity capacity);

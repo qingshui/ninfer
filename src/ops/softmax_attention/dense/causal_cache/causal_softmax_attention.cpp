@@ -1,4 +1,5 @@
 #include "ninfer/ops/softmax_attention.h"
+#include "ninfer/types.h"
 
 #include "core/layout.h"
 #include "ops/common/host/operands.h"
@@ -30,9 +31,11 @@ constexpr std::int32_t kMaximumVerifyTokens = 16;
 constexpr std::int32_t kMaximumBatchSize    = 8;
 // The Hq=8, Hkv=2 profile serves wider verification batches.
 constexpr std::int32_t kMaximumWideBatchSize = 16;
-// The Hq=32, Hkv=2 service profile carries the full concurrent decode pool
-// (130 concurrent requests x 4 completion sequences each = 520 rows).
-constexpr std::int32_t kMaximumServiceBatchSize = 520;
+// The Hq=32, Hkv=2 service profile spans the full engine concurrency ceiling: automatic lane
+// fitting plans the workspace at kMaximumConcurrency lanes and the model planning loop probes
+// every decode batch up to it, so the registered execution domain must cover the same range.
+constexpr std::int32_t kMaximumServiceBatchSize =
+    static_cast<std::int32_t>(ninfer::kMaximumConcurrency);
 
 std::int32_t maximum_batch_size(AttentionHeadGeometry geometry) {
     if (geometry.query_heads == 32) return kMaximumServiceBatchSize;
