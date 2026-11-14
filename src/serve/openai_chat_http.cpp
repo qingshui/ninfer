@@ -8,7 +8,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <exception>
-#include <functional>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -24,19 +23,6 @@ std::string sse_error_event(const ApiError& error) {
     return "data: " + make_error_body(error) + "\n\n";
 }
 
-// One Chat Completions request fans out to one prepared request per requested sample. Every
-// sample is prepared up front and consumed exactly once; all samples render the same prompt, so
-// the Engine's prefix reuse and context cache share their prefill. This owner keeps the
-// prepared samples and their transport flags alive across the chunked-content provider.
-struct ChatGenerationStream {
-    explicit ChatGenerationStream(std::vector<PreparedRequest> requests)
-        : prepared(std::move(requests)) {}
-
-    std::vector<PreparedRequest> prepared;
-    std::atomic<bool> cancelled{false};
-    std::atomic<bool> started{false};
-};
-
 // Request-level accounting for one HTTP request: the first sample's content with every sample's
 // completion tokens. Measurement logs stay one record per HTTP request.
 GenerationOutcome aggregate_outcomes(const std::vector<GenerationOutcome>& outcomes) {
@@ -47,48 +33,6 @@ GenerationOutcome aggregate_outcomes(const std::vector<GenerationOutcome>& outco
         aggregate.reasoning_tokens += outcomes[index].reasoning_tokens;
     }
     return aggregate;
-}
-
-// Runs every prepared sample of one request in parallel, one thread per sample, and returns one
-// outcome per sample in sample order. A failing sample signals its siblings to stop; the
-// first-originating failure is rethrown only after every sample settled, so cancellation errors
-// raised by the stop signal never mask the failure that caused it.
-std::vector<GenerationOutcome>
-run_parallel_samples(GenerationService& service, std::vector<PreparedRequest>& prepared,
-                     const std::function<bool()>& is_cancelled) {
-    std::vector<GenerationOutcome> outcomes(prepared.size());
-    std::vector<std::thread> workers;
-    workers.reserve(prepared.size());
-    std::atomic<bool> stop{false};
-    std::atomic<bool> failure_recorded{false};
-    std::exception_ptr failure;
-    const auto run_sample = [&](std::size_t index) {
-        try {
-            outcomes[index] = service.run(
-                prepared[index], nullptr,
-                [&] {
-                    return stop.load(std::memory_order_acquire) ||
-                           (is_cancelled && is_cancelled());
-                });
-        } catch (...) {
-            if (!failure_recorded.exchange(true, std::memory_order_acq_rel)) {
-                failure = std::current_exception();
-            }
-            stop.store(true, std::memory_order_release);
-        }
-    };
-    try {
-        for (std::size_t index = 0; index < prepared.size(); ++index) {
-            workers.emplace_back(run_sample, index);
-        }
-    } catch (...) {
-        stop.store(true, std::memory_order_release);
-        for (std::thread& worker : workers) { worker.join(); }
-        throw;
-    }
-    for (std::thread& worker : workers) { worker.join(); }
-    if (failure) { std::rethrow_exception(failure); }
-    return outcomes;
 }
 
 } // namespace
@@ -124,13 +68,10 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
         // All samples of one request are prepared up front and run in parallel: every sample
         // renders the same prompt, so the Engine's prefix reuse and context cache share their
         // prefill instead of the request chaining one sample's published source into the next.
-        prepared.reserve(static_cast<std::size_t>(request.sample_count));
-        for (int index = 0; index < request.sample_count; ++index) {
-            prepared.push_back(service_->prepare_sample(
-                request.generation, request.sample_count, index,
-                request.stream ? GenerationConsumerMode::Streaming : GenerationConsumerMode::Aggregate,
-                observation, [&req] { return client_disconnected(req); }));
-        }
+        prepared = prepare_chat_samples(
+            *service_, request.generation, request.sample_count,
+            request.stream ? GenerationConsumerMode::Streaming : GenerationConsumerMode::Aggregate,
+            observation, [&req] { return client_disconnected(req); });
     } catch (const ApiException& exception) {
         record_request_rejected(make_request_rejection_log_context(
             req_id, "openai_chat_completions", request.generation, metadata, exception.error()));

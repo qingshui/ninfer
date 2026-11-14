@@ -3,6 +3,7 @@ add_library(ninfer_serve STATIC
   request_validation.cpp
   openai_chat_request.cpp
   openai_chat_response.cpp
+  openai_chat.cpp
   openai_chat_http.cpp
   openai_common.cpp
   openai_responses_request.cpp

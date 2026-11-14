@@ -3,13 +3,16 @@
 // OpenAI Chat Completions wire adapter. Parsing produces one protocol envelope plus an executable
 // GenerationRequest; response builders consume protocol-neutral GenerationOutcome values.
 
+#include "serve/generation_service.h"
 #include "serve/request.h"
 #include "serve/request_json.h"
 #include "serve/tool_stream_state.h"
 
 #include <nlohmann/json.hpp>
 
+#include <atomic>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <string>
 #include <vector>
@@ -49,6 +52,33 @@ std::string make_chat_completion_response(const OpenAIChatResponseIdentity& iden
 // Single-sample form; identical to the multi-sample form with exactly one outcome.
 std::string make_chat_completion_response(const OpenAIChatResponseIdentity& identity,
                                           const GenerationOutcome& outcome);
+
+// Multi-sample fan-out of one Chat Completions request. One prepared request per requested
+// sample, all prepared up front when the request is admitted and each consumed exactly once.
+struct ChatGenerationStream {
+    explicit ChatGenerationStream(std::vector<PreparedRequest> requests);
+
+    std::vector<PreparedRequest> prepared;
+    std::atomic<bool> cancelled{false};
+    std::atomic<bool> started{false};
+};
+
+// Prepares every sample of one request at admission, in sample order. Every sample renders the
+// same prompt, so the Engine's prefix reuse and context cache share their prefill instead of the
+// request chaining one sample's published source into the next.
+[[nodiscard]] std::vector<PreparedRequest>
+prepare_chat_samples(const GenerationService& service, const GenerationRequest& generation,
+                     int sample_count, GenerationConsumerMode consumer_mode,
+                     const ninfer::GenerationObservationOptions& observation,
+                     std::function<bool()> is_cancelled);
+
+// Runs every prepared sample of one request in parallel, one thread per sample, and returns one
+// outcome per sample in sample order. A failing sample signals its siblings to stop; the
+// first-originating failure is rethrown only after every sample settled, so cancellation errors
+// raised by the stop signal never mask the failure that caused it.
+[[nodiscard]] std::vector<GenerationOutcome>
+run_parallel_samples(GenerationService& service, std::vector<PreparedRequest>& prepared,
+                     const std::function<bool()>& is_cancelled);
 
 class OpenAIChatStream {
 public:
