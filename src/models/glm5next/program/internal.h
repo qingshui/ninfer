@@ -1,5 +1,6 @@
 #pragma once
 #include "models/common/vocabulary.h"
+#include "models/glm5next/config.h"
 #include "models/glm5next/execution/mtp.h"
 #include "models/glm5next/execution/text.h"
 #include "models/glm5next/program/graphs.h"
@@ -137,7 +138,7 @@ public:
     GraphMemorySummary graph_memory;
     std::unique_ptr<ComputeFrame> compute;
     std::unique_ptr<ContextFrame> context;
-    std::array<std::optional<runtime::ExecutionMember>, kMaximumConcurrency> bindings;
+    std::array<std::optional<runtime::ExecutionMember>, kMaximumSupportedConcurrency> bindings;
     std::deque<runtime::ExecutionEvent<ExecutionTypes>> events;
     runtime::ExecutionGpuTimer timer;
     std::optional<CudaEventTimer> prefill_timer;

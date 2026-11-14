@@ -4,6 +4,7 @@
 #include "models/common/context/directory.h"
 #include "models/common/context/recovery.h"
 #include "models/common/context/release_inventory.h"
+#include "models/spark2_5/options.h"
 #include "models/spark2_5/frontend/prepared_prompt.h"
 #include "models/spark2_5/session/planning.h"
 #include "models/spark2_5/work.h"
@@ -172,7 +173,7 @@ private:
     std::vector<std::int32_t> counts_;
     std::uint32_t stride_ = 1;
     bool decode_          = false;
-    std::array<bool, kMaximumConcurrency> failed_{};
+    std::array<bool, kMaximumSupportedConcurrency> failed_{};
     ExecutionSample execution_;
     friend class detail::SessionImpl;
     friend class Session;
@@ -218,8 +219,8 @@ struct CommitRowResult {
 };
 
 struct CommitResult {
-    std::array<CommitRowResult, kMaximumConcurrency> rows{};
-    std::array<bool, kMaximumConcurrency> capture_ready{};
+    std::array<CommitRowResult, kMaximumSupportedConcurrency> rows{};
+    std::array<bool, kMaximumSupportedConcurrency> capture_ready{};
     std::size_t row_count = 0;
 };
 

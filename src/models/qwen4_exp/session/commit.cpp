@@ -1,3 +1,4 @@
+#include "models/qwen4_exp/config.h"
 #include "models/qwen4_exp/session/internal.h"
 
 #include <algorithm>
@@ -71,7 +72,7 @@ void SessionImpl::finish_result(ComputeResult result) {
 
     tx.completion = std::make_unique<context::ContextTransaction>(directory);
     Commit commit;
-    std::array<ContinuationMetadata, kMaximumConcurrency> completed{};
+    std::array<ContinuationMetadata, kMaximumSupportedConcurrency> completed{};
     commit.rows.reserve(tx.members.size());
     const bool retain_recovery = tx.kind == Kind::Replay;
     for (std::size_t b = 0; b < tx.members.size(); ++b) {
@@ -206,7 +207,7 @@ CommitResult Session::commit(PendingBatch&& batch,
     }
     CommitResult result;
     result.row_count = decisions.size();
-    std::array<ContinuationMetadata, kMaximumConcurrency> completed{};
+    std::array<ContinuationMetadata, kMaximumSupportedConcurrency> completed{};
     try {
         tx.decisions.assign(decisions.begin(), decisions.end());
         tx.completion = std::make_unique<context::ContextTransaction>(p.directory);

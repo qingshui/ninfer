@@ -1,3 +1,4 @@
+#include "models/qwen4_exp/config.h"
 #include "models/qwen4_exp/program/internal.h"
 #include "core/nvtx.h"
 #include "models/qwen4_exp/execution/mtp.h"
@@ -153,7 +154,7 @@ void RankProgramImpl::align_mtp(std::span<const WorkRow> rows, std::uint32_t tok
     const auto first    = rows.front().main_frontier;
     const auto skip     = batch == 1 && first == 0 ? 1U : 0U;
     const auto width    = std::max(1U, tokens - skip);
-    std::array<MtpInputRow, kMaximumConcurrency> inputs;
+    std::array<MtpInputRow, kMaximumSupportedConcurrency> inputs;
     for (int b = 0; b < batch; ++b) {
         inputs[b] = {rows[b].mtp_frontier,
                      std::span<const TokenId>(rows[b].ids).subspan(skip, tokens - skip)};
@@ -223,7 +224,7 @@ void RankProgramImpl::prepare_mtp() {
     const auto& frame   = *buffers.mtp;
     const auto batch    = static_cast<std::int32_t>(f.rows.size());
     const auto k = shape.draft_tokens, width = k + 1;
-    std::array<ple::InputRow, kMaximumConcurrency> inputs;
+    std::array<ple::InputRow, kMaximumSupportedConcurrency> inputs;
     for (int b = 0; b < batch; ++b) {
         const auto& row = f.rows[b];
         inputs[b] = {{row.member.sequence.value, row.member.sequence.generation, row.main_frontier,
@@ -249,7 +250,7 @@ void RankProgramImpl::prepare_mtp() {
     std::vector<execution::BatchView> calls;
     calls.reserve(steps);
     for (std::uint32_t step = 0; step < steps; ++step) {
-        std::array<MtpInputRow, kMaximumConcurrency> step_inputs;
+        std::array<MtpInputRow, kMaximumSupportedConcurrency> step_inputs;
         for (int b = 0; b < batch; ++b)
             step_inputs[b] = {f.rows[b].main_frontier - 1 + std::min(step, round.extents[b]),
                               step == 0 || step < round.extents[b]
@@ -280,7 +281,7 @@ void RankProgramImpl::prepare_mtp() {
             }
         }
     }
-    std::array<std::uint32_t, kMaximumConcurrency> valid;
+    std::array<std::uint32_t, kMaximumSupportedConcurrency> valid;
     gpu_timer.end_draft();
     for (int b = 0; b < batch; ++b) valid[b] = round.extents[b] + 1;
     if (host_ple) host_ple->seal(*f.ple, {valid.data(), f.rows.size()});

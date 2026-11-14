@@ -1,5 +1,6 @@
 #pragma once
 
+#include "models/spark2_5/options.h"
 #include "models/spark2_5/execution/text.h"
 #include "models/spark2_5/program/graphs.h"
 #include "models/spark2_5/program/program.h"
@@ -118,7 +119,7 @@ public:
     GraphMemorySummary graph_memory;
     std::unique_ptr<ComputeFrame> compute;
     std::unique_ptr<ContextFrame> context;
-    std::array<std::optional<runtime::ExecutionMember>, kMaximumConcurrency> bindings;
+    std::array<std::optional<runtime::ExecutionMember>, kMaximumSupportedConcurrency> bindings;
     std::deque<runtime::ExecutionEvent<ExecutionTypes>> events;
     runtime::ExecutionGpuTimer timer;
     std::optional<CudaEventTimer> prefill_timer;

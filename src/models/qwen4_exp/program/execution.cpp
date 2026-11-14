@@ -1,3 +1,4 @@
+#include "models/qwen4_exp/config.h"
 #include "models/qwen4_exp/program/internal.h"
 #include "models/qwen4_exp/program/device_graphs.h"
 #include "core/transfer.h"
@@ -124,7 +125,7 @@ void RankProgramImpl::prepare_forward() {
         request_decision();
         return;
     }
-    std::array<ple::InputRow, kMaximumConcurrency> inputs;
+    std::array<ple::InputRow, kMaximumSupportedConcurrency> inputs;
     for (std::size_t b = 0; b < f.rows.size(); ++b) {
         const auto& row = f.rows[b];
         inputs[b] = {{row.member.sequence.value, row.member.sequence.generation, row.main_frontier,

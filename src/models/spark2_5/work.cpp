@@ -1,3 +1,4 @@
+#include "models/spark2_5/options.h"
 #include "models/spark2_5/work.h"
 #include "models/common/context/wire.h"
 #include "runtime/executor/protocol.h"
@@ -180,7 +181,7 @@ void WorkContract::validate(const Work& work, runtime::FrameKind kind) const {
                     operation.bindings.size() > shape.max_concurrency ||
                     operation.releases.size() > shape.max_concurrency)
                     throw std::invalid_argument("invalid Spark2_5 context reservation");
-                std::array<bool, kMaximumConcurrency> installed{}, released{};
+                std::array<bool, kMaximumSupportedConcurrency> installed{}, released{};
                 for (auto r : operation.releases) {
                     if (r.lane.value >= shape.max_concurrency || !r.generation ||
                         released[r.lane.value])
@@ -210,7 +211,7 @@ void validate_decision_rows(const runtime::DecisionInput& input, std::uint32_t s
                             std::uint32_t vocabulary, std::span<const std::uint32_t> positions) {
     if (input.stage != stage) throw std::invalid_argument("Spark2_5 decision stage differs");
     const auto words = (std::size_t(vocabulary) + 31) / 32;
-    std::array<bool, kMaximumConcurrency> seen{};
+    std::array<bool, kMaximumSupportedConcurrency> seen{};
     if (positions.size() > seen.size())
         throw std::invalid_argument("Spark2_5 decision batch is too large");
     for (const auto& row : input.rows) {
@@ -229,7 +230,7 @@ void validate_decision_rows(const runtime::DecisionInput& input, std::uint32_t s
 void WorkContract::validate(const Work& work, const runtime::DecisionRequest& request,
                             const runtime::DecisionInput& input) const {
     const auto rows = work_rows(work);
-    std::array<std::uint32_t, kMaximumConcurrency> positions{};
+    std::array<std::uint32_t, kMaximumSupportedConcurrency> positions{};
     if (rows.size() > positions.size() || request.vocabulary != public_tokens)
         throw std::invalid_argument("Spark2_5 decision request differs from its work");
     for (const auto& row : request.rows) {

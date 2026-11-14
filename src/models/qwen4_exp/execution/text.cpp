@@ -1,3 +1,4 @@
+#include "models/qwen4_exp/config.h"
 #include "models/qwen4_exp/execution/text.h"
 #include "models/qwen4_exp/execution/gdn.h"
 #include "models/qwen4_exp/execution/qsa.h"
@@ -18,7 +19,7 @@ TextRun::TextRun(const Parameters& p, TextExecution execution, BatchView batch, 
       expert_activity_(execution.experts ? execution.experts->begin(batch.tokens * batch.batch)
                                          : std::nullopt) {
     if (batch.tokens <= 0 || batch.batch < 1 ||
-        batch.batch > static_cast<std::int32_t>(kMaximumConcurrency) ||
+        batch.batch > static_cast<std::int32_t>(kMaximumSupportedConcurrency) ||
         (std::holds_alternative<SequenceState>(update) && batch.batch != 1) ||
         (std::holds_alternative<StepUpdate>(update) && batch.tokens != 1) ||
         (std::holds_alternative<VerifyRecords>(update) && batch.tokens < 2))

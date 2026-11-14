@@ -1,5 +1,7 @@
 // Engine concurrency ceiling and model-owned KV defaults.
 // Host checks cover the shared ceiling, per-model defaults and construct_model resolution.
+// Zero selects automatic lane fitting: construct_model plans at the shared ceiling and the
+// Engine replaces the provisional value with the capacity-fitted lane count.
 // The Qwen3.5 plan check needs a CUDA device handle and returns 77 when none exists.
 #include "artifact/fixture.h"
 #include "core/device.h"
@@ -10,6 +12,7 @@
 #include "models/qwen3_5/program/planning/startup.h"
 #include "models/qwen4_exp/config.h"
 #include "models/qwen4_exp/program/planning.h"
+#include "models/spark2_5/options.h"
 #include "runtime/engine/startup.h"
 
 #include <cuda_runtime.h>
@@ -52,15 +55,22 @@ EngineOptions engine_options(std::uint32_t concurrency) {
 }
 
 void test_shared_ceiling() {
-    static_assert(kMaximumConcurrency == 16);
-    for (const std::uint32_t invalid : {0U, 17U}) {
-        const auto message = rejection(
-            [&] { (void)runtime::normalize_engine_options(engine_options(invalid)); });
-        require(contains(message, "max_concurrency must be in [1,16]"),
-                "Engine accepted a concurrency outside [1,16]");
-    }
-    auto accepted = runtime::normalize_engine_options(engine_options(16));
-    require(accepted.max_concurrency == 16, "Engine rejected the maximum concurrency");
+    static_assert(kMaximumConcurrency == 1024);
+    const auto message = rejection(
+        [&] { (void)runtime::normalize_engine_options(engine_options(1025)); });
+    require(contains(message, "max_concurrency must be in [1,1024]"),
+            "Engine accepted a concurrency above 1024");
+    // Zero selects automatic lane fitting and survives normalization for a Generation Engine.
+    auto automatic = runtime::normalize_engine_options(engine_options(0));
+    require(automatic.max_concurrency == 0,
+            "Engine normalization discarded automatic lane fitting");
+    auto scoring          = engine_options(0);
+    scoring.purpose       = EnginePurpose::CausalScoring;
+    auto normalized_score = runtime::normalize_engine_options(scoring);
+    require(normalized_score.max_concurrency == 1,
+            "Engine normalization did not pin a scoring Engine to a single lane");
+    auto accepted = runtime::normalize_engine_options(engine_options(1024));
+    require(accepted.max_concurrency == 1024, "Engine rejected the maximum concurrency");
     require(!accepted.kv_cache, "normalization resolved a model-owned KV default");
     accepted = runtime::normalize_engine_options(engine_options(1));
     require(accepted.max_concurrency == 1, "Engine rejected a single lane");
@@ -80,9 +90,10 @@ void test_model_defaults() {
     static_assert(noexcept(models::qwen3_5::resolve_kv_cache(EngineOptions{})));
     static_assert(noexcept(models::qwen4_exp::resolve_kv_cache(EngineOptions{})));
     static_assert(noexcept(models::glm5next::resolve_kv_cache(EngineOptions{})));
-    static_assert(models::qwen3_5::kMaximumSupportedConcurrency == 16);
+    static_assert(models::qwen3_5::kMaximumSupportedConcurrency == 1024);
     static_assert(models::qwen4_exp::kMaximumSupportedConcurrency == 8);
     static_assert(models::glm5next::kMaximumSupportedConcurrency == 8);
+    static_assert(models::spark2_5::kMaximumSupportedConcurrency == 16);
     check_resolution([](const EngineOptions& o) { return models::qwen3_5::resolve_kv_cache(o); },
                      models::qwen3_5::kDefaultKvCacheStorage, "Qwen3.5 KV resolution");
     check_resolution([](const EngineOptions& o) { return models::qwen4_exp::resolve_kv_cache(o); },
@@ -122,6 +133,24 @@ void test_construct_model_resolution() {
     }
 }
 
+// Automatic lane fitting plans at the shared ceiling: construct_model substitutes the ceiling
+// for zero before dispatching to model construction.
+void test_construct_model_automatic_plans_at_ceiling() {
+    fixture::Fixture artifact;
+    artifact.root["components"]["text"]["config"] = {
+        {"architectures", {"Qwen3_5ForCausalLM"}}, {"model_type", "qwen3_5_text"}};
+    artifact.write();
+    auto options          = engine_options(0);
+    options.artifact_path = artifact.entry;
+    bool failed           = false;
+    try {
+        (void)runtime::construct_model(options);
+    } catch (const std::exception&) { failed = true; }
+    require(failed, "an artifact without a model was constructed");
+    require(options.max_concurrency == kMaximumConcurrency,
+            "construct_model did not plan automatic lane fitting at the shared ceiling");
+}
+
 template <class Plan>
 void check_limit(Plan plan, const char* limit_text, const char* model) {
     for (const std::uint32_t concurrency : {9U, 16U}) {
@@ -159,22 +188,25 @@ int test_qwen3_5_plan_limit() {
     profile.config.text.max_position_embeddings = 1U << 20;
     auto shared = std::make_shared<const q::execution::ModelProfile>(std::move(profile));
     DeviceContext device(0);
-    for (const std::uint32_t concurrency : {17U, 520U}) {
+    for (const std::uint32_t concurrency : {0U, 1025U}) {
         auto options          = engine_options(concurrency);
         options.prefill_chunk = 1024;
         require(contains(rejection([&] {
                              (void)q::detail::make_sequence_planner_impl(shared, device, options);
                          }),
-                         "[1,16]"),
-                "Qwen3.5 accepted more lanes than its limit");
+                         "[1,1024]"),
+                "Qwen3.5 accepted a lane count outside its limit");
     }
-    auto at_limit          = engine_options(16);
-    at_limit.prefill_chunk = 1024;
-    require(!contains(rejection([&] {
-                          (void)q::detail::make_sequence_planner_impl(shared, device, at_limit);
-                      }),
-                      "[1,16]"),
-            "Qwen3.5 rejected a lane count within its limit");
+    // Within [1,1024] the plan reaches later, unrelated checks of the empty profile.
+    for (const std::uint32_t concurrency : {17U, 520U, 1024U}) {
+        auto options          = engine_options(concurrency);
+        options.prefill_chunk = 1024;
+        require(!contains(rejection([&] {
+                              (void)q::detail::make_sequence_planner_impl(shared, device, options);
+                          }),
+                          "[1,1024]"),
+                "Qwen3.5 rejected a lane count within its limit");
+    }
     return 0;
 }
 
@@ -185,6 +217,7 @@ int main() {
         test_shared_ceiling();
         test_model_defaults();
         test_construct_model_resolution();
+        test_construct_model_automatic_plans_at_ceiling();
         test_model_plan_limits();
         const int qwen3_5 = test_qwen3_5_plan_limit();
         if (qwen3_5 == 77) std::cout << "no CUDA device; Qwen3.5 plan check skipped\n";

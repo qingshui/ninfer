@@ -21,7 +21,10 @@ namespace ninfer {
 
 using TokenId = std::int32_t;
 
-inline constexpr std::uint32_t kMaximumConcurrency               = 16;
+// Validation ceiling shared by every architecture: the accepted domain of
+// EngineOptions::max_concurrency (plus zero for automatic lane fitting). This bound is not a
+// table or slot count; lane tables derive their own limits from model-owned constants.
+inline constexpr std::uint32_t kMaximumConcurrency               = 1024;
 inline constexpr std::size_t kMaximumContextCacheSessionKeyBytes = 256;
 inline constexpr std::size_t kMaximumExplicitPromptCacheMarkers  = 4;
 // Aggregate encoded image/video payload retained by one prompt, independent of item count.
@@ -162,6 +165,10 @@ struct EngineOptions {
     ContextCapacityPolicy context_capacity;
     // Per-rank planning allowance that startup allocations may consume. Zero adds no allowance.
     std::size_t memory_headroom_bytes  = kDefaultMemoryHeadroomBytes;
+    // Resident execution lanes in [1,kMaximumConcurrency]. Zero selects automatic lane fitting
+    // for a Generation Engine: after construction resolves the context token capacity, the
+    // Engine clamps the lane count from that estimate and reports the resolved value. Causal
+    // Scoring normalizes to a single lane.
     std::uint32_t max_concurrency      = 1;
     std::uint32_t max_pending_requests = 16;
     std::uint32_t pending_timeout_ms   = 30000;

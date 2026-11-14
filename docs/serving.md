@@ -1153,8 +1153,13 @@ raw counters and seconds over rounded stderr rates.
 
 ## Execution behavior
 
-The server owns one Engine with `1..8` execution lanes fixed at startup, locally or across its
-configured ranks. Decode-ready requests are batched at execution boundaries. A request becomes
+The server owns one Engine with `0..1024` execution lanes fixed at startup, locally or across its
+configured ranks. The serving default `--max-concurrency 0` selects automatic lane fitting: after
+construction resolves the model's context token capacity, the Engine sets its lane count to
+`clamp(context_token_capacity_estimate / max_context, 1, 1024)` and reports the resolved value
+(`ninfer_max_concurrency`). Explicit `--max-concurrency`/`engine.max_concurrency` values override
+the automatic choice; models that do not support the fitted lane count reject it at startup.
+Decode-ready requests are batched at execution boundaries. A request becomes
 decode-ready after prefill; completed or cancelled requests leave subsequent work. CUDA Graph
 execution follows the model's compute and commit boundaries, including owner-local attention for
 GLM attention DP.

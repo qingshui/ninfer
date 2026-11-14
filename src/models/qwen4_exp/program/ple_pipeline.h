@@ -1,5 +1,6 @@
 #pragma once
 
+#include "models/qwen4_exp/config.h"
 #include "models/qwen4_exp/ple/upload.h"
 #include "runtime/executor/contract.h"
 
@@ -51,7 +52,7 @@ private:
         std::uint32_t tokens;
         std::vector<ple::SequenceIdentity> rows;
         std::vector<std::int32_t> ids;
-        std::array<std::uint32_t, kMaximumConcurrency> known{}, valid{};
+        std::array<std::uint32_t, kMaximumSupportedConcurrency> known{}, valid{};
         bool seal_requested = false, sealed = false;
         std::uint32_t append_count = 0, next_append = 0;
         bool uploaded = false, acquired = false, consumed = false, cancelled = false;
@@ -61,7 +62,7 @@ private:
     struct DeviceAppend {
         CudaCompletionEvent produced, copied;
         ple::Ticket ticket{};
-        std::array<bool, kMaximumConcurrency> active{};
+        std::array<bool, kMaximumSupportedConcurrency> active{};
         std::uint32_t batch = 0;
         bool pending        = false;
 

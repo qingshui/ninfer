@@ -1,5 +1,6 @@
 #pragma once
 
+#include "models/qwen4_exp/config.h"
 #include "models/qwen4_exp/session/session.h"
 #include "models/qwen4_exp/state/continuation.h"
 #include "models/qwen4_exp/definition.h"
@@ -346,8 +347,8 @@ public:
     Checkpoints checkpoints;
     context::MetadataAccount count_storage{directory.metadata_budget()};
     TokenCountBuilder count_builder;
-    std::array<std::unique_ptr<Sequence>, kMaximumConcurrency> sequences;
-    std::array<std::uint64_t, kMaximumConcurrency> epochs{};
+    std::array<std::unique_ptr<Sequence>, kMaximumSupportedConcurrency> sequences;
+    std::array<std::uint64_t, kMaximumSupportedConcurrency> epochs{};
     std::vector<runtime::KvPoolDescriptor> pools;
     std::unique_ptr<ContextOperation> operation;
     std::optional<ContextAssessment> pending_maintenance;

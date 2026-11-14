@@ -140,9 +140,10 @@ struct Config {
 // Model-owned defaults and limits for the shared EngineOptions fields.
 inline constexpr KvCacheStorage kDefaultKvCacheStorage = KvCacheStorage::BFloat16;
 // Upper bound of resident execution lanes for Qwen3.5 targets, aligned with the shared
-// engine ceiling. Serving load above this bound (130 clients x n=4 samples peaks at 520
-// in-flight sequences) queues in the engine's pending pool instead of resident lanes.
-inline constexpr std::uint32_t kMaximumSupportedConcurrency = 16;
+// engine ceiling. Zero (automatic lane fitting) plans at this ceiling and the Engine resolves
+// the fitted lane count from the context capacity. Serving load above the resolved bound
+// queues in the engine's pending pool instead of resident lanes.
+inline constexpr std::uint32_t kMaximumSupportedConcurrency = 1024;
 
 [[nodiscard]] inline KvCacheStorage resolve_kv_cache(const EngineOptions& options) noexcept {
     return options.kv_cache.value_or(kDefaultKvCacheStorage);

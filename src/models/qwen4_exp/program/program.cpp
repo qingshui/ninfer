@@ -1,3 +1,4 @@
+#include "models/qwen4_exp/config.h"
 #include "models/qwen4_exp/program/internal.h"
 #include "models/qwen4_exp/program/device_graphs.h"
 #include "core/startup.h"
@@ -80,7 +81,7 @@ void RankProgramImpl::validate_work(const Work& work, runtime::FrameKind kind) c
         forward && forward->prefetch)
         check_resident(forward->prefetch->member);
     if (const auto* context = std::get_if<ContextWork>(&work.operation)) {
-        std::array<bool, kMaximumConcurrency> released{};
+        std::array<bool, kMaximumSupportedConcurrency> released{};
         for (const auto residency : context->releases) {
             const auto lane = residency.lane.value;
             if (!bindings[lane] || bindings[lane]->member.residency != residency)
@@ -114,7 +115,7 @@ void RankProgramImpl::validate_decision(runtime::ExecutionTicket ticket,
         compute->phase == ComputePhase::Retiring)
         throw std::logic_error("Qwen4Exp decision does not match the active execution");
     const auto& frame = *compute;
-    std::array<std::uint32_t, kMaximumConcurrency> positions{};
+    std::array<std::uint32_t, kMaximumSupportedConcurrency> positions{};
     for (std::size_t b = 0; b < frame.rows.size(); ++b)
         if (frame.rows[b].constrained)
             positions[b] = frame.verify ? frame.verify->extents[b] + 1 : 1;

@@ -1,3 +1,4 @@
+#include "models/glm5next/config.h"
 #include "models/glm5next/program/internal.h"
 
 #include "core/nvtx.h"
@@ -126,7 +127,7 @@ void RankProgramImpl::prepare_mtp() {
     f.physical = f.request.work.batch;
     f.tokens   = width;
     f.sequence = false;
-    std::array<std::uint32_t, kMaximumConcurrency> valid{}, skip_first{};
+    std::array<std::uint32_t, kMaximumSupportedConcurrency> valid{}, skip_first{};
     for (int i = 0; i < b; ++i) {
         valid[i]      = work.draft_extents[i] + 1;
         skip_first[i] = work.draft_extents[i] != 0;

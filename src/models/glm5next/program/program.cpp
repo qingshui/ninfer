@@ -1,3 +1,4 @@
+#include "models/glm5next/config.h"
 #include "models/glm5next/program/internal.h"
 
 #include "core/transfer.h"
@@ -63,7 +64,7 @@ void RankProgramImpl::validate_work(const Work& work, runtime::FrameKind kind) c
             throw std::invalid_argument("GLM5Next MTP table row exceeds rank storage");
     }
     if (const auto* c = std::get_if<ContextWork>(&work.operation)) {
-        std::array<bool, kMaximumConcurrency> released{};
+        std::array<bool, kMaximumSupportedConcurrency> released{};
         for (auto r : c->releases) {
             if (!bindings[r.lane.value] || bindings[r.lane.value]->residency != r)
                 throw std::logic_error("GLM5Next stale residency release");

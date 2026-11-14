@@ -1,3 +1,4 @@
+#include "models/qwen4_exp/config.h"
 #include "models/qwen4_exp/ple/upload.h"
 
 #include "models/qwen4_exp/ple/parameters.h"
@@ -98,7 +99,7 @@ struct UploadSlots::Impl {
     }
 
     std::size_t bytes(std::uint32_t tokens, std::uint32_t batch) const {
-        if (!tokens || !batch || batch > kMaximumConcurrency ||
+        if (!tokens || !batch || batch > kMaximumSupportedConcurrency ||
             std::uint64_t(tokens) * batch > max_positions) {
             throw std::invalid_argument("invalid PLE upload shape");
         }

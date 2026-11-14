@@ -1,3 +1,4 @@
+#include "models/glm5next/config.h"
 #include "models/glm5next/work.h"
 #include "models/common/context/wire.h"
 #include "runtime/executor/protocol.h"
@@ -112,7 +113,7 @@ void WorkContract::validate(const Work& work, runtime::FrameKind kind) const {
                     c->bindings.size() <= shape.max_concurrency &&
                     c->releases.size() <= shape.max_concurrency,
                 "invalid context frame");
-        std::array<bool, kMaximumConcurrency> bound{}, released{};
+        std::array<bool, kMaximumSupportedConcurrency> bound{}, released{};
         for (const auto& r : c->releases) {
             require(r.lane.value < shape.max_concurrency && r.generation && !released[r.lane.value],
                     "invalid residency release");
@@ -247,7 +248,7 @@ void WorkContract::validate(const Work& work, const runtime::DecisionRequest& re
     const auto rows = work_rows(work);
     require(request.vocabulary == public_tokens && request.stage == input.stage,
             "decision identity");
-    std::array<bool, kMaximumConcurrency> requested{}, seen{};
+    std::array<bool, kMaximumSupportedConcurrency> requested{}, seen{};
     for (const auto& r : request.rows) {
         require(r.member < rows.size() && rows[r.member].constrained && !requested[r.member] &&
                     r.drafts.size() ==

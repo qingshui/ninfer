@@ -1,3 +1,4 @@
+#include "models/glm5next/config.h"
 #include "models/glm5next/program/resources.h"
 
 #include "core/transfer.h"
@@ -68,8 +69,8 @@ Resources::Resources(ExecutionPlan input, DeviceContext& device, ContextCommunic
                    device.execution_view());
     }
     if (const auto& m = plan.frame.mtp) {
-        std::array<ops::SamplingConfig, kMaximumConcurrency> proposal;
-        std::array<std::int32_t, kMaximumConcurrency> columns;
+        std::array<ops::SamplingConfig, kMaximumSupportedConcurrency> proposal;
+        std::array<std::int32_t, kMaximumSupportedConcurrency> columns;
         for (std::uint32_t i = 0; i < plan.shape.max_concurrency; ++i) {
             proposal[i] = {.temperature = 0, .top_k = 1, .top_p = 1};
             columns[i]  = 1;

@@ -6,6 +6,7 @@
 #include "runtime/contract/sampling.h"
 #include "runtime/contract/request.h"
 #include "runtime/engine/causal_score_core.h"
+#include "runtime/engine/context_capacity.h"
 #include "runtime/engine/engine_core.h"
 #include "runtime/engine/startup.h"
 
@@ -199,9 +200,22 @@ public:
     explicit Impl(EngineOptions engine_options)
         : options(runtime::normalize_engine_options(std::move(engine_options))) {
         nvtx::ScopedRange load_range(nvtx::Name::EngineLoad, nvtx::Category::Runtime);
+        // Automatic lane fitting stays zero through construction: construct_model plans at the
+        // shared ceiling, and the fitted lane count replaces the provisional value below.
+        const bool automatic_lanes = options.max_concurrency == 0;
         auto constructed = runtime::construct_model(options);
         active           = std::move(constructed.instance);
         startup.load     = std::move(constructed.load);
+        if (automatic_lanes) {
+            const std::uint64_t token_capacity = std::visit(
+                [](const auto& instance) {
+                    return runtime::estimate_context_token_capacity(
+                        instance->context_capacities);
+                },
+                active);
+            options.max_concurrency = static_cast<std::uint32_t>(std::clamp<std::uint64_t>(
+                token_capacity / options.max_context, 1, kMaximumConcurrency));
+        }
         std::visit(
             [&](const auto& instance) {
                 sampling_defaults = instance->frontend.sampling_defaults();

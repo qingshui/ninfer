@@ -1,3 +1,4 @@
+#include "models/qwen4_exp/config.h"
 #include "models/qwen4_exp/program/ple_pipeline.h"
 #include "models/qwen4_exp/program/resources.h"
 #include "core/nvtx.h"
@@ -53,7 +54,7 @@ std::optional<ple::Ticket> PlePipeline::prepare(std::uint32_t tokens,
                                                 std::span<const ple::InputRow> rows,
                                                 std::optional<runtime::ExecutionTicket> owner) {
     if (drained_) throw std::logic_error("PLE pipeline is shut down");
-    if (!tokens || rows.empty() || rows.size() > kMaximumConcurrency ||
+    if (!tokens || rows.empty() || rows.size() > kMaximumSupportedConcurrency ||
         std::uint64_t(tokens) * rows.size() > resources_.plan.ple.max_positions)
         throw std::invalid_argument("invalid PLE input shape");
     for (const auto& row : rows)
@@ -111,7 +112,7 @@ std::optional<ple::Ticket> PlePipeline::try_require(runtime::ExecutionTicket own
                                                     std::span<const ple::InputRow> rows) {
     const auto ticket = try_begin(owner, tokens, rows);
     if (ticket && !window(*ticket).seal_requested) {
-        std::array<std::uint32_t, kMaximumConcurrency> valid{};
+        std::array<std::uint32_t, kMaximumSupportedConcurrency> valid{};
         for (std::size_t b = 0; b < rows.size(); ++b) valid[b] = rows[b].ids.size();
         seal(*ticket, {valid.data(), rows.size()});
     }
@@ -211,7 +212,7 @@ std::span<const std::int32_t> PlePipeline::input(ple::Ticket ticket, std::uint32
 void PlePipeline::prefetch(std::uint32_t tokens, std::span<const ple::InputRow> rows) {
     if (auto ticket = prepare(tokens, rows, {});
         ticket && !window(*ticket).owner && !window(*ticket).seal_requested) {
-        std::array<std::uint32_t, kMaximumConcurrency> valid{};
+        std::array<std::uint32_t, kMaximumSupportedConcurrency> valid{};
         for (std::size_t b = 0; b < rows.size(); ++b) valid[b] = rows[b].ids.size();
         seal(*ticket, {valid.data(), rows.size()});
     }
@@ -243,7 +244,7 @@ void PlePipeline::progress() {
                     resources_.ple_handoff()
                         .subspan(offset, transfer.batch * sizeof(std::int32_t))
                         .data);
-                std::array<ple::Append, kMaximumConcurrency> additions;
+                std::array<ple::Append, kMaximumSupportedConcurrency> additions;
                 std::size_t count = 0;
                 for (std::uint32_t b = 0; b < transfer.batch; ++b)
                     if (transfer.active[b]) {

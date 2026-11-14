@@ -191,6 +191,14 @@ bool matches_bearer_credential(std::string_view authorization, std::string_view 
     return authorization.substr(position, end - position) == api_key;
 }
 
+// Fixed HTTP worker pool. Streaming handlers occupy their worker for a whole response, so the
+// pool must cover the serving design point (130 concurrent clients plus monitor subscribers),
+// but it is deliberately decoupled from engine lane capacity: automatic lane fitting derives
+// hundreds of lanes, and a lane-derived pool would spawn thousands of threads. Connections
+// beyond the pool wait in the dispatch queue, whose depth still scales with the engine's
+// request capacity (lanes + pending).
+constexpr std::size_t kHttpWorkerThreads = 192;
+
 HttpServer::HttpServer(product::ServeOptions options, std::shared_ptr<spdlog::logger> logger)
     : options_(std::move(options)), openai_responses_store_(options_.response_store_max_records,
                                                             options_.response_store_max_bytes),
@@ -201,9 +209,8 @@ HttpServer::HttpServer(product::ServeOptions options, std::shared_ptr<spdlog::lo
     const std::size_t queued_requests =
         static_cast<std::size_t>(options_.launch.engine.max_concurrency) +
         options_.launch.engine.max_pending_requests;
-    const std::size_t worker_count = queued_requests + 1 + MonitorEvents::kMaxSubscribers;
-    server_.new_task_queue         = [queued_requests, worker_count] {
-        return make_http_task_queue(worker_count, queued_requests).release();
+    server_.new_task_queue         = [queued_requests] {
+        return make_http_task_queue(kHttpWorkerThreads, queued_requests).release();
     };
     server_.set_socket_options(configure_http_server_socket);
     server_.set_payload_max_length(options_.max_request_bytes);

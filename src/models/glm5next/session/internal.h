@@ -1,6 +1,7 @@
 #pragma once
 
 #include "models/common/context/snapshot.h"
+#include "models/glm5next/config.h"
 #include "models/glm5next/definition.h"
 #include "models/glm5next/session/session.h"
 #include "models/glm5next/state/continuation.h"
@@ -304,8 +305,8 @@ public:
     Checkpoints checkpoints;
     context::MetadataAccount count_storage{directory.metadata_budget()};
     TokenCountBuilder count_builder;
-    std::array<std::unique_ptr<Sequence>, kMaximumConcurrency> sequences;
-    std::array<std::uint64_t, kMaximumConcurrency> epochs{};
+    std::array<std::unique_ptr<Sequence>, kMaximumSupportedConcurrency> sequences;
+    std::array<std::uint64_t, kMaximumSupportedConcurrency> epochs{};
     std::vector<runtime::KvPoolDescriptor> pools;
     std::unique_ptr<ContextOperation> operation;
     std::optional<ContextAssessment> pending_maintenance;

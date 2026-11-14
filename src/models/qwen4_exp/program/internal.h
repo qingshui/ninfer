@@ -2,6 +2,7 @@
 
 #include "runtime/observability/gpu_timing.h"
 
+#include "models/qwen4_exp/config.h"
 #include "models/qwen4_exp/program/program.h"
 #include "models/qwen4_exp/program/resources.h"
 #include "models/qwen4_exp/program/ple_pipeline.h"
@@ -179,7 +180,7 @@ public:
     CudaEventTimer prefill_timer;
     runtime::ExecutionGpuTimer gpu_timer;
     CudaCompletionEvent compute_done, context_done;
-    std::array<std::optional<ResidentBinding>, kMaximumConcurrency> bindings;
+    std::array<std::optional<ResidentBinding>, kMaximumSupportedConcurrency> bindings;
     std::optional<ComputeFrame> compute;
     std::optional<ContextFrame> context;
     std::deque<runtime::ExecutionEvent<ExecutionTypes>> events;

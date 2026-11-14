@@ -1,3 +1,4 @@
+#include "models/spark2_5/options.h"
 #include "models/spark2_5/program/internal.h"
 
 #include "core/transfer.h"
@@ -55,7 +56,7 @@ void RankProgramImpl::validate_work(const Work& work, runtime::FrameKind kind) c
             throw std::invalid_argument("Spark2_5 table row exceeds rank storage");
     }
     if (const auto* c = std::get_if<ContextWork>(&work.operation)) {
-        std::array<bool, kMaximumConcurrency> released{};
+        std::array<bool, kMaximumSupportedConcurrency> released{};
         for (auto r : c->releases) {
             if (!bindings[r.lane.value] || bindings[r.lane.value]->residency != r)
                 throw std::logic_error("Spark2_5 stale residency release");

@@ -18,7 +18,7 @@ context_capacity = "auto" # Per-rank shared Device KV/State capacity; auto, "8Gi
 memory_headroom = "512MiB" # Per-rank planning allowance; startup may consume it. 0B adds no headroom.
 prefill_chunk = "default" # default or a positive multiple of 128; no hardware performance estimation.
 cuda_graph = true
-max_concurrency = 1
+max_concurrency = 1 # Resident lanes 1..1024; serve defaults to 0 = auto-fit from context capacity.
 max_pending_requests = 16
 pending_timeout = "30s" # Queue timeout before execution, not a total generation deadline.
 
