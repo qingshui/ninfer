@@ -1,6 +1,6 @@
 # 构建系统
 
-构建按执行目标选择源码，数学接口和模型语义保持独立。当前目标为 RTX 5090 与 DGX Spark。
+构建按执行目标选择源码，数学接口和模型语义保持独立。当前目标为 RTX 5090、B200 与 DGX Spark。
 用户安装与运行入口见[README](../../README.md)，本文件说明编译归属和维护边界。
 
 ## 编译目标
@@ -10,6 +10,7 @@
 | 目标 | 系统 | CUDA architecture |
 |---|---|---|
 | `rtx5090` | Linux x86-64 | 120a |
+| `b200` | Linux x86-64 | 100a |
 | `dgx_spark` | Linux AArch64 | 121a |
 
 平台配置在 CUDA toolchain 检测前解析，验证系统、架构和 build directory 一致性。
@@ -18,7 +19,7 @@
 [CMakePresets.json](../../CMakePresets.json)。
 
 生成的内部 platform header 区分 target identity 与 capabilities。
-`NINFER_TARGET_RTX5090` / `NINFER_TARGET_SPARK` 对称表达目标；共享物理内存和 CPU expert 能力
+`NINFER_TARGET_RTX5090` / `NINFER_TARGET_B200` / `NINFER_TARGET_SPARK` 对称表达目标；共享物理内存和 CPU expert 能力
 通过独立 capability 转发。小型差异可使用这些宏，完整实现目录由 CMake 选择。
 模型不据此复制 Op 支持判断，硬件 roofline 参照归 bench。
 
@@ -65,7 +66,7 @@ cmake --preset rtx5090-dev
 cmake --build build/rtx5090-dev -j
 ```
 
-Spark 使用 `dgx-spark-*`；分布式另启用对应选项。独立 build tree 防止目标、缓存和产物混用。
+B200 使用 `b200-*`，Spark 使用 `dgx-spark-*`；分布式另启用对应选项。独立 build tree 防止目标、缓存和产物混用。
 具体选项默认值直接查 CMake，测试与测量命令分别见
 [tests](../../tests/README.md)和[bench](../../bench/README.md)。
 

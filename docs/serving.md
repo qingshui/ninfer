@@ -100,7 +100,8 @@ The endpoint supports:
 - `temperature`, `top_p`, presence/frequency penalties, and signed integer `seed`;
 - the compatible `top_k` (`0..20`) and `min_p` (`0..1`) sampler extensions;
 - up to four non-empty stop strings, applied to both reasoning and answer output;
-- `n:1`, text-only `modalities`, and `response_format: {"type":"text"}`;
+- positive integer `n` up to the server's sample limit (default 8), producing `n` independently
+  sampled completions per request; text-only `modalities` and `response_format: {"type":"text"}`;
 - non-streaming responses and server-sent event streams;
 - `stream_options.include_usage`;
 - llama.cpp-compatible terminal `timings`, plus opt-in `timings_per_token` and
@@ -234,8 +235,8 @@ so an unmatched nested parameter opener or a standalone `</parameter>` cannot be
 unambiguously. After a declared function header has started, malformed structure fails that request
 with `invalid_tool_output`; earlier tool events are never retracted into ordinary content.
 An unrecognized Qwen header on the free-generation route can still be returned as text.
-GLM uses `<tool_call>`, `<arg_key>` and `<arg_value>` framing. Its raw argument values end at
-`</arg_value>`; clients continue to send and receive protocol tool objects, not these model markers.
+GLM uses `<|tool▁calls▁begin|>`, `<|tool▁call▁begin|>` and `<|tool▁sep|>` framing. Its raw argument values end at
+`<|tool▁call▁end|>`; clients continue to send and receive protocol tool objects, not these model markers.
 
 ### Tool constraints
 
@@ -282,7 +283,7 @@ Top-level pure string parameters use raw text and preserve whitespace. Other val
 a top-level string/non-string union (such as string/null) is rejected because the model parameter
 codec must select one representation. Such unions inside JSON objects or arrays are supported.
 Raw values cannot contain the model's terminating delimiter: `\n</parameter>` for Qwen or
-`</arg_value>` for GLM. Unsatisfiable required values are rejected.
+`<|tool▁call▁end|>` for GLM. Unsatisfiable required values are rejected.
 Integer arguments use signed 64-bit values; number arguments use finite binary64-compatible
 representations. Unsupported schemas fail with HTTP 400 before generation.
 
@@ -342,10 +343,10 @@ because requests can explicitly enable thinking. Anthropic
 Add `--thinking-budget 512` to the startup command to cap model-origin thinking at 512
 tokens for every thinking-enabled request.
 
-At the cap boundary, Engine first honors a natural `</think>`, stop condition, cancellation, or
+At the cap boundary, Engine first honors a natural `</think`, stop condition, cancellation, or
 total output/context limit. If thinking remains open, it commits the model's closing suffix to the
 same sequence without sampling and continues normal content or tool-call generation. Qwen inserts
-early-close guidance plus `</think>` and streams the guidance as reasoning; GLM inserts `</think>`.
+early-close guidance plus `</think` and streams the guidance as reasoning; GLM inserts `<|assistant|end|>`.
 Inserted tokens count in completion usage and the request's `max_tokens`/`max_output_tokens` budget. If the effective output
 capacity extends past the cap but cannot fit the complete tokenizer-derived control suffix plus one
 post-close model token, preparation is rejected with HTTP 400 code
@@ -367,6 +368,14 @@ finish-reason chunk and `[DONE]`. When `stream_options.include_usage` is true, a
 and reasoning-token details; choices carry `logprobs: null` when log probabilities were not
 requested, and aggregate assistant messages carry `refusal: null` because refusal output is not
 supported.
+
+With `n > 1`, one request produces `n` independently sampled completions. Each sample streams its
+own choices with `index` in `0..n-1` and exactly one finish-reason chunk per sample, followed by
+`[DONE]`; non-streaming responses return `n` choices. All samples share the request's prompt, and
+usage counts that prompt once while `completion_tokens` is the sum across every sample, bounded by
+`n × max_tokens`. When `stream_options.include_usage` is true, the final empty `choices` usage
+chunk reports that aggregate after all samples finish; it is omitted when the field is absent or
+false. Terminal `timings` and constraint observations report the first sample's accounting.
 
 ### llama.cpp-compatible request observations
 
@@ -1135,7 +1144,7 @@ mutually exclusive Host phases and their `total`; `device_wait_seconds` is separ
 are already contained in a top-level Host phase and must not be added to `total`.
 Per-round, per-row-round, and per-invocation normalized values are
 `null` when their denominator is zero. Pretty throughput contains nonzero token rates and counts,
-the current running/prefill/decode-ready composition, nonzero waiting/materialization/terminal
+the current running/prefilling/decode-ready composition, nonzero waiting/materialization/terminal
 states, average decode batch, and Host-active time plus its fraction of the interval. Use JSONL for
 complete measurement analysis.
 Intervals with context materialization or retention activity are retained even when they contain no
@@ -1201,7 +1210,7 @@ require an earlier checkpoint or a root prefill.
 Speculative backends preserve protocol output shapes, stop behavior, and usage accounting. If a stop
 truncates a multi-token MTP, DFlash or DFlash2 round, the Engine commits the exact accepted target prefix so
 a following compatible turn can reuse it. Output-limit and context-capacity finishes map to
-`length`/ `max_tokens`; ordinary model or string stops map to `stop`/ `end_turn`.
+`length`/ `max_tokens`; ordinary model or string stops map to `stop`/`end_turn`.
 
 Function tools are rendered into the model prompt and generated calls are parsed into protocol
 responses. NInfer does not execute tools. Tool framing and argument constraints follow the

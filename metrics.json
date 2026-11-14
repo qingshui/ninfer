@@ -1,0 +1,11 @@
+{
+  "request_throughput": 1.9359,
+  "completed": 2000,
+  "failed": 0,
+  "mean_ttft_ms": 19475.09,
+  "p99_ttft_ms": 31430.34,
+  "mean_tpot_ms": 1070.65,
+  "mean_e2el_ms": 65967.18,
+  "duration_s": 1033.12,
+  "sglang_baseline_req_throughput": 61.0
+}

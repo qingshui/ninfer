@@ -1,9 +1,0 @@
-{
-  "task_id": "T05",
-  "refs": [
-    "F06"
-  ],
-  "files": {
-    "tests/convert/test_qwen3_5_122b_nvfp4.py": "2026-11-14T00:30:25"
-  }
-}

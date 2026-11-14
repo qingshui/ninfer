@@ -1,9 +1,0 @@
-{
-  "task_id": "T06",
-  "refs": [
-    "F08"
-  ],
-  "files": {
-    "tests/ops/moe/test_block_scaled_122b.cpp": "2026-11-14T02:02:07"
-  }
-}

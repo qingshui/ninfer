@@ -1,6 +1,6 @@
 # NInfer
 
-> Native C++/CUDA inference for selected models on RTX 5090 and DGX Spark.
+> Native C++/CUDA inference for selected models on RTX 5090, B200, and DGX Spark.
 
 NInfer runs text and image/video generation through a local CLI or OpenAI- and
 Anthropic-compatible HTTP APIs. It supports single-device execution and model-parallel execution
@@ -13,13 +13,17 @@ One Engine serves one model with up to eight active requests.
 |---|---|---|---|
 | Qwen3.6-27B / Qwen3.8-27B | Qwen3.5 Dense | RTX 5090 | MTP; DFlash2 for Qwen3.8-27B with companion weights |
 | Qwen3.6-35B-A3B | Qwen3.5 MoE | RTX 5090, resident or CPU expert offload | MTP or DFlash with companion weights |
+| Qwen3.5-MoE-122B | Qwen3.5 MoE | B200 | — |
 | Qwen3.8-Flash-Next | Qwen4Exp | RTX 5090 with CPU expert offload; one or two Sparks | MTP |
 | GLM-5.3-Flash | GLM5Next | Two Sparks | MTP |
 | Spark2_5 17B | Spark2_5 | RTX 5090 | — |
 
-All rows support text, Vision, tools, constrained output, and offline perplexity scoring.
+All rows support text, Vision, tools, constrained output, and offline perplexity scoring
+except Qwen3.5-MoE-122B, which is text-only.
 Spark2_5 is text-only; it has no published artifact. Convert a local `Spark2_5ForCausalLM`
 checkpoint with the [Spark recipes](docs/weight-conversion.md#spark2_5).
+Qwen3.5-MoE-122B likewise has no published artifact; convert a local ModelOpt NVFP4
+checkpoint with the [`qwen3_5_122b_nvfp4` recipe](docs/weight-conversion.md).
 Vision and speculative decoding require the corresponding components in the artifact and must be
 enabled at startup. Scoring loads Text only. CPU expert offload applies to the RTX 5090 target;
 Spark execution keeps selected weights on the GPU. Flash Next offload also needs substantial system
@@ -32,7 +36,8 @@ deployments, including Vision, FP8 KV, MTP3 and the optimized draft head.
 
 ## Build
 
-Build natively on Linux: x86-64 / `sm_120a` for RTX 5090, AArch64 / `sm_121a` for DGX Spark.
+Build natively on Linux: x86-64 / `sm_120a` for RTX 5090, x86-64 / `sm_100a` for B200,
+AArch64 / `sm_121a` for DGX Spark.
 Dependencies are a CUDA toolkit supporting the target, CMake 3.28+, a C++20 host compiler,
 Ninja, `pkg-config`, libjpeg development headers, FFmpeg development libraries
 (`libavformat`, `libavcodec`, `libavutil`, `libswscale`), `hwloc >= 2.5`, `liburing >= 2.5`,
@@ -45,6 +50,7 @@ cmake --preset rtx5090-release
 cmake --build build/rtx5090-release -j
 ```
 
+For B200, use `b200-release` and `build/b200-release`.
 For a single Spark, use `dgx-spark-release` and `build/dgx-spark-release`.
 For two Sparks, install NCCL development headers and libraries and build on **both nodes**:
 
@@ -57,8 +63,8 @@ Product binaries are `apps/ninfer`, `apps/ninfer-serve`, `apps/ninfer-perplexity
 distributed execution enabled, `apps/ninfer-worker`. Run them from the build tree; keep its `lib/`
 directory alongside `apps/` when moving outputs. There is no installed C++ SDK.
 
-Product presets omit tests and benchmarks. The `rtx5090-dev` / `dgx-spark-dev` presets enable
-both; the corresponding `-ops` presets build only the lower-level libraries and their checks.
+Product presets omit tests and benchmarks. The `rtx5090-dev` / `b200-dev` / `dgx-spark-dev` presets
+enable both; the corresponding `-ops` presets build only the lower-level libraries and their checks.
 See [build organization](docs/maintainer/build-system.md) for development options.
 
 ## Get weights
