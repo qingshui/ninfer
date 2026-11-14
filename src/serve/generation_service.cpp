@@ -387,6 +387,27 @@ PreparedRequest GenerationService::prepare(const GenerationRequest& request,
                         DeadlinePolicy::ClientPendingTimeout);
 }
 
+std::vector<PreparedRequest>
+GenerationService::prepare_samples(const GenerationRequest& request, int sample_count,
+                                   GenerationConsumerMode consumer_mode,
+                                   ninfer::GenerationObservationOptions observation,
+                                   std::function<bool()> is_cancelled,
+                                   ContextCacheHints context_cache) const {
+    if (sample_count < 1) { throw std::logic_error("sample count must be positive"); }
+    const std::optional<std::uint64_t> fixed_seed =
+        request.sampling.seed ? request.sampling.seed : options_.launch.generation.sampling.seed;
+    std::vector<PreparedRequest> samples;
+    samples.reserve(static_cast<std::size_t>(sample_count));
+    for (int index = 0; index < sample_count; ++index) {
+        GenerationRequest sample = request;
+        if (index != 0 && fixed_seed) {
+            sample.sampling.seed = *fixed_seed + static_cast<std::uint64_t>(index);
+        }
+        samples.push_back(prepare(sample, consumer_mode, observation, is_cancelled, context_cache));
+    }
+    return samples;
+}
+
 PreparedRequest GenerationService::prepare_impl(const GenerationRequest& request,
                                                 GenerationConsumerMode consumer_mode,
                                                 ninfer::GenerationObservationOptions observation,

@@ -9,6 +9,8 @@
 #include <cstdint>
 #include <iostream>
 #include <limits>
+#include <map>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -144,7 +146,6 @@ int test_standard_field_policy() {
                           std::string(key) + " non-neutral value rejected");
     };
 
-    rejected("n", 2, "n_not_supported");
     rejected("logit_bias", Json{{"12", 1}}, "logit_bias_not_supported");
     rejected("logprobs", true, "logprobs_not_supported");
     rejected("top_logprobs", 2, "logprobs_not_supported");
@@ -962,6 +963,173 @@ int test_stream_observations() {
     return failures;
 }
 
+int test_sample_count() {
+    int failures = 0;
+    Json body                     = base_request();
+    body["stream"]                = true;
+    body["stream_options"]        = Json{{"include_usage", true}};
+    body["max_tokens"]            = 15;
+    body["temperature"]           = 0.9;
+    body["top_p"]                 = 0.9;
+    body["n"]                     = 4;
+    body["chat_template_kwargs"]  = Json{{"enable_thinking", false}};
+    const OpenAIChatRequest multi = parse(body);
+    failures += check(multi.sample_count == 4, "n parses as the request sample count");
+    failures += check(multi.stream && multi.include_usage && multi.generation.max_tokens == 15,
+                      "sampling request envelope fields remain parsed");
+    failures += check(multi.generation.enable_thinking == false,
+                      "chat_template_kwargs.enable_thinking=false normalizes");
+
+    failures += check(parse(base_request()).sample_count == 1, "n defaults to one sample");
+    Json single  = base_request();
+    single["n"]  = 1;
+    failures += check(parse(single).sample_count == 1, "n=1 is accepted");
+    Json neutral = base_request();
+    neutral["n"] = nullptr;
+    failures += check(parse(neutral).sample_count == 1, "null n stays neutral");
+
+    for (const Json& bad : {Json(0), Json(-1), Json(2.5), Json("4"), Json(true)}) {
+        Json rejected            = base_request();
+        rejected["n"]            = bad;
+        const ApiError error     = api_error([&] { (void)parse(rejected); });
+        failures += check(error.status == 400 && error.param == "n",
+                          "n that is not a positive integer is rejected with 400 naming n");
+    }
+    Json over                = base_request();
+    over["n"]                = 9; // default RequestLimits.max_sample_count is 8
+    const ApiError over_error = api_error([&] { (void)parse(over); });
+    failures += check(over_error.status == 400 && over_error.param == "n",
+                      "n above the request limit is rejected with 400");
+    return failures;
+}
+
+int test_multi_sample_response() {
+    int failures = 0;
+    const OpenAIChatResponseIdentity id = identity();
+    std::vector<GenerationOutcome> outcomes;
+    for (int index = 0; index < 4; ++index) {
+        GenerationOutcome outcome = sample_outcome();
+        outcome.text              = "answer " + std::to_string(index);
+        outcomes.push_back(std::move(outcome));
+    }
+
+    const Json response = Json::parse(make_chat_completion_response(id, outcomes));
+    failures += check(response["choices"].size() == 4, "n outcomes render n choices");
+    bool indexes_ok     = true;
+    bool contents_ok    = true;
+    bool finish_ok      = true;
+    for (int index = 0; index < 4; ++index) {
+        const Json& choice = response["choices"][index];
+        indexes_ok &= choice["index"] == index;
+        contents_ok &= choice["message"]["content"] == "answer " + std::to_string(index);
+        finish_ok &= !choice["finish_reason"].is_null();
+    }
+    failures += check(indexes_ok, "choices carry their sample index");
+    failures += check(contents_ok && finish_ok, "each choice keeps its own sample content");
+    failures += check(response["usage"]["prompt_tokens"] == 20 &&
+                          response["usage"]["completion_tokens"] == 28,
+                      "aggregate usage reports one prompt and the summed completions");
+
+    const GenerationOutcome single = sample_outcome();
+    failures += check(make_chat_completion_response(identity(), single) ==
+                          make_chat_completion_response(
+                              identity(), std::vector<GenerationOutcome>{single}),
+                      "single-outcome response equals the multi-sample form with one outcome");
+    return failures;
+}
+
+int test_multi_sample_stream_response() {
+    int failures  = 0;
+    const auto run_streams = [&](bool include_usage, std::vector<std::string>& events,
+                                 std::map<int, int>& finish_counts) {
+        std::vector<std::unique_ptr<OpenAIChatStream>> streams;
+        std::vector<GenerationOutcome> outcomes;
+        for (int index = 0; index < 4; ++index) {
+            GenerationOutcome outcome = sample_outcome();
+            outcome.text              = "answer " + std::to_string(index);
+            outcomes.push_back(std::move(outcome));
+            streams.push_back(std::make_unique<OpenAIChatStream>(identity(), include_usage, false,
+                                                                 false, index));
+        }
+        for (const auto& stream : streams) {
+            events.push_back(stream->start());
+            events.push_back(stream->reasoning_delta("thought"));
+            events.push_back(stream->content_delta("ans"));
+        }
+        for (std::size_t index = 0; index < streams.size(); ++index) {
+            const std::vector<std::string> sample = streams[index]->finish_sample(outcomes[index]);
+            events.insert(events.end(), sample.begin(), sample.end());
+        }
+        const std::vector<std::string> tail =
+            make_chat_stream_sample_terminator(identity(), outcomes, include_usage);
+        events.insert(events.end(), tail.begin(), tail.end());
+        for (const std::string& event : events) {
+            if (event == "data: [DONE]\n\n") { continue; }
+            const Json payload = parse_sse(event);
+            for (const Json& choice : payload["choices"]) {
+                const int index  = choice["index"];
+                const Json& done = choice["finish_reason"];
+                if (!done.is_null()) { ++finish_counts[index]; }
+            }
+        }
+        return outcomes;
+    };
+
+    std::vector<std::string> events;
+    std::map<int, int> finish_counts;
+    const std::vector<GenerationOutcome> outcomes = run_streams(true, events, finish_counts);
+    failures += check(finish_counts.size() == 4 &&
+                          finish_counts[0] == 1 && finish_counts[1] == 1 && finish_counts[2] == 1 &&
+                          finish_counts[3] == 1,
+                      "each sample index emits exactly one finish_reason");
+    failures += check(events.back() == "data: [DONE]\n\n", "multi-sample stream ends with DONE");
+    const Json usage = parse_sse(events[events.size() - 2]);
+    failures += check(usage["choices"].empty() &&
+                          usage["usage"]["prompt_tokens"] == 20 &&
+                          usage["usage"]["completion_tokens"] == 28 &&
+                          usage["usage"]["completion_tokens_details"]["reasoning_tokens"] == 12,
+                      "include_usage emits one aggregate usage chunk before DONE");
+    bool content_indexed = true;
+    for (const std::string& event : events) {
+        if (event == "data: [DONE]\n\n" || event == events[events.size() - 2]) { continue; }
+        for (const Json& choice : parse_sse(event)["choices"]) {
+            content_indexed &= choice["index"].get<int>() >= 0 && choice["index"].get<int>() < 4;
+        }
+    }
+    failures += check(content_indexed, "every streamed choice carries an index in [0,n)");
+
+    std::vector<std::string> plain_events;
+    std::map<int, int> plain_finish_counts;
+    (void)run_streams(false, plain_events, plain_finish_counts);
+    bool no_usage_chunk = true;
+    for (const std::string& event : plain_events) {
+        if (event == "data: [DONE]\n\n") { continue; }
+        no_usage_chunk &= !parse_sse(event).contains("usage");
+    }
+    failures += check(no_usage_chunk && plain_events.back() == "data: [DONE]\n\n",
+                      "omitted include_usage sends no usage chunk and still ends with DONE");
+
+    // Single-sample terminal composition stays byte-identical to the previous finish() behavior.
+    GenerationOutcome outcome = sample_outcome();
+    OpenAIChatStream direct(identity(), true);
+    (void)direct.start();
+    (void)direct.reasoning_delta("thought");
+    (void)direct.content_delta("ans");
+    const std::vector<std::string> direct_events = direct.finish(outcome);
+    OpenAIChatStream composed(identity(), true);
+    (void)composed.start();
+    (void)composed.reasoning_delta("thought");
+    (void)composed.content_delta("ans");
+    std::vector<std::string> composed_events = composed.finish_sample(outcome);
+    const std::vector<std::string> composed_tail =
+        make_chat_stream_sample_terminator(identity(), std::vector<GenerationOutcome>{outcome},
+                                           true);
+    composed_events.insert(composed_events.end(), composed_tail.begin(), composed_tail.end());
+    failures += check(direct_events == composed_events,
+                      "single-sample finish equals finish_sample plus the sample terminator");
+    return failures;
+}
+
 int test_common_objects() {
     int failures      = 0;
     const Json models = Json::parse(make_models_list("qwen", 7, 240000));
@@ -993,6 +1161,9 @@ int main() {
     failures += test_aggregate_response();
     failures += test_stream_response();
     failures += test_stream_observations();
+    failures += test_sample_count();
+    failures += test_multi_sample_response();
+    failures += test_multi_sample_stream_response();
     failures += test_common_objects();
     if (failures == 0) { std::cout << "OpenAI Chat protocol tests passed\n"; }
     return failures == 0 ? 0 : 1;

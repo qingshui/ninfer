@@ -203,6 +203,19 @@ std::optional<double> optional_number(const RequestJson& object, const char* key
     return value;
 }
 
+int parse_sample_count(const RequestJson& body, const RequestLimits& limits) {
+    const std::optional<int> count = optional_int(body, "n");
+    if (!count) { return 1; }
+    if (*count < 1) { bad_request("n must be a positive integer", "n"); }
+    if (static_cast<std::uint64_t>(*count) >
+        static_cast<std::uint64_t>(limits.max_sample_count)) {
+        bad_request("n must not exceed " + std::to_string(limits.max_sample_count) +
+                        " samples per request",
+                    "n");
+    }
+    return *count;
+}
+
 bool optional_bool(const RequestJson& object, const char* key, bool fallback) {
     if (!object.contains(key) || object.at(key).is_null()) { return fallback; }
     if (!object.at(key).is_boolean()) { bad_request(std::string(key) + " must be a boolean", key); }

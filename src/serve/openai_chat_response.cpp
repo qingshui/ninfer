@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <stdexcept>
 #include <string_view>
@@ -185,6 +186,17 @@ CompletionUsage usage_from(const GenerationOutcome& outcome) {
     };
 }
 
+// One request carries one shared prompt: prompt accounting reports the first sample's single
+// copy, while completion accounting sums every sample's generated tokens.
+CompletionUsage usage_from(const std::vector<GenerationOutcome>& outcomes) {
+    CompletionUsage usage = usage_from(outcomes.front());
+    for (std::size_t index = 1; index < outcomes.size(); ++index) {
+        usage.completion_tokens += outcomes[index].completion_tokens;
+        usage.reasoning_tokens += outcomes[index].reasoning_tokens;
+    }
+    return usage;
+}
+
 Json base_payload(const OpenAIChatResponseIdentity& identity, const char* object) {
     return Json{{"id", identity.id},
                 {"object", object},
@@ -192,8 +204,8 @@ Json base_payload(const OpenAIChatResponseIdentity& identity, const char* object
                 {"model", identity.model}};
 }
 
-Json stream_choice(Json delta, Json finish_reason = nullptr) {
-    return Json{{"index", 0},
+Json stream_choice(int index, Json delta, Json finish_reason = nullptr) {
+    return Json{{"index", index},
                 {"delta", std::move(delta)},
                 {"logprobs", nullptr},
                 {"finish_reason", std::move(finish_reason)}};
@@ -201,10 +213,11 @@ Json stream_choice(Json delta, Json finish_reason = nullptr) {
 
 std::string event(Json payload) { return "data: " + payload.dump() + "\n\n"; }
 
-std::string chunk(const OpenAIChatResponseIdentity& identity, Json delta, Json finish_reason,
-                  bool include_usage, Json timings = nullptr, Json constraint = nullptr) {
+std::string chunk(const OpenAIChatResponseIdentity& identity, int index, Json delta,
+                  Json finish_reason, bool include_usage, Json timings = nullptr,
+                  Json constraint = nullptr) {
     Json payload       = base_payload(identity, "chat.completion.chunk");
-    payload["choices"] = Json::array({stream_choice(std::move(delta), std::move(finish_reason))});
+    payload["choices"] = Json::array({stream_choice(index, std::move(delta), std::move(finish_reason))});
     if (include_usage) { payload["usage"] = nullptr; }
     if (!timings.is_null()) { payload["timings"] = std::move(timings); }
     if (!constraint.is_null()) payload["constraint"] = std::move(constraint);
@@ -240,37 +253,49 @@ OpenAIChatResponseIdentity make_openai_chat_response_identity(std::string model)
 
 std::string make_chat_completion_response(const OpenAIChatResponseIdentity& identity,
                                           const GenerationOutcome& outcome) {
-    Json message = {{"role", "assistant"}, {"content", outcome.text}, {"refusal", nullptr}};
-    const bool has_tool_calls = !outcome.tool_calls.empty();
-    // vLLM/SGLang-compatible reasoning_content preserves the Engine's Reasoning/Content split.
-    if (!outcome.reasoning.empty()) { message["reasoning_content"] = outcome.reasoning; }
-    if (has_tool_calls) {
-        const std::vector<ToolCall> calls = materialize_tool_calls(outcome.tool_calls);
-        message["content"]    = outcome.text.empty() ? Json(nullptr) : Json(outcome.text);
-        message["tool_calls"] = tool_calls_json(calls, false);
+    return make_chat_completion_response(identity, std::vector<GenerationOutcome>{outcome});
+}
+
+std::string make_chat_completion_response(const OpenAIChatResponseIdentity& identity,
+                                          const std::vector<GenerationOutcome>& outcomes) {
+    if (outcomes.empty()) { throw std::logic_error("chat completion has no outcomes"); }
+    Json choices = Json::array();
+    for (std::size_t index = 0; index < outcomes.size(); ++index) {
+        const GenerationOutcome& outcome = outcomes[index];
+        Json message = {{"role", "assistant"}, {"content", outcome.text}, {"refusal", nullptr}};
+        // vLLM/SGLang-compatible reasoning_content preserves the Engine's Reasoning/Content split.
+        if (!outcome.reasoning.empty()) { message["reasoning_content"] = outcome.reasoning; }
+        if (!outcome.tool_calls.empty()) {
+            const std::vector<ToolCall> calls = materialize_tool_calls(outcome.tool_calls);
+            message["content"]    = outcome.text.empty() ? Json(nullptr) : Json(outcome.text);
+            message["tool_calls"] = tool_calls_json(calls, false);
+        }
+        choices.push_back(Json{{"index", static_cast<int>(index)},
+                               {"message", std::move(message)},
+                               {"logprobs", nullptr},
+                               {"finish_reason", Json(finish_reason(outcome))}});
     }
 
     Json payload       = base_payload(identity, "chat.completion");
-    payload["choices"] = Json::array({Json{{"index", 0},
-                                           {"message", std::move(message)},
-                                           {"logprobs", nullptr},
-                                           {"finish_reason", Json(finish_reason(outcome))}}});
-    payload["usage"]   = usage_json(usage_from(outcome));
-    payload["timings"] = timings_json(outcome_timings(outcome));
-    if (outcome.stats.constraint)
-        payload["constraint"] = product::constraint_observation_json(outcome.stats.constraint);
+    payload["choices"] = std::move(choices);
+    payload["usage"]   = usage_json(usage_from(outcomes));
+    payload["timings"] = timings_json(outcome_timings(outcomes.front()));
+    if (outcomes.front().stats.constraint)
+        payload["constraint"] =
+            product::constraint_observation_json(outcomes.front().stats.constraint);
     return payload.dump();
 }
 
 OpenAIChatStream::OpenAIChatStream(OpenAIChatResponseIdentity identity, bool include_usage,
-                                   bool timings_per_token, bool return_progress)
-    : identity_(std::move(identity)), include_usage_(include_usage),
+                                   bool timings_per_token, bool return_progress, int sample_index)
+    : identity_(std::move(identity)), sample_index_(sample_index), include_usage_(include_usage),
       timings_per_token_(timings_per_token), return_progress_(return_progress) {}
 
 std::string OpenAIChatStream::start() {
     if (started_ || finished_) { throw std::logic_error("OpenAI Chat stream already started"); }
     started_ = true;
-    return chunk(identity_, Json{{"role", "assistant"}, {"content", ""}}, nullptr, include_usage_);
+    return chunk(identity_, sample_index_, Json{{"role", "assistant"}, {"content", ""}}, nullptr,
+                 include_usage_);
 }
 
 void OpenAIChatStream::note_start(const ninfer::GenerationStart& start) {
@@ -291,7 +316,7 @@ std::string OpenAIChatStream::initial_prompt_progress() {
     last_progress_tokens_     = cached_tokens_;
     last_progress_elapsed_ns_ = 0;
     Json payload              = base_payload(identity_, "chat.completion.chunk");
-    payload["choices"]        = Json::array({stream_choice(Json::object())});
+    payload["choices"]        = Json::array({stream_choice(sample_index_, Json::object())});
     if (include_usage_) { payload["usage"] = nullptr; }
     payload["prompt_progress"] =
         prompt_progress_json(prompt_tokens_, cached_tokens_, cached_tokens_, 0);
@@ -310,7 +335,7 @@ std::string OpenAIChatStream::prompt_progress(const ninfer::PromptProgress& prog
     last_progress_tokens_     = progress.processed_prompt_tokens;
     last_progress_elapsed_ns_ = progress.elapsed_ns;
     Json payload              = base_payload(identity_, "chat.completion.chunk");
-    payload["choices"]        = Json::array({stream_choice(Json::object())});
+    payload["choices"]        = Json::array({stream_choice(sample_index_, Json::object())});
     if (include_usage_) { payload["usage"] = nullptr; }
     payload["prompt_progress"] =
         prompt_progress_json(progress.total_prompt_tokens, progress.reused_prompt_tokens,
@@ -344,8 +369,8 @@ std::string OpenAIChatStream::reasoning_delta(const std::string& text) {
         throw std::logic_error("invalid OpenAI Chat reasoning delta state");
     }
     reasoning_ += text;
-    return chunk(identity_, Json{{"reasoning_content", text}}, nullptr, include_usage_,
-                 live_timings_json());
+    return chunk(identity_, sample_index_, Json{{"reasoning_content", text}}, nullptr,
+                 include_usage_, live_timings_json());
 }
 
 std::string OpenAIChatStream::content_delta(const std::string& text) {
@@ -354,7 +379,8 @@ std::string OpenAIChatStream::content_delta(const std::string& text) {
     }
     content_started_ = true;
     content_ += text;
-    return chunk(identity_, Json{{"content", text}}, nullptr, include_usage_, live_timings_json());
+    return chunk(identity_, sample_index_, Json{{"content", text}}, nullptr, include_usage_,
+                 live_timings_json());
 }
 
 std::vector<std::string> OpenAIChatStream::tool_start(const ninfer::ToolCallStart& value) {
@@ -362,7 +388,7 @@ std::vector<std::string> OpenAIChatStream::tool_start(const ninfer::ToolCallStar
     content_started_ = true;
     tools_.start(value);
     return {chunk(
-        identity_,
+        identity_, sample_index_,
         Json{{"tool_calls",
               Json::array({Json{{"index", value.index},
                                 {"id", new_openai_chat_tool_call_id()},
@@ -376,7 +402,7 @@ std::vector<std::string> OpenAIChatStream::tool_arguments(const ninfer::ToolArgu
     tools_.append(value);
     if (value.text.empty()) return {};
     return {chunk(
-        identity_,
+        identity_, sample_index_,
         Json{{"tool_calls", Json::array({Json{{"index", value.index},
                                               {"function", Json{{"arguments", value.text}}}}})}},
         nullptr, include_usage_, live_timings_json())};
@@ -388,7 +414,7 @@ std::vector<std::string> OpenAIChatStream::tool_end(const ninfer::ToolCallEnd& v
     return {};
 }
 
-std::vector<std::string> OpenAIChatStream::finish(const GenerationOutcome& outcome) {
+std::vector<std::string> OpenAIChatStream::finish_sample(const GenerationOutcome& outcome) {
     if (!started_ || finished_) {
         throw std::logic_error("invalid OpenAI Chat stream finish state");
     }
@@ -396,8 +422,8 @@ std::vector<std::string> OpenAIChatStream::finish(const GenerationOutcome& outco
     require_prefix(outcome.reasoning, reasoning_, "reasoning");
     require_prefix(outcome.text, content_, "content");
 
-    const Json constraint     = product::constraint_observation_json(outcome.stats.constraint);
-    const Json final_timings  = timings_json(outcome_timings(outcome));
+    const Json constraint    = product::constraint_observation_json(outcome.stats.constraint);
+    const Json final_timings = timings_json(outcome_timings(outcome));
     const Json output_timings = timings_per_token_ ? final_timings : Json(nullptr);
     std::vector<std::string> events;
     const std::string reasoning_suffix = outcome.reasoning.substr(reasoning_.size());
@@ -405,21 +431,46 @@ std::vector<std::string> OpenAIChatStream::finish(const GenerationOutcome& outco
         if (content_started_) {
             throw std::logic_error("terminal reasoning appeared after streamed content");
         }
-        events.push_back(chunk(identity_, Json{{"reasoning_content", reasoning_suffix}}, nullptr,
-                               include_usage_, output_timings));
+        events.push_back(chunk(identity_, sample_index_, Json{{"reasoning_content", reasoning_suffix}},
+                               nullptr, include_usage_, output_timings));
     }
     const std::string content_suffix = outcome.text.substr(content_.size());
     if (!content_suffix.empty()) {
-        events.push_back(chunk(identity_, Json{{"content", content_suffix}}, nullptr,
+        events.push_back(chunk(identity_, sample_index_, Json{{"content", content_suffix}}, nullptr,
                                include_usage_, output_timings));
     }
 
     tools_.verify(outcome.tool_calls);
-    events.push_back(chunk(identity_, Json::object(), finish_reason(outcome), include_usage_,
-                           include_usage_ ? Json(nullptr) : final_timings,
-                           include_usage_ ? Json(nullptr) : constraint));
-    if (include_usage_) {
-        events.push_back(usage_chunk(identity_, usage_from(outcome), final_timings, constraint));
+    // Aggregate request state (timings, constraint) rides the first sample's terminal chunk when
+    // no dedicated usage chunk follows it; otherwise it moves onto that usage chunk.
+    const bool carries_request_state = !include_usage_ && sample_index_ == 0;
+    events.push_back(chunk(identity_, sample_index_, Json::object(), finish_reason(outcome),
+                           include_usage_, carries_request_state ? final_timings : Json(nullptr),
+                           carries_request_state ? constraint : Json(nullptr)));
+    return events;
+}
+
+std::vector<std::string> OpenAIChatStream::finish(const GenerationOutcome& outcome) {
+    std::vector<std::string> events = finish_sample(outcome);
+    std::vector<std::string> tail =
+        make_chat_stream_sample_terminator(identity_, std::vector<GenerationOutcome>{outcome},
+                                           include_usage_);
+    events.insert(events.end(), std::make_move_iterator(tail.begin()),
+                  std::make_move_iterator(tail.end()));
+    return events;
+}
+
+std::vector<std::string>
+make_chat_stream_sample_terminator(const OpenAIChatResponseIdentity& identity,
+                                   const std::vector<GenerationOutcome>& outcomes,
+                                   bool include_usage) {
+    if (outcomes.empty()) { throw std::logic_error("chat stream terminator has no outcomes"); }
+    std::vector<std::string> events;
+    if (include_usage) {
+        events.push_back(usage_chunk(identity, usage_from(outcomes),
+                                     timings_json(outcome_timings(outcomes.front())),
+                                     product::constraint_observation_json(
+                                         outcomes.front().stats.constraint)));
     }
     events.emplace_back("data: [DONE]\n\n");
     return events;

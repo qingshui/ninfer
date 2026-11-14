@@ -723,14 +723,6 @@ void parse_sampling(const Json& body, GenerationRequest& output) {
     // to NInfer's native sampler and are useful for Qwen's published sampling presets.
     sampling.top_k = optional_int(body, "top_k");
     sampling.min_p = get_number(body, "min_p");
-
-    if (const std::optional<int> count = optional_int(body, "n")) {
-        if (*count != 1) {
-            bad_request("n requests multiple completions, while NInfer produces one completion per "
-                        "request; only n=1 is supported",
-                        "n", "n_not_supported");
-        }
-    }
 }
 
 struct TemplateOptions {
@@ -838,6 +830,7 @@ OpenAIChatRequest parse_chat_completion_request(const Json& body, const RequestL
     parse_messages(body, output.generation);
     parse_stop(body, output.generation);
     parse_sampling(body, output.generation);
+    output.sample_count = parse_sample_count(body, limits);
     parse_stream_options(body, output);
     parse_response_observations(body, output);
     parse_output_limit(body, limits, output);

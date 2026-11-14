@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <exception>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -18,6 +19,29 @@ namespace {
 
 std::string sse_error_event(const ApiError& error) {
     return "data: " + make_error_body(error) + "\n\n";
+}
+
+// One Chat Completions request fans out to one prepared request per requested sample. This owner
+// keeps every prepared sample and its transport flags alive across the chunked-content provider.
+struct ChatGenerationStream {
+    explicit ChatGenerationStream(std::vector<PreparedRequest> requests)
+        : prepared(std::move(requests)) {}
+
+    std::vector<PreparedRequest> prepared;
+    std::atomic<bool> cancelled{false};
+    std::atomic<bool> started{false};
+};
+
+// Request-level accounting for one HTTP request: the first sample's content with every sample's
+// completion tokens. Measurement logs stay one record per HTTP request.
+GenerationOutcome aggregate_outcomes(const std::vector<GenerationOutcome>& outcomes) {
+    if (outcomes.empty()) { throw std::logic_error("chat request has no sample outcomes"); }
+    GenerationOutcome aggregate = outcomes.front();
+    for (std::size_t index = 1; index < outcomes.size(); ++index) {
+        aggregate.completion_tokens += outcomes[index].completion_tokens;
+        aggregate.reasoning_tokens += outcomes[index].reasoning_tokens;
+    }
+    return aggregate;
 }
 
 } // namespace
@@ -40,7 +64,7 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
                                 .stream                 = request.stream,
                                 .output_tokens_explicit = request.output_tokens_explicit};
     observations_.preparing(req_id, "openai_chat_completions", metadata);
-    PreparedRequest prepared;
+    std::vector<PreparedRequest> prepared;
     try {
         ninfer::GenerationObservationOptions observation{
             .constraint_timings = true,
@@ -49,8 +73,8 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
             .scheduling         = scheduling_observer(req_id, metadata.http_request_id),
             .first_token        = first_token_observer(req_id),
         };
-        prepared = service_->prepare(
-            request.generation,
+        prepared = service_->prepare_samples(
+            request.generation, request.sample_count,
             request.stream ? GenerationConsumerMode::Streaming : GenerationConsumerMode::Aggregate,
             std::move(observation), [&req] { return client_disconnected(req); });
     } catch (const ApiException& exception) {
@@ -72,15 +96,21 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
     const OpenAIChatResponseIdentity identity = make_openai_chat_response_identity(request.model);
     metadata.response_id                      = identity.id;
     auto lifecycle                            = begin_request(make_request_log_context(
-        req_id, "openai_chat_completions", request.generation, metadata, prepared));
+        req_id, "openai_chat_completions", request.generation, metadata, prepared.front()));
 
-    GenerationOutcome aggregate;
+    std::vector<GenerationOutcome> outcomes;
     try {
         if (request.stream) {
-            service_->wait_for_admission(prepared, [&req] { return client_disconnected(req); });
+            for (PreparedRequest& sample : prepared) {
+                service_->wait_for_admission(sample,
+                                             [&req] { return client_disconnected(req); });
+            }
         } else {
-            aggregate =
-                service_->run(prepared, nullptr, [&req] { return client_disconnected(req); });
+            outcomes.reserve(prepared.size());
+            for (PreparedRequest& sample : prepared) {
+                outcomes.push_back(
+                    service_->run(sample, nullptr, [&req] { return client_disconnected(req); }));
+            }
         }
     } catch (const ApiException& exception) {
         lifecycle->failure(make_generation_request_failure(exception.error()));
@@ -98,10 +128,10 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
     }
 
     if (!request.stream) {
-        lifecycle->done(aggregate);
+        lifecycle->done(aggregate_outcomes(outcomes));
         try {
-            set_owned_json_content(res, make_chat_completion_response(identity, aggregate),
-                                   prepared.lifetime);
+            set_owned_json_content(res, make_chat_completion_response(identity, outcomes),
+                                   prepared.front().lifetime);
         } catch (const std::exception& exception) {
             lifecycle->response_failure(make_internal_request_failure(
                 RequestFailurePhase::ResponseRender, exception.what()));
@@ -115,17 +145,24 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
     }
 
     try {
-        const bool return_progress   = request.return_progress;
-        const bool timings_per_token = request.timings_per_token;
-        auto stream                  = std::make_shared<HttpGenerationStream>(std::move(prepared));
-        auto encoder = std::make_shared<OpenAIChatStream>(identity, request.include_usage,
-                                                          timings_per_token, return_progress);
+        const bool return_progress    = request.return_progress;
+        const bool timings_per_token  = request.timings_per_token;
+        const bool include_usage      = request.include_usage;
+        const std::size_t sample_count = prepared.size();
+        auto stream = std::make_shared<ChatGenerationStream>(std::move(prepared));
+        std::vector<std::shared_ptr<OpenAIChatStream>> encoders;
+        encoders.reserve(sample_count);
+        for (std::size_t index = 0; index < sample_count; ++index) {
+            encoders.push_back(std::make_shared<OpenAIChatStream>(
+                identity, include_usage, timings_per_token, return_progress,
+                static_cast<int>(index)));
+        }
 
         prepare_sse_response(res);
         res.set_chunked_content_provider(
             "text/event-stream",
-            [this, stream, encoder, lifecycle, return_progress,
-             timings_per_token](std::size_t, httplib::DataSink& sink) -> bool {
+            [this, identity, stream, encoders, lifecycle, return_progress, timings_per_token,
+             include_usage](std::size_t, httplib::DataSink& sink) -> bool {
                 if (stream->started.exchange(true, std::memory_order_acq_rel)) {
                     sink.done();
                     return true;
@@ -147,7 +184,9 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
                     }
                 };
                 try {
-                    render_and_write(transport, [&] { return encoder->start(); });
+                    for (const std::shared_ptr<OpenAIChatStream>& encoder : encoders) {
+                        render_and_write(transport, [&] { return encoder->start(); });
+                    }
                 } catch (const ClientDisconnected&) {
                     lifecycle->failure(
                         make_client_disconnected_failure(RequestFailurePhase::Transport));
@@ -162,45 +201,55 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
                     return send_error(error);
                 }
 
-                GenerationOutcome outcome;
+                std::vector<GenerationOutcome> outcomes;
+                bool cancelled = false;
                 try {
-                    StreamSink output;
-                    output.on_start = [&](const ninfer::GenerationStart& start) {
-                        encoder->note_start(start);
+                    outcomes.reserve(encoders.size());
+                    for (std::size_t index = 0; index < encoders.size(); ++index) {
+                        OpenAIChatStream& encoder = *encoders[index];
+                        StreamSink output;
+                        output.on_start = [&](const ninfer::GenerationStart& start) {
+                            encoder.note_start(start);
+                            if (return_progress) {
+                                render_and_write(
+                                    transport, [&] { return encoder.initial_prompt_progress(); });
+                            }
+                        };
                         if (return_progress) {
-                            render_and_write(transport,
-                                             [&] { return encoder->initial_prompt_progress(); });
+                            output.on_progress = [&](const ninfer::PromptProgress& progress) {
+                                render_and_write(transport,
+                                                 [&] { return encoder.prompt_progress(progress); });
+                            };
                         }
-                    };
-                    if (return_progress) {
-                        output.on_progress = [&](const ninfer::PromptProgress& progress) {
+                        if (timings_per_token) {
+                            output.on_timing = [&](const ninfer::GenerationTimingObservation& timing) {
+                                encoder.note_timing(timing);
+                            };
+                        }
+                        output.on_content = [&](const std::string& text) {
                             render_and_write(transport,
-                                             [&] { return encoder->prompt_progress(progress); });
+                                             [&] { return encoder.content_delta(text); });
                         };
-                    }
-                    if (timings_per_token) {
-                        output.on_timing = [&](const ninfer::GenerationTimingObservation& timing) {
-                            encoder->note_timing(timing);
+                        output.on_reasoning = [&](const std::string& text) {
+                            render_and_write(transport,
+                                             [&] { return encoder.reasoning_delta(text); });
                         };
-                    }
-                    output.on_content = [&](const std::string& text) {
-                        render_and_write(transport, [&] { return encoder->content_delta(text); });
-                    };
-                    output.on_reasoning = [&](const std::string& text) {
-                        render_and_write(transport, [&] { return encoder->reasoning_delta(text); });
-                    };
-                    output.on_tool_start = [&](const ninfer::ToolCallStart& event) {
-                        render_and_write(transport, [&] { return encoder->tool_start(event); });
-                    };
-                    output.on_tool_arguments = [&](const ninfer::ToolArgumentsDelta& event) {
-                        render_and_write(transport, [&] { return encoder->tool_arguments(event); });
-                    };
-                    output.on_tool_end = [&](const ninfer::ToolCallEnd& event) {
-                        render_and_write(transport, [&] { return encoder->tool_end(event); });
-                    };
-                    output.is_cancelled = [&] { return transport.poll(); };
+                        output.on_tool_start = [&](const ninfer::ToolCallStart& event) {
+                            render_and_write(transport, [&] { return encoder.tool_start(event); });
+                        };
+                        output.on_tool_arguments = [&](const ninfer::ToolArgumentsDelta& event) {
+                            render_and_write(transport,
+                                             [&] { return encoder.tool_arguments(event); });
+                        };
+                        output.on_tool_end = [&](const ninfer::ToolCallEnd& event) {
+                            render_and_write(transport, [&] { return encoder.tool_end(event); });
+                        };
+                        output.is_cancelled = [&] { return transport.poll(); };
 
-                    outcome = service_->run(stream->prepared, &output);
+                        outcomes.push_back(service_->run(stream->prepared[index], &output));
+                        cancelled |=
+                            outcomes.back().finish_reason == ninfer::FinishReason::Cancelled;
+                    }
                 } catch (const ClientDisconnected&) {
                     lifecycle->failure(
                         make_client_disconnected_failure(RequestFailurePhase::Transport));
@@ -226,16 +275,22 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
                     return send_error(error);
                 }
 
-                lifecycle->done(outcome);
-                if (outcome.finish_reason == ninfer::FinishReason::Cancelled ||
-                    stream->cancelled.load(std::memory_order_acquire)) {
+                lifecycle->done(aggregate_outcomes(outcomes));
+                if (cancelled || stream->cancelled.load(std::memory_order_acquire)) {
                     lifecycle->response_failure(
                         make_client_disconnected_failure(RequestFailurePhase::Transport));
                     return false;
                 }
                 std::vector<std::string> terminal;
                 try {
-                    terminal = encoder->finish(outcome);
+                    for (std::size_t index = 0; index < encoders.size(); ++index) {
+                        const std::vector<std::string> events =
+                            encoders[index]->finish_sample(outcomes[index]);
+                        terminal.insert(terminal.end(), events.begin(), events.end());
+                    }
+                    const std::vector<std::string> tail =
+                        make_chat_stream_sample_terminator(identity, outcomes, include_usage);
+                    terminal.insert(terminal.end(), tail.begin(), tail.end());
                 } catch (const std::exception& exception) {
                     lifecycle->response_failure(make_internal_request_failure(
                         RequestFailurePhase::ResponseRender, exception.what()));

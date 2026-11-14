@@ -21,8 +21,10 @@ struct GenerationOutcome;
 struct OpenAIChatRequest {
     std::string model;
     GenerationRequest generation;
-    bool stream                 = false;
-    bool include_usage          = false;
+    // OpenAI `n`: independently sampled sequences fan out from this one request.
+    int sample_count           = 1;
+    bool stream                = false;
+    bool include_usage         = false;
     bool output_tokens_explicit = false;
     // llama.cpp-compatible response observations. Final timings remain unconditional;
     // timings_per_token controls only cumulative timing snapshots on streamed output chunks.
@@ -40,13 +42,19 @@ struct OpenAIChatResponseIdentity {
 };
 
 OpenAIChatResponseIdentity make_openai_chat_response_identity(std::string model);
+// One choice per outcome, indexed by sample order. Usage reports the single shared prompt and
+// the sum of every sample's completion tokens.
+std::string make_chat_completion_response(const OpenAIChatResponseIdentity& identity,
+                                          const std::vector<GenerationOutcome>& outcomes);
+// Single-sample form; identical to the multi-sample form with exactly one outcome.
 std::string make_chat_completion_response(const OpenAIChatResponseIdentity& identity,
                                           const GenerationOutcome& outcome);
 
 class OpenAIChatStream {
 public:
     OpenAIChatStream(OpenAIChatResponseIdentity identity, bool include_usage,
-                     bool timings_per_token = false, bool return_progress = false);
+                     bool timings_per_token = false, bool return_progress = false,
+                     int sample_index = 0);
 
     std::string start();
     void note_start(const ninfer::GenerationStart& start);
@@ -58,6 +66,11 @@ public:
     std::vector<std::string> tool_start(const ninfer::ToolCallStart& event);
     std::vector<std::string> tool_arguments(const ninfer::ToolArgumentsDelta& event);
     std::vector<std::string> tool_end(const ninfer::ToolCallEnd& event);
+    // Terminal events for one choice of a multi-sample request: buffered suffixes plus this
+    // choice's finish chunk. Aggregate usage and the [DONE] sentinel are emitted separately by
+    // make_chat_stream_sample_terminator.
+    std::vector<std::string> finish_sample(const GenerationOutcome& outcome);
+    // Complete terminal events for a single-sample request.
     std::vector<std::string> finish(const GenerationOutcome& outcome);
 
 private:
@@ -72,6 +85,7 @@ private:
     std::uint32_t cached_tokens_            = 0;
     std::uint32_t last_progress_tokens_     = 0;
     std::uint64_t last_progress_elapsed_ns_ = 0;
+    int sample_index_                       = 0;
     bool include_usage_                     = false;
     bool timings_per_token_                 = false;
     bool return_progress_                   = false;
@@ -81,5 +95,14 @@ private:
     bool content_started_                   = false;
     bool finished_                          = false;
 };
+
+// Aggregate terminal events for a multi-sample streaming request: one usage chunk built from
+// every sample (only when include_usage; prompt tokens are the single shared prompt, completion
+// tokens are the sum) followed by the [DONE] sentinel. Timings and constraint state report the
+// first sample's terminal accounting.
+std::vector<std::string>
+make_chat_stream_sample_terminator(const OpenAIChatResponseIdentity& identity,
+                                   const std::vector<GenerationOutcome>& outcomes,
+                                   bool include_usage);
 
 } // namespace ninfer::serve

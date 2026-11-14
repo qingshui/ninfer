@@ -46,6 +46,8 @@ private:
 // Server-side context needed while parsing/validating a request.
 struct RequestLimits {
     std::uint32_t default_max_tokens = 8192;
+    // OpenAI `n`: one request fans out to at most this many independently sampled sequences.
+    std::uint32_t max_sample_count = 8;
 };
 
 enum class ContentKind {

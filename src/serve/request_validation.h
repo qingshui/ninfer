@@ -20,6 +20,10 @@ void validate_schema_number_input(const text::ParsedJsonNumbers& parsed);
 std::optional<int> optional_int(const RequestJson& object, const char* key);
 std::optional<double> optional_number(const RequestJson& object, const char* key);
 bool optional_bool(const RequestJson& object, const char* key, bool fallback);
+
+// OpenAI Chat sample count (`n`): a positive integer bounded by RequestLimits. Returns 1 when
+// omitted or null; zero, negative, non-integer, and over-limit values are rejected as 400.
+[[nodiscard]] int parse_sample_count(const RequestJson& body, const RequestLimits& limits);
 enum class JsonFormatProtocol { Chat, Responses, Anthropic };
 void parse_json_output_format(const RequestJson& format, GenerationRequest& request,
                               const std::string& param, JsonFormatProtocol protocol);
