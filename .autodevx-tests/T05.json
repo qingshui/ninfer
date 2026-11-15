@@ -1,0 +1,10 @@
+{
+  "task_id": "T05",
+  "refs": [
+    "F12",
+    "F13"
+  ],
+  "files": {
+    "tests/models/spark2_5/session/test_session_contract.cpp": "2026-11-15T23:50:33"
+  }
+}
