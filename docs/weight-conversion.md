@@ -43,7 +43,7 @@ The built-in recipes are ordinary Python functions in
 | `qwen3_6_35b_a3b` | Q4 experts, Q5/Q6 expert down, Q8 shared/projection weights | None |
 | `qwen3_6_27b_nvfp4` | Imported NVFP4, selected BF16 projections, Q8 vocabulary weights | `quantized` |
 | `qwen3_8_27b_nvfp4` | Imported NVFP4/FP8, FP8 embedding generated from BF16 | `quantized` |
-| `qwen3_5_122b_nvfp4` | Imported ModelOpt NVFP4 full-attention Q/K/V/O, shared experts and expert-major expert banks with one shared per-layer activation-divisor tensor, Q8 vocabulary weights; GDN, router and norms stay BF16 | None; NVFP4 checkpoint is the primary source |
+| `qwen3_5_122b_nvfp4` | Imported ModelOpt NVFP4 full-attention Q/K/V/O and expert-major expert banks with one shared per-layer activation-divisor tensor, Q8 vocabulary weights; shared experts decoded to BF16; GDN, router, shared-expert gate and norms stay BF16 | None; NVFP4 checkpoint is the primary source |
 | `qwen3_8_flash_next` | Q8 main projections, NVIDIA NVFP4 experts, block-FP8 MTP experts, NF4 PLE, BF16 auxiliary projections/Vision | `nvidia` |
 | `glm5next` | NVIDIA NVFP4 Main experts/dense MLP, Q8 KDA and MLA output/shared projections, block-FP8 MTP experts; BF16 Main head, embedding and Vision | None; NVIDIA checkpoint is the primary source |
 | `spark_x2_6_17b_bf16` | FP8 row + FP32 scale projections quantized from the BF16 source, Q8 tied embedding/head, BF16 attention gate | None |
