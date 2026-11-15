@@ -120,10 +120,13 @@ public:
                                           std::function<bool()> is_cancelled               = {},
                                           ContextCacheHints context_cache = {}) const;
     // Prepares one independently sampled sequence of a request that asked for `sample_count`
-    // sequences. All samples of one request are prepared in parallel when the request is
-    // admitted: every sample renders the same prompt, so the Engine's existing prefix reuse and
-    // context cache share their prefill (with the cache disabled each sample prefills
-    // independently). A request or server-configured fixed seed is offset per sample so the
+    // sequences: every sequence renders the same prompt, so the Engine's prefix reuse shares
+    // their prefill. Later sequences are prepared only after the previous sequence's
+    // generation completed, so each adopts the previous sequence's published prompt source
+    // instead of the Engine prefilling the same prompt again. `publish_source` publishes the
+    // prepared sequence's final context as a source the next sequence adopts; the last
+    // sequence of a request publishes nothing, so a finished request leaves no retained
+    // source behind. A request or server-configured fixed seed is offset per sample so the
     // sequences stay independently sampled; without a fixed seed each preparation draws a
     // fresh random seed.
     [[nodiscard]] PreparedRequest
@@ -131,7 +134,7 @@ public:
                    GenerationConsumerMode consumer_mode,
                    ninfer::GenerationObservationOptions observation = {},
                    std::function<bool()> is_cancelled               = {},
-                   ContextCacheHints context_cache = {}) const;
+                   ContextCacheHints context_cache = {}, bool publish_source = true) const;
     [[nodiscard]] int count_prompt_tokens(const GenerationRequest& req,
                                           std::function<bool()> is_cancelled = {}) const;
 

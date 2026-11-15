@@ -54,31 +54,38 @@ std::string make_chat_completion_response(const OpenAIChatResponseIdentity& iden
                                           const GenerationOutcome& outcome);
 
 // Multi-sample fan-out of one Chat Completions request. One prepared request per requested
-// sample, all prepared up front when the request is admitted and each consumed exactly once.
+// sample, each consumed exactly once. This owner keeps the prepared samples, the request that
+// renders their shared prompt, and their transport flags alive across the chunked-content
+// provider.
 struct ChatGenerationStream {
-    explicit ChatGenerationStream(std::vector<PreparedRequest> requests);
+    ChatGenerationStream(std::vector<PreparedRequest> requests, GenerationRequest generation);
 
     std::vector<PreparedRequest> prepared;
+    GenerationRequest generation;
     std::atomic<bool> cancelled{false};
     std::atomic<bool> started{false};
 };
 
-// Prepares every sample of one request at admission, in sample order. Every sample renders the
-// same prompt, so the Engine's prefix reuse and context cache share their prefill instead of the
-// request chaining one sample's published source into the next.
-[[nodiscard]] std::vector<PreparedRequest>
-prepare_chat_samples(const GenerationService& service, const GenerationRequest& generation,
-                     int sample_count, GenerationConsumerMode consumer_mode,
-                     const ninfer::GenerationObservationOptions& observation,
-                     std::function<bool()> is_cancelled);
+// Prepares sample `index` of a request that asked for `sample_count` samples. Every sample
+// renders the same prompt; a sample is prepared only after the previous sample's generation
+// completed, so it adopts the previous sample's published prompt source instead of the Engine
+// prefilling the same prompt again. The first sample (and a single-sample request) publishes
+// its final context as a continuation source; a later sample publishes unless it is the
+// request's last, so a finished request leaves no retained source behind.
+[[nodiscard]] PreparedRequest
+prepare_chat_sample(const GenerationService& service, const GenerationRequest& generation,
+                    int sample_count, int index, GenerationConsumerMode consumer_mode,
+                    const ninfer::GenerationObservationOptions& observation,
+                    std::function<bool()> is_cancelled);
 
-// Runs every prepared sample of one request in parallel, one thread per sample, and returns one
-// outcome per sample in sample order. A failing sample signals its siblings to stop; the
-// first-originating failure is rethrown only after every sample settled, so cancellation errors
-// raised by the stop signal never mask the failure that caused it.
+// Runs the samples of one non-streaming request in sample order, preparing each sample only
+// after the previous sample's generation completed so it adopts the previous sample's published
+// prompt source, and returns one outcome per sample in sample order. `stream` carries the
+// already prepared first sample and the request that renders the shared prompt.
 [[nodiscard]] std::vector<GenerationOutcome>
-run_parallel_samples(GenerationService& service, std::vector<PreparedRequest>& prepared,
-                     const std::function<bool()>& is_cancelled);
+run_sequential_samples(GenerationService& service, ChatGenerationStream& stream,
+                       int sample_count, const ninfer::GenerationObservationOptions& observation,
+                       const std::function<bool()>& is_cancelled);
 
 class OpenAIChatStream {
 public:

@@ -390,7 +390,8 @@ PreparedRequest GenerationService::prepare(const GenerationRequest& request,
 PreparedRequest GenerationService::prepare_sample(
     const GenerationRequest& request, int sample_count, int index,
     GenerationConsumerMode consumer_mode, ninfer::GenerationObservationOptions observation,
-    std::function<bool()> is_cancelled, ContextCacheHints context_cache) const {
+    std::function<bool()> is_cancelled, ContextCacheHints context_cache,
+    bool publish_source) const {
     if (sample_count < 1 || index < 0 || index >= sample_count) {
         throw std::logic_error("sample index outside the request's sample count");
     }
@@ -400,15 +401,11 @@ PreparedRequest GenerationService::prepare_sample(
     if (index != 0 && fixed_seed) {
         sample.sampling.seed = *fixed_seed + static_cast<std::uint64_t>(index);
     }
-    // A single-sample request still publishes its final context as a continuation source so a
-    // follow-up request can adopt the conversation prefix. A multi-sample request renders
-    // divergent completions in parallel, none of which is the conversation's continuation, so
-    // no sample publishes and the finished request leaves no retained source behind.
     return prepare_impl(sample, consumer_mode, std::move(observation), std::move(is_cancelled),
                         std::move(context_cache),
                         options_.launch.engine.context_cache.enabled ? CacheParticipation::ReadWrite
                                                                      : CacheParticipation::Disabled,
-                        DeadlinePolicy::ClientPendingTimeout, sample_count == 1);
+                        DeadlinePolicy::ClientPendingTimeout, publish_source);
 }
 
 PreparedRequest GenerationService::prepare_impl(const GenerationRequest& request,

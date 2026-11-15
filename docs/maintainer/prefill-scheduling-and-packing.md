@@ -27,13 +27,17 @@
 | 工况 | 条件 | 预算 |
 | --- | --- | --- |
 | Throughput | 没有等待 decode 的 lane | `max(pack_tokens, chunk)` token，单元数 `max(2, concurrency)`，允许多段打包 |
-| Interleave | 有等待 decode 的 lane | 按预测耗时放行：`interleave_ns`（200 ms）与 `4 × chunk` token 两个上界，另有 debt cap 400 ms、repay 8 ms |
+| Interleave | 有等待 decode 的 lane | 按预测耗时放行：`interleave_ns` 与 `kInterleaveChunks × chunk` token 两个上界，另有 debt cap、repay |
 
-- Interleave 常量按大 batch 场景（多请求段合并的 2048–8192 token 单 flight、130+ 驻留 decode
-  lane）重标定，为方向值：`kInterleaveChunks` 与打包预算一致使一个 Interleave 周期可承载一次完整
-  合并 flight；`kInterleaveNs`（200 ms）随之放大避免大 flight 被切碎重复支付固定提交成本；
-  `kInterleaveColdTokens`（2048）让冷启动 lane 从一个整 chunk 开始；debt 对（cap 400 ms /
-  repay 8 ms）适配大驻留 batch 的 decode 让步比例。吞吐/延迟达标归调优阶段，以实测数据为准。
+- Interleave 常量按引擎解析的并发数 `C` 选择两档（`kLargeBatchLanes = 64` 为界）：
+  - 小 batch（`C < 64`，默认 serving 的少量 lane 工况）：100 ms / 2 chunk / 冷启动 1024 token，
+    debt cap 300 ms / repay 4 ms。该档为实测校准（mini load 40 ms 与 100 ms 的端到端对比）。
+  - 大 batch（`C >= 64`，显式 `--max-concurrency` 工况，方向值）：按大 batch 场景（多请求段合并的
+    2048–8192 token 单 flight、130+ 驻留 decode lane）重标定——`kInterleaveChunks` 与打包预算一致
+    使一个 Interleave 周期可承载一次完整合并 flight；`kInterleaveNs`（200 ms）随之放大避免大 flight
+    被切碎重复支付固定提交成本；`kInterleaveColdTokens`（2048）让冷启动 lane 从一个整 chunk 开始；
+    debt 对（cap 400 ms / repay 8 ms）适配大驻留 batch 的 decode 让步比例。
+    吞吐/延迟达标归调优阶段，以实测数据为准。
 
 - 每周期首个单元总是放行。放不下的 lane 结束本周期，游标停在该 lane。
 - 耗时预测：`prefill_executed(lane, concurrency, tokens, elapsed_ns)` 维护按 lane 的
