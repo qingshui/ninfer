@@ -28,11 +28,27 @@ enum class Nvfp4CachePolicy {
     RetainInputsBypassL1 = 14,
 };
 
+// B200 (sm_100a) tcgen05 tile choice for the grouped NVFP4 GEMMs. `tile_tokens` is the MMA's N:
+// the tokens of one expert that share a tile (16, 32, 64 or 128; 0 lets the b200 plan choose from
+// the token count). `cluster` is the CTA-group width and `ctas_per_sm` the persistent grid
+// multiplier; the grouped kernels run one independent CTA per SM, so both must be 1.
+struct Nvfp4Sm100Tuning {
+    int tile_tokens = 0;
+    int cluster     = 1;
+    int ctas_per_sm = 1;
+};
+
 struct Nvfp4Tuning {
     Nvfp4Pipeline pipeline = Nvfp4Pipeline::K128;
     Nvfp4CachePolicy cache = Nvfp4CachePolicy::Cached;
     int down_row_window    = 0;
+    Nvfp4Sm100Tuning sm100;
 };
+
+// Defined by the b200 target only (nvfp4/b200/plan.cpp). Returns `requested` with every unset
+// field filled from the token count, and rejects a tile or grouping the grouped tcgen05 kernels
+// do not provide.
+Nvfp4Sm100Tuning resolve_nvfp4_sm100_tuning(const Nvfp4Sm100Tuning& requested, int tokens);
 
 struct Nvfp4LoadSchedule {
     int gate_columns = 0, down_columns = 0;

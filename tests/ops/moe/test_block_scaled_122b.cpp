@@ -4,6 +4,8 @@
 #include "ops/suite.h"
 #include "core/buffer.h"
 #include "ninfer/ops/moe.h"
+#include "ops/moe/backend.h"
+#include "ops/moe/kernels/cuda/block_scaled/nvfp4/schedule.h"
 #include "ops/moe/operands.h"
 #include "ops/op_tester.h"
 #include "ops/quantized_weight.h"
@@ -44,18 +46,19 @@ Weight dense(const DeviceBuffer& buffer, int rows, int columns) {
     return w;
 }
 
+// Expert-major bank: expert e holds pattern slot (e & 1) at e * stride, exactly the affine layout
+// the artifact stores (code plane, then block-scale plane, per expert).
 struct Matrix {
     int n, k;
     std::size_t code_bytes, scale_bytes;
     std::vector<std::vector<std::uint8_t>> payload;
     std::vector<std::vector<float>> decoded;
-    DeviceBuffer data, offsets, divisors;
+    DeviceBuffer data, divisors;
     std::vector<float> dw;
     std::size_t stride, scale_offset;
 
     Matrix(int rows, int columns, unsigned seed)
-        : n(rows), k(columns), offsets(cuda_environment().context.device(), E * 8),
-          divisors(cuda_environment().context.device(), E * 4) {
+        : n(rows), k(columns), divisors(cuda_environment().context.device(), E * 4) {
         for (int slot = 0; slot < 2; ++slot) {
             auto p = quantized_weight::make_patterned_weight(
                 QType::NVFP4, n, k, seed + slot, {.weight_scale = 1, .input_scale = 1});
@@ -76,36 +79,25 @@ struct Matrix {
             decoded.push_back(std::move(values));
         }
         stride = (payload[0].size() + 255) / 256 * 256;
-        data   = DeviceBuffer(cuda_environment().context.device(), 2 * stride);
-        for (int slot = 0; slot < 2; ++slot) {
-            data.copy_from_host(payload[slot].data(), payload[slot].size(), slot * stride);
+        data   = DeviceBuffer(cuda_environment().context.device(), std::size_t(E) * stride);
+        for (int e = 0; e < E; ++e) {
+            const int slot = e & 1;
+            data.copy_from_host(payload[slot].data(), payload[slot].size(), std::size_t(e) * stride);
         }
         dw.resize(E);
         for (int e = 0; e < E; ++e) { dw[e] = 3.0F + (e % 8) * 0.5F; }
         divisors.copy_from_host(dw.data(), divisors.size());
-        publish({}, ops::ExpertSubsetKind::All, false);
-    }
-
-    void publish(std::span<const int> mask, ops::ExpertSubsetKind kind, bool flip) {
-        std::vector<std::uint64_t> indices(E, UINT64_MAX);
-        for (int e = 0; e < E; ++e) {
-            if (kind == ops::ExpertSubsetKind::All ||
-                (kind == ops::ExpertSubsetKind::MaskOnes && mask[e]) ||
-                (kind == ops::ExpertSubsetKind::MaskZeros && !mask[e])) {
-                indices[e] = ((e & 1) ^ int(flip)) * stride;
-            }
-        }
-        offsets.copy_from_host(indices.data(), offsets.size());
     }
 
     ExpertMatrixDeviceView view() const {
         ExpertMatrixDeviceView result;
         result.codes               = static_cast<const std::byte*>(data.data());
         result.scales              = result.codes + scale_offset;
-        result.offsets             = static_cast<const std::uint64_t*>(offsets.data());
-        result.indexed_storage     = data.span();
+        result.code_stride         = stride;
+        result.scale_stride        = stride;
         result.matrix_scales       = static_cast<const float*>(divisors.data());
         result.matrix_scale_stride = 1;
+        result.physical_count      = E;
         return result;
     }
 };
@@ -143,7 +135,7 @@ struct Fixture {
     std::vector<float> control, shared_gu, shared_down;
     DeviceBuffer control_d, shared_gu_d, shared_down_d;
     ops::MoeWeights weights;
-    std::map<std::tuple<int, int, bool>, std::vector<double>> cache;
+    std::map<std::tuple<int, int>, std::vector<double>> cache;
     std::vector<std::vector<double>> shared_values;
     std::array<std::vector<double>, 3> logits;
 
@@ -186,11 +178,11 @@ struct Fixture {
             {{dense(shared_gu_d, 2 * I, H)}, {dense(shared_down_d, H, I)}}};
     }
 
-    const std::vector<double>& expert(int p, int e, bool flip) {
-        auto key   = std::tuple{p, e % 8, flip};
+    const std::vector<double>& expert(int p, int e) {
+        auto key   = std::tuple{p, e % 8};
         auto found = cache.find(key);
         if (found != cache.end()) { return found->second; }
-        const int slot = (e & 1) ^ int(flip);
+        const int slot = e & 1;
         return cache
             .emplace(key, ffn(x[p], gu.decoded[slot], down.decoded[slot], gu.dw[e], down.dw[e]))
             .first->second;
@@ -286,7 +278,7 @@ int run(Fixture& f, CudaExecutionView execution, int tokens, bool shared, bool c
         }
         for (int j = 0; j < TopK; ++j) {
             const int e        = ids[t * TopK + j];
-            const auto& value  = f.expert(p, e, false);
+            const auto& value  = f.expert(p, e);
             for (int h = 0; h < H; ++h) {
                 reference[std::size_t(t) * H + h] += coefficients[j] * value[h];
             }
@@ -427,6 +419,110 @@ int validate_cases(Fixture&) {
     return failures;
 }
 
+// Backend routing and tuning contract of the b200 tcgen05 path: moe_backend selects the engine,
+// the tuning resolver rejects tiles and groupings the grouped kernels do not provide, and the
+// grouped kernels reject indexed (non-affine) expert banks.
+int backend_cases(Fixture& f, CudaExecutionView execution) {
+    namespace detail = ninfer::ops::detail;
+    namespace bs     = ninfer::ops::detail::moe_cuda::block_scaled;
+    int failures     = 0;
+    const auto expect = [&](bool condition, const char* label) {
+        if (!condition) {
+            std::cerr << "backend: " << label << '\n';
+            ++failures;
+        }
+    };
+    const auto rejected = [&](auto call, const char* token) {
+        try {
+            call();
+            std::cerr << "backend: expected rejection missing\n";
+            ++failures;
+        } catch (const std::invalid_argument& error) {
+            const std::string message = error.what();
+            if (message.find(token) == std::string::npos) {
+                std::cerr << "backend: rejection message lacks '" << token << "': " << message
+                          << '\n';
+                ++failures;
+            }
+        }
+    };
+    // One token is a weight-bandwidth GEMV on every target; other geometries stay on mma.sync.
+    expect(detail::moe_backend(3072, 256, 8, 1) == detail::MoeBackend::Vector,
+           "single token must route to the vector kernels");
+    expect(detail::moe_backend(3072, 256, 10, 130) == detail::MoeBackend::MmaSync,
+           "unregistered geometry must stay on mma.sync");
+#if NINFER_TARGET_B200
+    expect(detail::moe_backend(3072, 256, 8, 130) == detail::MoeBackend::Tcgen05,
+           "122B geometry must route to tcgen05");
+    expect(detail::moe_backend(3072, 256, 8, 2048) == detail::MoeBackend::Tcgen05,
+           "122B geometry must route to tcgen05 for large calls");
+    // Unset tiles default from the token count.
+    const auto tile = [&](int tokens) {
+        return bs::resolve_nvfp4_sm100_tuning(bs::Nvfp4Sm100Tuning{}, tokens).tile_tokens;
+    };
+    expect(tile(1) == 16 && tile(256) == 16, "small calls default to 16-token tiles");
+    expect(tile(257) == 32 && tile(1024) == 32, "medium calls default to 32-token tiles");
+    expect(tile(1025) == 64 && tile(2048) == 64, "large calls default to 64-token tiles");
+    expect(tile(2049) == 128, "very large calls default to 128-token tiles");
+    rejected([&] { bs::resolve_nvfp4_sm100_tuning({48, 1, 1}, 130); }, "48");
+    rejected([&] { bs::resolve_nvfp4_sm100_tuning({16, 2, 1}, 130); }, "cluster");
+    rejected([&] { bs::resolve_nvfp4_sm100_tuning({16, 1, 2}, 130); }, "ctas_per_sm");
+    // The grouped kernels address experts as codes + e * stride over one TMA map, so an
+    // indexed (offsets) bank is rejected before any launch.
+    {
+        const int tokens = 130;
+        std::vector<float> input(std::size_t(tokens) * H);
+        for (int t = 0; t < tokens; ++t) {
+            std::copy(f.x[t % 3].begin(), f.x[t % 3].end(), input.begin() + std::size_t(t) * H);
+        }
+        auto dx = to_device_bf16(input);
+        std::vector<int> ids(tokens * TopK);
+        std::vector<float> alpha(ids.size());
+        for (int t = 0; t < tokens; ++t) {
+            for (int j = 0; j < TopK; ++j) {
+                ids[t * TopK + j]   = (t * 61 + j * 29) % E;
+                alpha[t * TopK + j] = .025F + j * .007F;
+            }
+        }
+        auto di = to_device(ids), da = to_device(alpha);
+        Tensor x(dx.span(), DType::BF16, {H, tokens});
+        ops::ExpertRoutes routes{Tensor(di.span(), DType::I32, {TopK, tokens}),
+                                 Tensor(da.span(), DType::FP32, {TopK, tokens})};
+        DeviceBuffer offsets(cuda_environment().context.device(), std::size_t(E) * 8);
+        std::vector<std::uint64_t> indices(E, 0);
+        offsets.copy_from_host(indices.data(), indices.size(), 0);
+        auto experts     = f.weights.routed;
+        auto gate_up     = f.gu.view();
+        auto down        = f.down.view();
+        gate_up.offsets  = static_cast<const std::uint64_t*>(offsets.data());
+        gate_up.indexed_storage = f.gu.data.span();
+        down.offsets     = gate_up.offsets;
+        down.indexed_storage    = f.down.data.span();
+        experts.bank.gate_up    = gate_up;
+        experts.bank.down       = down;
+        const auto bytes        = ops::routed_swiglu_workspace_capacity_bytes(
+            f.profile.routed, ops::ExpertSubsetKind::All, DType::BF16, ops::MoeEpilogue::Write,
+            tokens, tokens);
+        GuardedDeviceBuffer scratch(bytes), result(input.size() * 2);
+        MemoryArena arena(scratch.span());
+        Tensor output(result.span(), DType::BF16, {H, tokens});
+        rejected([&] {
+            ops::routed_swiglu(x, f.profile.routed, experts, routes,
+                               ops::ExpertSubset{ops::ExpertSubsetKind::All},
+                               ops::MoeEpilogue::Write, output, arena, execution);
+        }, "affine");
+        failures += scratch.verify_guards("backend indexed scratch") +
+                    result.verify_guards("backend indexed output");
+        cuda_synchronize(execution.stream());
+    }
+#else
+    (void)f;
+    (void)execution;
+    (void)bs::Nvfp4Tuning{};
+#endif
+    return failures;
+}
+
 void add_cases(OpSuite& suite) {
     std::vector<OpCase> catalogue;
     std::vector<std::function<int(Fixture&, CudaExecutionView)>> runners;
@@ -436,6 +532,7 @@ void add_cases(OpSuite& suite) {
         runners.push_back(run);
     };
     add("validate", [](Fixture& f, auto) { return validate_cases(f); });
+    add("backend", [](Fixture& f, auto e) { return backend_cases(f, e); });
     for (int t : {1, 33, 130, 520})
         add("route/t" + std::to_string(t),
             [t](Fixture& f, auto e) { return route_case(f, e, t); });

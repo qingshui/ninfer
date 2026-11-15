@@ -361,6 +361,11 @@ void launch_shared(const Tensor& x, const ScaledSwiGLUTerm& shared, const Expert
                                                            storage, plan, execution, prepared);
     };
     if (plan.hidden == 3072) {
+#if NINFER_TARGET_B200
+        if (launch_shared_dense(x, shared, routes, mode, destination, storage, plan, execution,
+                                prepared))
+            return;
+#endif
         launch.template operator()<SwiGLUH3072I1024E256K8, 1024>();
         return;
     }

@@ -1,7 +1,11 @@
-#include "ops/moe/kernels/cuda/block_scaled/nvfp4/launch.h"
+#include "ops/moe/backend.h"
+#include "ops/moe/kernels/cuda/block_scaled/nvfp4/b200/grouped_tcgen05.cuh"
 #include "ops/moe/kernels/cuda/block_scaled/nvfp4/compute.cuh"
+#include "ops/moe/kernels/cuda/block_scaled/nvfp4/launch.h"
 
 #include <algorithm>
+#include <stdexcept>
+#include <string>
 
 namespace ninfer::ops::detail::moe_cuda::block_scaled::nvfp4 {
 namespace {
@@ -80,6 +84,141 @@ void with_shape(int hidden, Function&& function) {
         function.template operator()<SwiGLUH2560I640E512K10>();
     }
 }
+
+[[noreturn]] void reject(const std::string& what) {
+    throw std::invalid_argument("nvfp4 moe tcgen05: " + what);
+}
+
+bool aligned(const void* pointer, std::uintptr_t alignment) {
+    return pointer != nullptr && reinterpret_cast<std::uintptr_t>(pointer) % alignment == 0;
+}
+
+// The grouped kernels address an expert as codes + expert * code_stride and
+// scales + expert * scale_stride (one TMA map over the bank), so the bank must be affine.
+void check_bank(const ExpertMatrixDeviceView& bank, const char* name, int experts) {
+    const std::string label = name;
+    if (bank.offsets || bank.expert_indices)
+        reject(label + " bank must be affine (expert-major planes), not indexed");
+    if (!aligned(bank.codes, 128) || !aligned(bank.scales, 16) || !bank.matrix_scales)
+        reject(label + " bank needs 128-byte aligned codes, 16-byte aligned scales and matrix "
+                       "scalars");
+    if (bank.code_stride % 16 || bank.scale_stride % 16)
+        reject(label + " bank expert strides must be 16-byte multiples");
+    if (bank.physical_count != 0 && static_cast<int>(bank.physical_count) != experts)
+        reject(label + " bank holds " + std::to_string(bank.physical_count) + " experts, expected " +
+               std::to_string(experts));
+}
+
+template <int TileN>
+void run_grouped(const Tensor& x, const CudaSwiGLUExperts& experts, const ExpertRoutes& routes,
+                 const Plan& plan, const Storage& s, CudaExecutionView execution) {
+    using Shape     = SwiGLUH3072I1024E256K8;
+    constexpr int H = Shape::hidden, I = Shape::intermediate, E = Shape::experts,
+                  K = Shape::top_k;
+    static_assert(H % 256 == 0 && I % 256 == 0 && I % 128 == 0 && H % 128 == 0);
+    const auto stream     = execution.stream();
+    const int tokens      = static_cast<int>(x.ne[1]);
+    const int assignments = tokens * K;
+    const auto& gu        = experts.bank.gate_up;
+    const auto& dn        = experts.bank.down;
+
+    GroupedArgs args{};
+    args.offsets     = s.groups.offsets;
+    args.assignments = s.groups.assignments;
+    args.experts     = E;
+    args.top_k       = K;
+
+    // ---- gate/up: B = hidden codes gathered by token, two weight parts (gate rows, up rows) ----
+    using GateUpCfg = sm::GemmConfig<sm::GemmKind::Nvfp4, TileN, 2>;
+    {
+        GroupedArgs a        = args;
+        a.a_scales           = reinterpret_cast<const std::uint8_t*>(gu.scales);
+        a.a_scale_stride     = gu.scale_stride;
+        a.b_scales           = static_cast<const std::uint8_t*>(s.input_scales);
+        a.b_scale_row_bytes  = H / 16;
+        a.tiles_m            = I / 128;
+        a.k_iters            = H / 256;
+        a.scale_k64          = H / 64;
+        a.part_row_offset    = I;
+        const auto a_map = make_expert_bank_map(gu.codes, H / 2, 2 * I, E, gu.code_stride, 128,
+                                                "moe tcgen05: gate/up weight codes map");
+        const auto b_map = sm::make_tensor_map_2d(
+            s.input_codes, CU_TENSOR_MAP_DATA_TYPE_UINT8, H / 2, tokens, H / 2, 128, 1,
+            CU_TENSOR_MAP_SWIZZLE_128B, CU_TENSOR_MAP_L2_PROMOTION_L2_256B,
+            "moe tcgen05: hidden codes map");
+        const GateUpEpilogue epilogue{
+            s.product_codes,
+            static_cast<std::uint8_t*>(s.product_scales),
+            gu.matrix_scales,
+            gu.matrix_scale_stride,
+            experts.activation_calibration.gate_up.scalar_divisor(),
+            experts.activation_calibration.down.scalar_divisor(),
+            I};
+        launch_grouped<GateUpCfg, BSource::Gather>(a_map, b_map, a, epilogue, assignments, stream);
+    }
+
+    // ---- down: B = product codes of the same packed slots, contiguous per expert ----
+    using DownCfg = sm::GemmConfig<sm::GemmKind::Nvfp4, TileN, 1>;
+    {
+        GroupedArgs a        = args;
+        a.a_scales           = reinterpret_cast<const std::uint8_t*>(dn.scales);
+        a.a_scale_stride     = dn.scale_stride;
+        a.b_scales           = static_cast<const std::uint8_t*>(s.product_scales);
+        a.b_scale_row_bytes  = I / 16;
+        a.tiles_m            = H / 128;
+        a.k_iters            = I / 256;
+        a.scale_k64          = I / 64;
+        a.part_row_offset    = 0;
+        const auto a_map = make_expert_bank_map(dn.codes, I / 2, H, E, dn.code_stride, 128,
+                                                "moe tcgen05: down weight codes map");
+        const auto b_map = sm::make_tensor_map_2d(
+            s.product_codes, CU_TENSOR_MAP_DATA_TYPE_UINT8, I / 2, assignments, I / 2, 128, TileN,
+            CU_TENSOR_MAP_SWIZZLE_128B, CU_TENSOR_MAP_L2_PROMOTION_L2_256B,
+            "moe tcgen05: product codes map");
+        const float divisor = experts.activation_calibration.down.scalar_divisor();
+        const auto* coefficients = static_cast<const float*>(routes.coefficients.data);
+        if (plan.atomic_output) {
+            if (!s.routed_sum) reject("atomic output needs the per-token sum buffer");
+            const DownEpilogue<true> epilogue{s.routed_sum, nullptr, s.groups.assignments,
+                                              coefficients, dn.matrix_scales,
+                                              dn.matrix_scale_stride, divisor, H, K};
+            launch_grouped<DownCfg, BSource::Contiguous>(a_map, b_map, a, epilogue, assignments,
+                                                         stream);
+        } else {
+            if (!s.contributions) reject("ordered output needs the contribution buffer");
+            const DownEpilogue<false> epilogue{nullptr, s.contributions, s.groups.assignments,
+                                               coefficients, dn.matrix_scales,
+                                               dn.matrix_scale_stride, divisor, H, K};
+            launch_grouped<DownCfg, BSource::Contiguous>(a_map, b_map, a, epilogue, assignments,
+                                                         stream);
+        }
+    }
+}
+
+void launch_grouped_tcgen05(const Tensor& x, const CudaSwiGLUExperts& experts,
+                            const ExpertRoutes& routes, const Plan& plan, const Storage& s,
+                            CudaExecutionView execution) {
+    constexpr int E = SwiGLUH3072I1024E256K8::experts;
+    if (!s.groups.offsets || !s.groups.assignments) reject("expert groups are missing");
+    if (!aligned(s.input_codes, 16) || !aligned(s.input_scales, 16) ||
+        !aligned(s.product_codes, 16) || !aligned(s.product_scales, 16))
+        reject("activation buffers must be 16-byte aligned");
+    check_bank(experts.bank.gate_up, "gate/up", E);
+    check_bank(experts.bank.down, "down", E);
+    const int tokens   = static_cast<int>(x.ne[1]);
+    const auto tuning  = resolve_nvfp4_sm100_tuning(plan.nvfp4.sm100, tokens);
+    switch (tuning.tile_tokens) {
+    case 16:
+        return run_grouped<16>(x, experts, routes, plan, s, execution);
+    case 32:
+        return run_grouped<32>(x, experts, routes, plan, s, execution);
+    case 64:
+        return run_grouped<64>(x, experts, routes, plan, s, execution);
+    case 128:
+        return run_grouped<128>(x, experts, routes, plan, s, execution);
+    }
+    reject("unsupported token tile");
+}
 } // namespace
 
 void launch_input(const Tensor& x, const CudaSwiGLUExperts& experts, const Storage& s,
@@ -98,17 +237,26 @@ void launch_input(const Tensor& x, const CudaSwiGLUExperts& experts, const Stora
 
 void launch_experts(const Tensor& x, const CudaSwiGLUExperts& experts, const ExpertRoutes& routes,
                     const Plan& plan, const Storage& s, CudaExecutionView execution) {
-    with_shape(plan.hidden, [&]<class Shape>() {
-        with_columns<true>(plan.gate_columns, [&]<int C>() {
-            launch_mma<Shape, true, C>(x, experts, routes, s, plan, execution);
-        });
-        with_columns<false>(plan.down_columns, [&]<int C>() {
-            if (plan.atomic_output) {
-                launch_mma<Shape, false, C, true>(x, experts, routes, s, plan, execution);
-            } else {
-                launch_mma<Shape, false, C>(x, experts, routes, s, plan, execution);
-            }
-        });
+    switch (moe_backend(plan.hidden, plan.experts, plan.top_k, static_cast<int>(x.ne[1]))) {
+    case MoeBackend::Tcgen05:
+        launch_grouped_tcgen05(x, experts, routes, plan, s, execution);
+        return;
+    case MoeBackend::MmaSync:
+        break;
+    case MoeBackend::Vector:
+        throw std::logic_error("nvfp4 moe: single-token calls take the vector path");
+    }
+    // The 2560/640/512/10 profile keeps the mma.sync kernels.
+    with_columns<true>(plan.gate_columns, [&]<int C>() {
+        launch_mma<SwiGLUH2560I640E512K10, true, C>(x, experts, routes, s, plan, execution);
+    });
+    with_columns<false>(plan.down_columns, [&]<int C>() {
+        if (plan.atomic_output) {
+            launch_mma<SwiGLUH2560I640E512K10, false, C, true>(x, experts, routes, s, plan,
+                                                                 execution);
+        } else {
+            launch_mma<SwiGLUH2560I640E512K10, false, C>(x, experts, routes, s, plan, execution);
+        }
     });
 }
 

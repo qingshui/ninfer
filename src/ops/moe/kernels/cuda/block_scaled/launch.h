@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/platform.h"
 #include "ninfer/ops/moe.h"
 #include "ops/moe/kernels/cuda/block_scaled/nvfp4/schedule.h"
 
@@ -96,6 +97,15 @@ void launch(const Tensor& x, const CudaSwiGLUExperts& experts, const ExpertRoute
 void launch_shared(const Tensor& x, const ScaledSwiGLUTerm& shared, const ExpertRoutes& routes,
                    MoeEpilogue mode, Tensor& destination, const Storage& storage, const Plan& plan,
                    CudaExecutionView execution, bool prepared = false);
+
+#if NINFER_TARGET_B200
+// B200 runs the 122B shared expert (hidden 3072) through the sm100 dense tcgen05 GEMMs
+// (nvfp4/b200/shared.cu). Returns false when the call must run the vector or mma.sync
+// kernels instead (small-token vector plans, FP32 contribution outputs).
+bool launch_shared_dense(const Tensor& x, const ScaledSwiGLUTerm& shared, const ExpertRoutes& routes,
+                         MoeEpilogue mode, Tensor& destination, const Storage& storage,
+                         const Plan& plan, CudaExecutionView execution, bool prepared);
+#endif
 
 void launch_control_shared(const Tensor& x, const MoeWeights& weights, const ExpertRoutes& routes,
                            ExpertSubset subset, const Tensor& shared, float* scores,
