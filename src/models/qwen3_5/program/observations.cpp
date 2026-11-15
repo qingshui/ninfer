@@ -10,6 +10,7 @@ RankExecutionObservation RankProgramImpl::retirement_observation() const noexcep
     out.expert_upload_bytes    = resources.moe ? resources.moe->uploaded_bytes() : 0;
     out.workspace_peak_bytes   = std::max(workspace_lifetime_peak, peak);
     out.measurement_peak_bytes = peak;
+    out.prefill_plan           = prefill_plan;
     return out;
 }
 

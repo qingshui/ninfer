@@ -74,6 +74,8 @@ struct SequencePlanImpl {
     std::size_t vision_memory_budget_bytes = 0;
     ResourceLayout persistent;
     WorkspaceSpec workspace;
+    // Staging State rows of the prefill plans (zero without plans), see prefill_plan_rows().
+    std::uint32_t prefill_plan_rows      = 0;
     bool graph_probe                     = false;
     std::size_t device_reservation_bytes = 0;
 };

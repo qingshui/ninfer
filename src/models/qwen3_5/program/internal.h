@@ -140,6 +140,10 @@ public:
     void upload_ingress();
     void begin_target(ComputeOperation&);
     void begin_mixed_target(ComputeOperation&);
+    // Classifies one prefill traversal against the prebuilt prefill plans: replays the plan when
+    // the flight is exactly the full-chunk shape of a built bucket (true), otherwise records the
+    // eager fallback (false). Both outcomes are counted in `prefill_plan`.
+    [[nodiscard]] bool replay_prefill_plan(ComputeOperation&);
     bool advance_target(ComputeOperation&);
     void begin_draft(ComputeOperation&);
     void begin_mtp_draft(ComputeOperation&);
@@ -205,6 +209,8 @@ public:
     runtime::ExecutionGpuTimer gpu_timer;
     std::deque<runtime::ExecutionEvent<ExecutionTypes>> events;
     std::optional<Graphs> graphs;
+    // Cumulative prefill launch-plan outcomes of this rank (see PrefillPlanCounters).
+    PrefillPlanCounters prefill_plan;
     std::optional<GraphMemorySummary> graph_memory;
     std::size_t workspace_lifetime_peak = 0;
 };

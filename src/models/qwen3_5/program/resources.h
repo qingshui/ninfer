@@ -33,6 +33,9 @@ struct ResourceSpec {
     FrameSpec frame;
     std::size_t context_bytes      = 0;
     std::size_t host_context_bytes = 0;
+    // Staging State rows behind the scratch row of the context arena: the fixed State targets of
+    // captured prefill plans (one per segment of the largest plan).
+    std::uint32_t staging_states = 0;
 };
 
 struct DFlashPersistentLayout {
@@ -51,6 +54,7 @@ struct ResourceLayout {
     std::optional<TensorRegion> token_counts;
     std::size_t context_bytes      = 0;
     std::size_t host_context_bytes = 0;
+    std::uint32_t staging_states   = 0;
     std::size_t bytes              = 0;
 
     [[nodiscard]] std::size_t pinned_bytes() const;

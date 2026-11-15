@@ -2,11 +2,15 @@
 
 #include "core/nvtx.h"
 #include "models/load_options.h"
+#include "models/qwen3_5/prefill_chunk.h"
 
 #include <algorithm>
 #include <array>
 #include <limits>
+#include <span>
 #include <stdexcept>
+#include <utility>
+#include <vector>
 
 namespace ninfer::models::qwen3_5 {
 namespace {
@@ -144,6 +148,51 @@ public:
         device_.synchronize();
     }
 
+    // Marshals one flight of `segments` full-chunk windows exactly like the program does for a
+    // prefill execution, with every segment starting at position zero on its own KV table row and
+    // reading and writing its own staging State row. Token values are zero: the preparation
+    // bodies only need valid, in-range inputs.
+    void prepare_prefill(std::uint32_t segments, std::uint32_t chunk,
+                         std::span<const std::int64_t> state_rows) {
+        auto& frame     = resources_.frame;
+        const auto cuda = device_.execution_view();
+        frame.clear_host_ingress();
+        frame.clear_host_commit();
+        frame.clear_host_egress();
+        for (std::uint32_t row = 0; row < segments; ++row) {
+            auto& host                          = *frame.host_ingress;
+            host.main_table_rows[row]           = row;
+            host.backend_table_rows[row]        = row;
+            host.valid_columns[row]             = chunk;
+            host.state_source_offsets[row]      = state_rows[row];
+            host.state_destination_offsets[row] = state_rows[row];
+            host.residency_slots[row]           = row;
+        }
+        const auto total = static_cast<std::int32_t>(segments * chunk);
+        const auto host  = frame.host_input_view(total, 1);
+        std::fill_n(static_cast<std::int32_t*>(host.ids.data), total, 0);
+        auto* positions = static_cast<std::int32_t*>(host.cache_positions.data);
+        auto* rope      = static_cast<std::int32_t*>(host.rope_positions.data);
+        for (std::uint32_t row = 0; row < segments; ++row) {
+            for (std::uint32_t column = 0; column < chunk; ++column) {
+                const auto index = row * chunk + column;
+                positions[index] = static_cast<std::int32_t>(column);
+                for (std::uint32_t axis = 0; axis < 3; ++axis)
+                    rope[axis * total + index] = static_cast<std::int32_t>(column);
+            }
+        }
+        const auto input = frame.input_view(total, 1);
+        for (const auto& pair : {std::pair{host.ids, input.ids},
+                                 std::pair{host.cache_positions, input.cache_positions},
+                                 std::pair{host.rope_positions, input.rope_positions}}) {
+            CUDA_CHECK(cudaMemcpyAsync(pair.second.data, pair.first.data, pair.second.bytes(),
+                                       cudaMemcpyHostToDevice, cuda.stream()));
+        }
+        CUDA_CHECK(cudaMemcpyAsync(frame.ingress.data, frame.host_ingress_region.data,
+                                   frame.ingress.bytes, cudaMemcpyHostToDevice, cuda.stream()));
+        device_.synchronize();
+    }
+
     void finish() {
         const auto cuda = device_.execution_view();
         for (const auto offset : state_offsets_)
@@ -158,6 +207,8 @@ public:
         };
         clear_table(resources_.decoder.text_kv);
         if (auto* backend = resources_.backend_kv()) clear_table(*backend);
+        for (std::uint32_t row = 0; row < resources_.state_images.staging_rows(); ++row)
+            resources_.state_images.storage().clear(resources_.state_images.staging_row(row), cuda);
         device_.synchronize();
         for (const auto record : records_) pool_.release(record);
         records_.clear();
@@ -412,6 +463,47 @@ void Graphs::prepare(Resources& resources, const execution::Parameters& paramete
             observation.checkpoint();
         }
     }
+    // Prefill plans: one captured packed traversal per bucket width. They exist only where the
+    // resources carry staging State rows (see prefill_plan_rows in the planning), because a
+    // captured segment is bound to a fixed State row.
+    const auto plan_segments =
+        resources.state_images.staging_rows() && bodies.prefill_text
+            ? prefill_plan_segment_counts(spec_.prefill_chunk, spec_.pack_tokens,
+                                          spec_.batch_capacity)
+            : std::vector<std::uint32_t>{};
+    if (plan_segments.size() &&
+        plan_segments.back() > resources.state_images.staging_rows())
+        throw std::logic_error("Qwen3.5 prefill plans exceed their staging State rows");
+    const auto prefill_profiles = plan_segments.empty()
+                                      ? std::vector<GraphProfile>{}
+                                      : target_graph_profiles(spec_.capacity, spec_.prefill_chunk);
+    for (const auto segments : plan_segments) {
+        const auto width = segments * spec_.prefill_chunk;
+        std::vector<std::int64_t> rows;
+        std::vector<execution::SequenceSegment> canonical;
+        for (std::uint32_t row = 0; row < segments; ++row) {
+            rows.push_back(resources.state_images.staging_row(row));
+            canonical.push_back({row, row * spec_.prefill_chunk, spec_.prefill_chunk, rows.back(),
+                                 rows.back()});
+        }
+        const auto call = invocation(GraphPhase::Prefill, segments, spec_.prefill_chunk,
+                                     prefill_profiles.front(), spec_.capacity);
+        inputs.prepare_prefill(segments, spec_.prefill_chunk, rows);
+        resources.work.reset();
+        resources.work.reset_peak();
+        auto run = bodies.prefill_text(call, canonical);
+        if (!run) throw std::logic_error("graph prefill body returned no traversal");
+        auto& plan = prefill_.build({PrefillPhase::Text, width}, segments);
+        plan.graph.prepare(*run, parameters, nullptr, prefill_profiles, spec_.prefill_chunk, [] {},
+                           [] {}, resources.work, device, observation);
+        if (observation.capturing()) {
+            if (!plan.graph.start(device.execution_view()))
+                throw std::logic_error("resident prefill plan did not submit completely");
+            device.synchronize();
+            observation.checkpoint();
+            workspace_peak_ = std::max(workspace_peak_, plan.graph.workspace_peak());
+        }
+    }
     if (resources.moe) resources.moe->restore_cache_after_preparation();
     observation.checkpoint();
     inputs.finish();
@@ -437,6 +529,54 @@ std::uint32_t Graphs::captured_batch(GraphPhase, std::uint32_t batch) const {
     return covering_bucket(batch);
 }
 
+std::vector<std::uint32_t> PrefillPlanCache::bucket_widths(std::uint32_t prefill_chunk,
+                                                           std::uint32_t pack_tokens,
+                                                           std::uint32_t lanes) {
+    auto widths = prefill_plan_segment_counts(prefill_chunk, pack_tokens, lanes);
+    for (auto& value : widths) value *= prefill_chunk;
+    return widths;
+}
+
+PrefillPlanCache::Plan* PrefillPlanCache::acquire(PrefillPhase phase, std::uint32_t width) noexcept {
+    const auto found = std::find_if(plans_.begin(), plans_.end(), [&](const auto& plan) {
+        return plan->key == PrefillPlanKey{phase, width};
+    });
+    return found != plans_.end() ? found->get() : nullptr;
+}
+
+const PrefillPlanCache::Plan* PrefillPlanCache::acquire(PrefillPhase phase,
+                                                        std::uint32_t width) const noexcept {
+    return const_cast<PrefillPlanCache*>(this)->acquire(phase, width);
+}
+
+PrefillPlanCache::Plan& PrefillPlanCache::build(PrefillPlanKey key, std::uint32_t segments) {
+    if (acquire(key.phase, key.width)) throw std::logic_error("prefill plan is already built");
+    auto& plan    = plans_.emplace_back(std::make_unique<Plan>());
+    plan->key      = key;
+    plan->segments = segments;
+    return *plan;
+}
+
+std::uint32_t Graphs::captured_prefill_width(std::uint32_t width) const {
+    return prefill_.acquire(PrefillPhase::Text, width) ? width : 0;
+}
+
+bool Graphs::start_prefill(std::uint32_t width, std::uint32_t frontier, CudaExecutionView cuda) {
+    if (pending_) throw std::logic_error("a Qwen3.5 graph phase is already pending");
+    auto* plan = prefill_.acquire(PrefillPhase::Text, width);
+    if (!plan) throw std::out_of_range("prefill plan is unprepared");
+    plan->graph.select(frontier);
+    pending_ = &plan->graph;
+    try {
+        if (!plan->graph.start(cuda)) return false;
+        pending_ = nullptr;
+        return true;
+    } catch (...) {
+        cancel();
+        throw;
+    }
+}
+
 bool Graphs::start(GraphPhase phase, std::uint32_t batch, std::uint32_t frontier,
                    CudaExecutionView cuda) {
     if (pending_) throw std::logic_error("a Qwen3.5 graph phase is already pending");
@@ -460,6 +600,8 @@ bool Graphs::start(GraphPhase phase, std::uint32_t batch, std::uint32_t frontier
     case GraphPhase::Accept:
         family.accept.launch(frontier, cuda);
         return true;
+    case GraphPhase::Prefill:
+        throw std::logic_error("prefill plans replay through start_prefill");
     }
     text->select(frontier);
     pending_ = text;
@@ -500,6 +642,7 @@ void Graphs::cancel() {
 void Graphs::clear() {
     if (pending_) throw std::logic_error("cannot release an active Qwen3.5 graph");
     batches_.clear();
+    prefill_.clear();
     workspace_peak_ = 0;
 }
 

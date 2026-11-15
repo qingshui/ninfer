@@ -56,6 +56,11 @@ std::size_t checked_add(std::size_t a, std::size_t b, const char* label) {
     return a + b;
 }
 
+std::size_t checked_mul(std::size_t a, std::size_t b, const char* label) {
+    if (a != 0 && b > std::numeric_limits<std::size_t>::max() / a) { throw std::overflow_error(label); }
+    return a * b;
+}
+
 std::uint32_t page_count(std::uint32_t capacity) {
     if (capacity == 0) { throw std::invalid_argument("Paged KV capacity must be positive"); }
     return 1U + (capacity - 1U) / static_cast<std::uint32_t>(kPagedKVPageSize);
@@ -136,6 +141,19 @@ std::uint32_t fitted_session_lanes(const SequencePlanningInputs& inputs,
     return low;
 }
 
+// Prefill plans replay captured graphs, so they exist only where the decode graphs do: resident
+// experts (an offloaded schedule yields between layers), no masked draft state and no scoring
+// frame (initialize_graphs captures nothing for it). Each plan segment binds one staging State
+// row; the largest plan needs as many rows as it has segments.
+std::uint32_t prefill_plan_rows(const SequencePlanImpl& plan) {
+    if (!plan.use_cuda_graph || plan.moe || plan.causal_scoring ||
+        is_masked_draft_backend(plan.speculative_backend))
+        return 0;
+    const auto counts =
+        prefill_plan_segment_counts(plan.prefill_chunk, plan.pack_tokens, plan.max_concurrency);
+    return counts.empty() ? 0 : counts.back();
+}
+
 ResourceLayout persistent_layout(const SequencePlanImpl& plan) {
     const auto& profile = *plan.profile;
     const auto& config  = profile.config.text;
@@ -209,6 +227,7 @@ ResourceLayout persistent_layout(const SequencePlanImpl& plan) {
     };
     spec.context_bytes      = plan.context_bytes;
     spec.host_context_bytes = plan.context_cache.host_capacity_bytes.value_or(0);
+    spec.staging_states     = plan.prefill_plan_rows;
     return plan_resources(spec);
 }
 
@@ -750,16 +769,20 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
     impl->context_cache                     = inputs.context_cache;
     impl->vision_memory_budget_bytes        = inputs.vision_memory_budget_bytes;
     impl->kv_storage                        = inputs.kv_storage;
+    impl->prefill_plan_rows                 = prefill_plan_rows(*impl);
     impl->persistent                        = persistent_layout(*impl);
     impl->context_cache.host_capacity_bytes = context::host_context_capacity(
         impl->context_cache.host_capacity_bytes, impl->persistent.state_images.images.image_bytes);
     impl->persistent.host_context_bytes = impl->context_cache.host_capacity_bytes.value();
     impl->workspace = build_workspace_plan(*impl);
-    // The context arena carries one scratch State image beyond the pool-managed records (see
-    // Resources); the device reservation counts it with the arena.
-    const auto context_arena_bytes =
-        checked_add(impl->context_bytes, impl->persistent.state_images.images.image_bytes,
-                    "Context arena capacity");
+    // The context arena carries one scratch State image and the prefill plans' staging State
+    // images beyond the pool-managed records (see Resources); the device reservation counts them
+    // with the arena.
+    const auto context_arena_bytes = checked_add(
+        impl->context_bytes,
+        checked_mul(impl->persistent.state_images.images.image_bytes,
+                    std::size_t{1} + impl->prefill_plan_rows, "Context arena tail"),
+        "Context arena capacity");
     impl->device_reservation_bytes = checked_add(
         checked_add(impl->persistent.bytes, context_arena_bytes, "Context arena capacity"),
         impl->workspace.capacity, "sequence device capacity");

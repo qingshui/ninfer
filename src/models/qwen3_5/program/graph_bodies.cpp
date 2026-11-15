@@ -14,7 +14,8 @@ GraphPreparationSample RankProgramImpl::initialize_graphs(GraphPreparationMode m
         return initialize_graphs(GraphPreparationMode::Capture);
     }
     GraphPreparation observation(device, mode);
-    graphs.emplace(GraphSpec{capacity, max_concurrency, draft_window, backend});
+    graphs.emplace(GraphSpec{capacity, max_concurrency, draft_window, backend, prefill_chunk,
+                             resources.frame.spec.pack_tokens});
     GraphBodies bodies;
     bodies.prologue = [this, capture = observation.capturing()](const GraphInvocation& call) {
         gpu_timer.begin_target(capture);
@@ -46,6 +47,27 @@ GraphPreparationSample RankProgramImpl::initialize_graphs(GraphPreparationMode m
                                          resources.decoder.text_kv, resources.state_images.linear(),
                                          resources.moe.get()},
             std::move(inputs), update, call.envelope, input.hidden, feature ? &*feature : nullptr);
+    };
+    bodies.prefill_text = [this](const GraphInvocation& call,
+                                 std::span<const execution::SequenceSegment> segments) {
+        auto& frame        = resources.frame;
+        const auto columns = static_cast<int>(call.batch * call.width);
+        const auto rows    = static_cast<int>(call.batch);
+        auto input         = frame.input_view(columns, 1);
+        execution::TextInputs inputs{input.ids,
+                                     input.cache_positions,
+                                     input.rope_positions,
+                                     frame.valid_columns.slice(0, 0, rows),
+                                     frame.main_table_rows.slice(0, 0, rows),
+                                     frame.state_source_offsets.slice(0, 0, rows),
+                                     frame.state_destination_offsets.slice(0, 0, rows),
+                                     {}};
+        return std::make_unique<execution::TextRun>(
+            execution::TextExecutionView{parameters, resources.work, device.execution_view(),
+                                         resources.decoder.text_kv, resources.state_images.linear(),
+                                         resources.moe.get()},
+            std::move(inputs), execution::PackedSequenceUpdate{segments}, call.envelope,
+            input.hidden);
     };
     bodies.project = [this, capture = observation.capturing()](const GraphInvocation& call) {
         project_decode(call.batch, call.width);

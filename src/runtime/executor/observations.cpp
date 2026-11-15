@@ -63,10 +63,12 @@ auto fields(T& v) {
         return std::tie(v.forwards, v.rows, v.valid_positions, v.scheduled_positions);
     else if constexpr (std::is_same_v<Value, AttentionWorkObservation>)
         return std::tie(v.kind, v.work);
+    else if constexpr (std::is_same_v<Value, PrefillPlanCounters>)
+        return std::tie(v.hits, v.misses, v.eager_fallbacks);
     else if constexpr (std::is_same_v<Value, RankExecutionObservation>)
         return std::tie(v.path, v.host, v.gpu, v.communication_eager, v.communication_graph,
                         v.workspace_peak_bytes, v.measurement_peak_bytes, v.expert_upload_bytes,
-                        v.ple_upload_bytes, v.attention);
+                        v.ple_upload_bytes, v.attention, v.prefill_plan);
     else {
         static_assert(std::is_same_v<Value, RankMemoryBudget>);
         return std::tie(v.limit_bytes, v.runtime_reservation_bytes,

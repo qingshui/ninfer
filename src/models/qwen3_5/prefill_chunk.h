@@ -9,6 +9,7 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace ninfer::models::qwen3_5 {
 
@@ -62,6 +63,23 @@ inline constexpr std::uint32_t kPrefillPackSegmentLimit = 64;
         std::uint64_t{token_capacity} / kPrefillChunkAlignment * kPrefillChunkAlignment;
     const std::uint64_t packed = std::uint64_t{prefill_chunk} * kPrefillPackChunks;
     return std::max(prefill_chunk, static_cast<std::uint32_t>(std::min(packed, aligned_capacity)));
+}
+
+// Segment counts of the prebuilt prefill launch plans. A plan covers a flight of exactly S
+// segments that each carry one full `prefill_chunk` window, so its token extent is S * chunk (the
+// 2048/4096/8192/16384 widths of the resident chunk). S runs over the powers of two whose extent
+// stays within `pack_tokens` and whose segments fit the `lanes` of the resolved concurrency.
+// Planning sizes the plans' staging State rows from the largest S and the program builds one
+// plan per entry; no other place derives this set.
+[[nodiscard]] inline std::vector<std::uint32_t>
+prefill_plan_segment_counts(std::uint32_t prefill_chunk, std::uint32_t pack_tokens,
+                            std::uint32_t lanes) {
+    std::vector<std::uint32_t> counts;
+    if (prefill_chunk == 0) return counts;
+    for (std::uint64_t segments = 1;
+         segments <= lanes && segments * prefill_chunk <= pack_tokens; segments <<= 1)
+        counts.push_back(static_cast<std::uint32_t>(segments));
+    return counts;
 }
 
 // Upper bound of the token axis of one mixed execution: a packed prefill (at most `pack_tokens`)

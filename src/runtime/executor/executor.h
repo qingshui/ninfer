@@ -83,6 +83,7 @@ protected:
         snapshot.communication_eager = value.communication_eager;
         snapshot.communication_graph = value.communication_graph;
         if (compute) ++snapshot.compute_paths[static_cast<std::size_t>(value.path)];
+        snapshot.prefill_plan.merge_max(value.prefill_plan);
     }
 
     std::vector<RankSnapshot> observations_;

@@ -299,6 +299,10 @@ std::string Metrics::render(const EngineSnapshot& snapshot, const ServiceSnapsho
            "Submitted collective API payload across all rank groups.");
     header("rank_compute_units_total", "counter",
            "Completed compute units by actual forward execution path.");
+    header("rank_prefill_plan_flights_total", "counter",
+           "Prefill flights of a graph-enabled rank by launch-plan outcome: hit (prebuilt plan "
+           "replayed), miss (bucket-shaped flight without a prebuilt plan, also an eager fallback) "
+           "and eager_fallback (executed eagerly).");
     header("communication_calls_total", "counter",
            "Successful eager enqueues or recorded graph replays, by rank and group.");
     header("communication_payload_bytes_total", "counter",
@@ -354,6 +358,12 @@ std::string Metrics::render(const EngineSnapshot& snapshot, const ServiceSnapsho
         for (std::size_t i = 0; i < rank.compute_paths.size(); ++i)
             out << "ninfer_rank_compute_units_total{" << labels << ",path=\"" << paths[i] << "\"} "
                 << rank.compute_paths[i] << '\n';
+        out << "ninfer_rank_prefill_plan_flights_total{" << labels << ",outcome=\"hit\"} "
+            << rank.prefill_plan.hits << '\n';
+        out << "ninfer_rank_prefill_plan_flights_total{" << labels << ",outcome=\"miss\"} "
+            << rank.prefill_plan.misses << '\n';
+        out << "ninfer_rank_prefill_plan_flights_total{" << labels
+            << ",outcome=\"eager_fallback\"} " << rank.prefill_plan.eager_fallbacks << '\n';
         for (const auto& group : rank.communication) {
             for (auto path : {false, true}) {
                 const auto& value = path ? group.graph : group.eager;

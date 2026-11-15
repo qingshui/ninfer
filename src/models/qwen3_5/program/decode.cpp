@@ -159,6 +159,10 @@ void RankProgramImpl::begin_mixed_target(ComputeOperation& operation) {
         }
         return ops::CausalAttentionExecutionEnvelope{minimum, maximum};
     };
+    // A mixed traversal always runs eagerly: its decode tail is outside every prefill plan.
+    if (graphs) {
+        ++prefill_plan.eager_fallbacks;
+    }
     const auto steps_envelope   = envelope(0, rows);
     const auto prefill_envelope = envelope(rows, rows + count);
     const auto input            = frame.input_view(axis, 1);
@@ -216,6 +220,9 @@ void RankProgramImpl::begin_target(ComputeOperation& operation) {
         for (int row = 0; row < batch; ++row)
             operation.attention.valid_positions += frame.host_ingress->valid_columns[row];
     auto input = forward ? frame.input_view(width, batch) : frame.decode_view(width, batch);
+    if (std::holds_alternative<ForwardWork>(operation.request.work.operation) && graphs &&
+        replay_prefill_plan(operation))
+        return;
     if (!forward && graphs) {
         const auto phase = operation.speculative ? GraphPhase::Verify : GraphPhase::Main;
         // The target bucket pads its batch through the zeroed host row state; a padding row's
@@ -281,10 +288,57 @@ void RankProgramImpl::begin_target(ComputeOperation& operation) {
     operation.row_finished = operation.text->start();
 }
 
+bool RankProgramImpl::replay_prefill_plan(ComputeOperation& operation) {
+    auto& frame            = resources.frame;
+    const bool packed      = operation.packed;
+    const auto segments    = packed ? static_cast<std::uint32_t>(operation.segments.size()) : 1U;
+    // The shape a plan is captured for: every segment is one complete chunk window of text
+    // tokens. A shorter or split window, an embedding input or draft feature state is outside
+    // every bucket and takes the eager traversal.
+    bool bucket_shaped = !operation.input_embeddings && !resources.dflash && segments != 0;
+    if (packed) {
+        for (const auto& segment : operation.segments)
+            bucket_shaped = bucket_shaped && segment.tokens == prefill_chunk;
+    } else {
+        bucket_shaped = bucket_shaped && operation.width == prefill_chunk;
+    }
+    const auto width = bucket_shaped ? segments * prefill_chunk : 0U;
+    if (!width || graphs->captured_prefill_width(width) != width) {
+        if (bucket_shaped) ++prefill_plan.misses;
+        ++prefill_plan.eager_fallbacks;
+        return false;
+    }
+    ++prefill_plan.hits;
+    // Per-flight patch: the plan's segments run on their staging State rows, so each sequence's
+    // State is copied in before the replay and its published State copied out after it. The rest
+    // of the traversal inputs (ids, positions, row tables) are the frame the eager path fills.
+    const auto cuda = device.execution_view();
+    auto& images    = resources.state_images;
+    const auto state = [&](std::uint32_t index) {
+        return packed ? std::pair{operation.segments[index].source_offset,
+                                  operation.segments[index].destination_offset}
+                      : std::pair{operation.rows[operation.forward_row].state_offsets.source,
+                                  operation.rows[operation.forward_row].state_offsets.destination};
+    };
+    std::int32_t frontier = 0;
+    for (std::uint32_t index = 0; index < segments; ++index) {
+        images.storage().copy(state(index).first, images.staging_row(index), cuda);
+        frontier = std::max(frontier, frame.host_ingress->frontiers[index]);
+    }
+    prefill_timer.start();
+    operation.graph_started = true;
+    operation.row_finished =
+        graphs->start_prefill(width, static_cast<std::uint32_t>(frontier), cuda);
+    if (!operation.row_finished) throw std::logic_error("resident prefill plan did not submit");
+    for (std::uint32_t index = 0; index < segments; ++index)
+        images.storage().copy(images.staging_row(index), state(index).second, cuda);
+    return true;
+}
+
 bool RankProgramImpl::advance_target(ComputeOperation& operation) {
     if (!operation.width) return true;
     if (!operation.row_finished)
-        operation.row_finished = operation.graph_started ? graphs->poll() : operation.text->poll();
+        operation.row_finished = operation.text ? operation.text->poll() : graphs->poll();
     if (!operation.row_finished) return false;
     workspace_peak = std::max(workspace_peak, resources.work.peak_used());
     operation.text.reset();

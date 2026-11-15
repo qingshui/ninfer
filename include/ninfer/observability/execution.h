@@ -180,6 +180,22 @@ struct AttentionWorkObservation {
     AttentionWorkCounters work;
 };
 
+// Cumulative prefill launch-plan counters of one rank. Every prefill flight of a graph-enabled
+// rank is classified once: `hits` replayed a prebuilt plan, `eager_fallbacks` ran the eager
+// traversal instead (ragged segment composition, mixed execution, unsupported membership), and
+// `misses` is the subset of those whose segments all matched the bucket definition but whose
+// bucket has no prebuilt plan. hits + eager_fallbacks is the number of prefill flights.
+struct PrefillPlanCounters {
+    std::uint64_t hits = 0, misses = 0, eager_fallbacks = 0;
+
+    void merge_max(const PrefillPlanCounters& value) noexcept {
+        hits            = hits > value.hits ? hits : value.hits;
+        misses          = misses > value.misses ? misses : value.misses;
+        eager_fallbacks = eager_fallbacks > value.eager_fallbacks ? eager_fallbacks
+                                                                  : value.eager_fallbacks;
+    }
+};
+
 // Fixed-size completion facts. Host counters are cumulative on the rank's execution thread;
 // GPU intervals belong to this unit. Logical request tokens are counted by the Engine once.
 struct RankExecutionObservation {
@@ -190,6 +206,7 @@ struct RankExecutionObservation {
     std::uint64_t workspace_peak_bytes = 0, measurement_peak_bytes = 0;
     std::uint64_t expert_upload_bytes = 0, ple_upload_bytes = 0;
     std::optional<AttentionWorkObservation> attention;
+    PrefillPlanCounters prefill_plan;
 };
 
 enum class SpeculativeBackend : std::uint8_t {

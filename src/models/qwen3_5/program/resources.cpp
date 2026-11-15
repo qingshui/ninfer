@@ -64,6 +64,7 @@ ResourceLayout plan_resources(const ResourceSpec& spec) {
     }
     out.context_bytes      = spec.context_bytes;
     out.host_context_bytes = spec.host_context_bytes;
+    out.staging_states     = spec.staging_states;
     out.bytes              = builder.finish(kAlignment, "Qwen3.5 execution resources");
     return out;
 }
@@ -115,17 +116,19 @@ PagedKVBatchLayerView DFlashPersistentState::full_batch_layer(std::uint32_t laye
 Resources::Resources(DeviceContext& device, const ResourceLayout& layout,
                      const WorkspaceSpec& workspace, const StartupObserver& observer)
     : context_records(layout.context_records()),
-      // The context arena carries one scratch State image beyond the pool-managed records; the
-      // session's state pool still sees exactly layout.context_bytes (see context_spec), and
-      // StateImageViews exposes the tail image as the scratch row decode graph padding rows
-      // write their GDN State into.
+      // The context arena carries one scratch State image and layout.staging_states staging
+      // images beyond the pool-managed records; the session's state pool still sees exactly
+      // layout.context_bytes (see context_spec). StateImageViews exposes the first tail image as
+      // the scratch row decode graph padding rows write their GDN State into, and the rest as the
+      // staging rows captured prefill plans run their segments against.
       context(device.device(),
-              layout.context_bytes + layout.state_images.images.image_bytes),
+              layout.context_bytes +
+                  (std::size_t{1} + layout.staging_states) * layout.state_images.images.image_bytes),
       persistent(device.device(), layout.bytes),
       workspace_storage(device.device(), workspace.capacity),
       work(workspace_storage.span().subspan(0, workspace.general_capacity)),
       decoder(context.span(), persistent.span(), layout.decoder),
-      state_images(context.span(), layout.state_images),
+      state_images(context.span(), layout.state_images, layout.staging_states),
       frame(persistent.span(), layout.frame, state_images.scratch_row()) {
     if (workspace.general_capacity == 0 || workspace.capacity < workspace.general_capacity) {
         throw std::invalid_argument("Qwen3.5 execution workspace layout is inconsistent");
@@ -137,6 +140,8 @@ Resources::Resources(DeviceContext& device, const ResourceLayout& layout,
         phase.complete(layout.host_context_bytes, layout.host_context_bytes);
     }
     if (workspace.vision) vision.emplace(device, *workspace.vision);
+    for (std::uint32_t row = 0; row < state_images.staging_rows(); ++row)
+        state_images.storage().clear(state_images.staging_row(row), device.execution_view());
     const auto backing = persistent.span();
     if (layout.replay_records) {
         replay_records.emplace(backing, *layout.replay_records);

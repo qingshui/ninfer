@@ -182,6 +182,7 @@ public:
                     snapshot.communication_eager = previous.communication_eager;
                     snapshot.communication_graph = previous.communication_graph;
                     snapshot.compute_paths       = previous.compute_paths;
+                    snapshot.prefill_plan        = previous.prefill_plan;
                     snapshot.attention           = previous.attention;
                     merge_host_observations(snapshot.host, previous.host);
                     auto& memory                         = snapshot.memory;
@@ -236,6 +237,7 @@ public:
                     updated.communication_eager = previous.communication_eager;
                     updated.communication_graph = previous.communication_graph;
                     updated.compute_paths       = previous.compute_paths;
+                    updated.prefill_plan        = previous.prefill_plan;
                     updated.attention           = previous.attention;
                     merge_host_observations(updated.host, previous.host);
                     previous                                        = std::move(updated);

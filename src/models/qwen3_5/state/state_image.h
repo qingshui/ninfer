@@ -32,7 +32,10 @@ struct StateImageDeviceLayout {
 
 class StateImageViews {
 public:
-    StateImageViews(MemorySpan arena, const StateImageDeviceLayout& layout);
+    // The arena ends in `1 + staging_images` State images: the scratch row, then the staging
+    // rows prefill plans run their sequence segments against.
+    StateImageViews(MemorySpan arena, const StateImageDeviceLayout& layout,
+                    std::uint32_t staging_images = 0);
 
     // Extent of the pool-managed records at the head of the arena: the session's state pool and
     // graph preparation allocate strictly below it, and the one scratch State row follows.
@@ -45,6 +48,14 @@ public:
     {
         return static_cast<std::int64_t>(pool_bytes_);
     }
+
+    // Number of staging State rows behind the scratch row. A captured prefill plan binds its
+    // segments' State to these fixed rows (pointers baked into the graph); the program copies a
+    // sequence's State in before a replay and out after it.
+    [[nodiscard]] std::uint32_t staging_rows() const noexcept { return staging_rows_; }
+
+    // Byte offset of staging row `index`, in [0, staging_rows()).
+    [[nodiscard]] std::int64_t staging_row(std::uint32_t index) const;
 
     [[nodiscard]] StateImageStorage& storage() noexcept { return storage_; }
 
@@ -68,6 +79,7 @@ private:
     LinearAttentionStateView linear_;
     StateField hidden_;
     std::size_t pool_bytes_ = 0;
+    std::uint32_t staging_rows_ = 0;
     std::optional<CyclicKVCacheView> dflash_local_;
     std::optional<LayoutRegion> dflash_group_;
 };

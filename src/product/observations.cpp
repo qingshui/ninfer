@@ -212,6 +212,9 @@ EngineSnapshot observation_delta(EngineSnapshot current, const EngineSnapshot& b
         for (std::size_t i = 0; i < kGpuIntervalCount; ++i)
             subtract_duration(rank.gpu_intervals[i], prior->gpu_intervals[i]);
         subtract_series(rank.compute_paths, prior->compute_paths);
+        rank.prefill_plan.hits -= prior->prefill_plan.hits;
+        rank.prefill_plan.misses -= prior->prefill_plan.misses;
+        rank.prefill_plan.eager_fallbacks -= prior->prefill_plan.eager_fallbacks;
         subtract_communication(rank.communication_eager, prior->communication_eager);
         subtract_communication(rank.communication_graph, prior->communication_graph);
         for (std::size_t i = 0; i < rank.attention.size(); ++i) {
@@ -354,6 +357,9 @@ Json observation_json(const EngineSnapshot& snapshot, std::uint64_t now) {
         value["compute_paths"]       = {{"eager", rank.compute_paths[0]},
                                         {"graph", rank.compute_paths[1]},
                                         {"mixed", rank.compute_paths[2]}};
+        value["prefill_plan_hits"]            = rank.prefill_plan.hits;
+        value["prefill_plan_misses"]          = rank.prefill_plan.misses;
+        value["prefill_eager_fallbacks"]      = rank.prefill_plan.eager_fallbacks;
         value["communication_eager"] = communication(rank.communication_eager);
         value["communication_graph"] = communication(rank.communication_graph);
         for (std::size_t i = 0; i < rank.communication.size(); ++i) {

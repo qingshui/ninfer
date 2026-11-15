@@ -193,6 +193,7 @@ struct RankSnapshot {
     std::vector<CommunicationStatistics> communication;
     CommunicationWork communication_eager, communication_graph;
     std::array<std::uint64_t, 3> compute_paths{};
+    PrefillPlanCounters prefill_plan{};
     GpuIntervalCounters gpu_intervals{};
     std::array<AttentionWorkCounters, static_cast<std::size_t>(ExecutionKind::Count)> attention{};
     std::optional<PhysicalMemorySample> physical_memory;
