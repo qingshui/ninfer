@@ -27,6 +27,25 @@ __device__ __forceinline__ std::int64_t nvfp4_tiled_scale_offset(int token, int 
            (group - group_tile * kGroupsPerTile);
 }
 
+// K16M128x4: the tcgen05 block-scale atom order (see nvfp4_layout.h). Atoms of one 128-token
+// tile are consecutive along K, so a stage of the GEMM reads four atoms as one 2 KiB run.
+template <class Geometry>
+__device__ __forceinline__ std::int64_t nvfp4_k16m128x4_scale_offset(int token, int group) {
+    constexpr int kAtomsPerTile = Geometry::kGroupsPerRow / 4;
+    const int token_tile        = token >> 7;
+    const int in_tile           = token & 127;
+    const std::int64_t atom     = static_cast<std::int64_t>(token_tile) * kAtomsPerTile + (group >> 2);
+    return atom * 512 + (in_tile & 31) * 16 + (in_tile >> 5) * 4 + (group & 3);
+}
+
+template <class Geometry, Nvfp4ScaleLayout Layout>
+__device__ __forceinline__ std::int64_t nvfp4_scale_plane_offset(int token, int group) {
+    if constexpr (Layout == Nvfp4ScaleLayout::K16M128x4)
+        return nvfp4_k16m128x4_scale_offset<Geometry>(token, group);
+    else
+        return nvfp4_tiled_scale_offset<Geometry, Layout>(token, group);
+}
+
 template <class Geometry, int Threads, Nvfp4ScaleLayout Layout, class Input = __nv_bfloat16>
 __global__ __launch_bounds__(Threads, 512 / Threads) void nvfp4_a4_quantize_kernel(
     const Input* __restrict__ input, std::uint8_t* __restrict__ codes,
@@ -34,7 +53,9 @@ __global__ __launch_bounds__(Threads, 512 / Threads) void nvfp4_a4_quantize_kern
     float input_scale) {
     static_assert(Threads == 128 || Threads == 256 || Threads == 512);
     static_assert(Layout == Nvfp4ScaleLayout::RowMajor ||
-                  (Geometry::kInputRows / 16) % kNvfp4ScaleTileGroups == 0);
+                  (Layout == Nvfp4ScaleLayout::K16M128x4 && (Geometry::kInputRows / 16) % 4 == 0) ||
+                  (Layout != Nvfp4ScaleLayout::K16M128x4 &&
+                   (Geometry::kInputRows / 16) % kNvfp4ScaleTileGroups == 0));
     constexpr int kGroupsPerRow = Geometry::kInputRows / 16;
     const int task =
         static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) + static_cast<int>(threadIdx.x);
@@ -49,7 +70,7 @@ __global__ __launch_bounds__(Threads, 512 / Threads) void nvfp4_a4_quantize_kern
             const int pad_token = task / kGroupsPerRow;
             if (pad_token < written_tokens) {
                 const int pad_group = task - pad_token * kGroupsPerRow;
-                scales[nvfp4_tiled_scale_offset<Geometry, Layout>(pad_token, pad_group)] = 0;
+                scales[nvfp4_scale_plane_offset<Geometry, Layout>(pad_token, pad_group)] = 0;
             }
         }
         return;
@@ -63,7 +84,7 @@ __global__ __launch_bounds__(Threads, 512 / Threads) void nvfp4_a4_quantize_kern
         codes + static_cast<std::int64_t>(token) * Geometry::kCodeBytesPerRow + group * 8;
     common::store_vec(code_destination, make_uint2(quantized.codes_lo, quantized.codes_hi));
     if constexpr (Layout != Nvfp4ScaleLayout::RowMajor) {
-        scales[nvfp4_tiled_scale_offset<Geometry, Layout>(token, group)] = quantized.scale;
+        scales[nvfp4_scale_plane_offset<Geometry, Layout>(token, group)] = quantized.scale;
     } else {
         scales[static_cast<std::int64_t>(token) * kGroupsPerRow + group] = quantized.scale;
     }

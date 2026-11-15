@@ -50,6 +50,13 @@ if(NINFER_TARGET STREQUAL "dgx_spark")
   ninfer_linear_format_tests(swiglu bf16 mxfp8 fp8_block_fp32 nvfp4_mul)
 endif()
 
+# tcgen05 dense GEMM operand-level checks; only the B200 target builds the sm100 kernels.
+if(NINFER_TARGET STREQUAL "b200")
+  ninfer_add_op_test(ninfer_linear_sm100_test
+    SOURCES "${CMAKE_CURRENT_LIST_DIR}/sm100/test.cpp"
+    LIBRARIES ninfer_ops)
+endif()
+
 ninfer_linear_suite(pair test.cpp)
 ninfer_linear_format_tests(pair q8)
 

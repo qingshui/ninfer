@@ -5,8 +5,14 @@ target_sources(ninfer_ops PRIVATE
   "${CMAKE_CURRENT_LIST_DIR}/shapes/n34816_k5120.cu"
   "${CMAKE_CURRENT_LIST_DIR}/shapes/n5120_k6144.cu"
   "${CMAKE_CURRENT_LIST_DIR}/shapes/n5120_k17408.cu"
-  "${CMAKE_CURRENT_LIST_DIR}/shapes/n3072_k8192.cu"
 )
+
+# The 122B o_proj shape has a B200 variant that serves quantized calls on tcgen05.
+if(NINFER_TARGET STREQUAL "b200")
+  target_sources(ninfer_ops PRIVATE "${CMAKE_CURRENT_LIST_DIR}/b200/shapes/n3072_k8192.cu")
+else()
+  target_sources(ninfer_ops PRIVATE "${CMAKE_CURRENT_LIST_DIR}/shapes/n3072_k8192.cu")
+endif()
 
 target_sources(ninfer_ops_non_rdc PRIVATE
   "${CMAKE_CURRENT_LIST_DIR}/nvfp4_a4_tma.cu"

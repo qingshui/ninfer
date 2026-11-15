@@ -28,7 +28,18 @@ void launch_quantize_exact(const Tensor& x, const Weight& weight, Nvfp4A4Workspa
     const int blocks         = (tasks + kThreads - 1) / kThreads;
     // The tiled plane exists only for a K whose group count divides into whole tiles. Registered
     // Ks all do; gating the instantiation keeps a future K that does not out of a hard compile
-    // error and into a runtime message.
+    // error and into a runtime message. K16M128x4 needs whole 64-wide atoms only.
+    if constexpr (ActivationGeometry::kGroupsPerRow % 4 == 0) {
+        if (layout == Nvfp4ScaleLayout::K16M128x4) {
+            nvfp4_a4_quantize_kernel<ActivationGeometry, kThreads, Nvfp4ScaleLayout::K16M128x4>
+                <<<blocks, kThreads, 0, stream>>>(input, workspace.codes, workspace.scales, tokens,
+                                                  written_tokens, weight.input_scale);
+            CUDA_CHECK(cudaGetLastError());
+            return;
+        }
+    } else if (layout == Nvfp4ScaleLayout::K16M128x4) {
+        throw std::invalid_argument("nvfp4 A4 K16M128x4 scales need K groups in whole atoms");
+    }
     if constexpr (ActivationGeometry::kGroupsPerRow % kNvfp4ScaleTileGroups == 0) {
         if (layout != Nvfp4ScaleLayout::RowMajor) {
             if (layout == Nvfp4ScaleLayout::Tiled128) {

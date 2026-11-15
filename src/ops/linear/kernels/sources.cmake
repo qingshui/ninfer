@@ -5,3 +5,7 @@ include("${CMAKE_CURRENT_LIST_DIR}/q5/sources.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/q6/sources.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/q8/sources.cmake")
 target_sources(ninfer_ops PRIVATE "${CMAKE_CURRENT_LIST_DIR}/mxfp8/a8_quantize.cu")
+
+if(NINFER_TARGET STREQUAL "b200")
+  include("${CMAKE_CURRENT_LIST_DIR}/sm100/sources.cmake")
+endif()
