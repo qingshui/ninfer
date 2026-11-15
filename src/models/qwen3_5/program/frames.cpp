@@ -336,15 +336,19 @@ DFlashFrame::DFlashFrame(MemorySpan backing, const DFlashFrameLayout& layout)
     if (layout.proposal_q) proposal_q = layout.proposal_q->bind(backing);
 }
 
-ExecutionFrame::ExecutionFrame(MemorySpan backing, const FrameLayout& layout)
+ExecutionFrame::ExecutionFrame(MemorySpan backing, const FrameLayout& layout,
+                               std::int64_t padding_state_offset)
     : spec(layout.spec), input_capacity(layout.input_capacity),
       staged_capacity(layout.staged_capacity), ingress_arrays(layout.ingress_arrays),
       commit_arrays(layout.commit_arrays), egress_arrays(layout.egress_arrays),
-      host_storage(layout.host.bytes),
+      padding_state_offset(padding_state_offset), host_storage(layout.host.bytes),
       ingress(layout.ingress.bind(backing)), commit(layout.commit.bind(backing)),
       egress(layout.egress.bind(backing)), input_ids(layout.input_ids.bind(backing)),
       cache_positions(layout.cache_positions.bind(backing)),
       rope_positions(layout.rope_positions.bind(backing)), hidden(layout.hidden.bind(backing)) {
+    if (padding_state_offset < 0) {
+        throw std::invalid_argument("Qwen3.5 execution frame scratch State offset is negative");
+    }
     const auto batch = static_cast<std::int32_t>(spec.batch_capacity);
     const auto width = static_cast<std::int32_t>(spec.draft_window + 1);
     const auto in    = [&](std::size_t offset) {
@@ -437,6 +441,12 @@ ExecutionFrame::ExecutionFrame(MemorySpan backing, const FrameLayout& layout)
 
 void ExecutionFrame::clear_host_ingress() noexcept {
     std::memset(host_ingress_region.data, 0, host_ingress_region.bytes);
+    // The zeroed host row state holds padding rows inert, except their State destinations: a
+    // captured decode graph replays every row of its bucket and each row's GDN State update
+    // writes its destination unconditionally, so the unbound rows carry the scratch State row
+    // instead of the zeroed offset zero, which names the first pooled record.
+    std::fill_n(host_ingress->state_destination_offsets.data(), ingress_arrays.lanes,
+                padding_state_offset);
 }
 
 void ExecutionFrame::clear_host_commit() noexcept {

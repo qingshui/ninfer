@@ -38,7 +38,9 @@ class PreparationInputs {
 public:
     PreparationInputs(Resources& resources, DeviceContext& device)
         : resources_(resources), device_(device),
-          pool_(0, resources.context.size(), resources.context_records) {
+          // The preparation pool stops below the scratch State row, exactly like the session's
+          // state pool, so no preparation record overlaps the scratch image.
+          pool_(0, resources.state_images.pool_bytes(), resources.context_records) {
         const auto batch = resources.frame.spec.batch_capacity;
         std::vector<RecordRequest> demand;
         for (std::size_t i = 0; i < resources.context_records.size(); ++i)
@@ -301,9 +303,6 @@ void Graphs::prepare(Resources& resources, const execution::Parameters& paramete
     if (resources.moe) preparation.emplace(*resources.moe);
     PreparationInputs inputs(resources, device);
     batches_.resize(buckets_.size());
-    // A width-one Main graph writes each row's GDN State transition; with GDN layers that write
-    // carries no row mask, so its buckets replay only their exact batch (see captured_batch).
-    pads_main_ = !parameters.profile->config.text.gdn.has_value();
     const auto ordinary_profiles = target_graph_profiles(spec_.capacity, 1);
     const auto verify_profiles   = target_graph_profiles(spec_.capacity, spec_.draft_window + 1);
     const auto draft_profiles    = draft_graph_profiles(spec_);
@@ -429,18 +428,11 @@ std::size_t Graphs::bucket_index(std::uint32_t bucket) const noexcept {
         std::lower_bound(buckets_.begin(), buckets_.end(), bucket) - buckets_.begin());
 }
 
-std::uint32_t Graphs::captured_batch(GraphPhase phase, std::uint32_t batch) const {
+std::uint32_t Graphs::captured_batch(GraphPhase, std::uint32_t batch) const {
     if (!batch || batch > spec_.batch_capacity || batches_.empty()) return 0;
-    if (phase == GraphPhase::Main && !pads_main_) {
-        // The width-one StepUpdate writes every row's destination GDN State unconditionally, so a
-        // padded row would corrupt the State slot the zeroed host row state names; only an exact
-        // bucket size replays, other batches take the eager path.
-        const auto found = std::find(buckets_.begin(), buckets_.end(), batch);
-        return found != buckets_.end() ? batch : 0;
-    }
-    // Every other phase holds its padded rows inert through the zeroed host row state: the verify
-    // graphs only record valid columns and leave the master State unchanged, the draft graphs
-    // append nothing for rows with zero frontiers, and the decision graphs write rows that the
+    // Every phase holds its padded rows inert through the zeroed host row state: the padding
+    // rows' GDN State destinations point at the scratch State row (see ExecutionFrame), the
+    // verify graphs only record valid columns, and the decision graphs write rows that the
     // batch-sized readback never copies back.
     return covering_bucket(batch);
 }

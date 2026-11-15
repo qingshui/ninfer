@@ -282,8 +282,8 @@ void RankProgramImpl::initialize_decode(ComputeOperation& operation, const Decod
     if (operation.speculative && backend == SpeculativeBackend::Mtp) prepare_mtp_draft(operation);
     // A graph replay uploads the ingress in its own prologue, so a captured target phase needs no
     // upload here. A target phase that runs the eager traversal instead reads the device ingress
-    // immediately (a Main bucket pads only without the GDN State hazard, so a non-bucket batch
-    // falls back to eager under graphs); it must upload the ingress itself, exactly like the
+    // immediately (every captured phase pads its covering bucket, with the padding rows' GDN State
+    // destinations at the scratch State row); it must upload the ingress itself, exactly like the
     // always-eager mixed initialization below.
     const auto phase = operation.speculative ? GraphPhase::Verify : GraphPhase::Main;
     if (!graphs || resources.dflash || !graphs->captured_batch(phase, operation.batch))

@@ -61,10 +61,10 @@ public:
     [[nodiscard]] bool start(GraphPhase, std::uint32_t batch, std::uint32_t frontier,
                              CudaExecutionView);
     // Smallest captured bucket whose graph can replay `batch` rows of the phase; zero when the
-    // phase must run its eager path instead. Every batch of a captured phase replays at a bucket,
-    // with its padding rows held inert by the zeroed host row state; the one exception is a
-    // width-one Main graph over GDN layers, whose per-row State update has no row mask, so only
-    // its exact bucket sizes are covered and other batches replay eager.
+    // phase must run its eager path instead. Every batch of a captured phase replays at its
+    // covering bucket: the padding rows stay inert through the zeroed host row state, and their
+    // GDN State destinations point at the scratch State row (see ExecutionFrame and
+    // StateImageViews::scratch_row), so no replay writes a pooled record.
     [[nodiscard]] std::uint32_t captured_batch(GraphPhase, std::uint32_t batch) const;
     [[nodiscard]] bool poll();
     void cancel();
@@ -109,9 +109,6 @@ private:
     // One entry per capture bucket, in graph_capture_buckets order; start and commit_mtp resolve
     // a batch into its covering bucket before indexing it.
     std::vector<std::uint32_t> buckets_;
-    // Whether a width-one Main graph tolerates padded rows: without GDN layers its per-row update
-    // is masked entirely by the zeroed host row state.
-    bool pads_main_                        = false;
     std::vector<Batch> batches_;
     execution::TextGraph* pending_         = nullptr;
     std::size_t workspace_peak_            = 0;

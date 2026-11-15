@@ -200,7 +200,12 @@ struct FrameInputView {
 // until all device, transfer and control-side consumers finish.
 class ExecutionFrame {
 public:
-    ExecutionFrame(MemorySpan backing, const FrameLayout& layout);
+    // `padding_state_offset` names the scratch State row (StateImageViews::scratch_row): every
+    // unbound row of an ingress fill points its State destination there, so a captured decode
+    // graph replaying its bucket writes a padding row's GDN State into the scratch row instead
+    // of the zeroed offset zero, which names the first pooled record a live sequence may own.
+    ExecutionFrame(MemorySpan backing, const FrameLayout& layout,
+                   std::int64_t padding_state_offset);
     ExecutionFrame(const ExecutionFrame&)            = delete;
     ExecutionFrame& operator=(const ExecutionFrame&) = delete;
 
@@ -222,6 +227,8 @@ public:
     const FrameIngressLayout ingress_arrays;
     const FrameCommitLayout commit_arrays;
     const FrameEgressLayout egress_arrays;
+    // Scratch State row offset carried by every unbound ingress row; see the constructor.
+    const std::int64_t padding_state_offset;
     PinnedHostBuffer host_storage;
     // Host mirrors over the pinned lane tables, one span per table; `host_ingress` and friends
     // point at them so device-side code shares one spelling with the tensor bindings.

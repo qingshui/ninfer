@@ -25,6 +25,15 @@ StateImageViews::StateImageViews(MemorySpan backing, const StateImageDeviceLayou
         dflash_local_.emplace(storage_, *layout.dflash_local);
         dflash_group_ = layout.dflash_local->group;
     }
+    // The arena tail is the one scratch State row, exactly one image below its end: pool records
+    // never reach it, and its offset doubles as the pool-managed extent the session's state pool
+    // and graph preparation allocate below (see context_spec and Resources).
+    if (backing.bytes < storage_.image_bytes()) {
+        throw std::invalid_argument("StateImage arena must hold its scratch row");
+    }
+    pool_bytes_ = backing.bytes - storage_.image_bytes();
+    // Validates the scratch row is an aligned, in-bounds image.
+    (void)storage_.image(static_cast<std::int64_t>(pool_bytes_));
 }
 
 Tensor StateImageViews::continuation_hidden(std::int64_t offset) const {

@@ -114,12 +114,19 @@ PagedKVBatchLayerView DFlashPersistentState::full_batch_layer(std::uint32_t laye
 
 Resources::Resources(DeviceContext& device, const ResourceLayout& layout,
                      const WorkspaceSpec& workspace, const StartupObserver& observer)
-    : context_records(layout.context_records()), context(device.device(), layout.context_bytes),
+    : context_records(layout.context_records()),
+      // The context arena carries one scratch State image beyond the pool-managed records; the
+      // session's state pool still sees exactly layout.context_bytes (see context_spec), and
+      // StateImageViews exposes the tail image as the scratch row decode graph padding rows
+      // write their GDN State into.
+      context(device.device(),
+              layout.context_bytes + layout.state_images.images.image_bytes),
       persistent(device.device(), layout.bytes),
       workspace_storage(device.device(), workspace.capacity),
       work(workspace_storage.span().subspan(0, workspace.general_capacity)),
       decoder(context.span(), persistent.span(), layout.decoder),
-      state_images(context.span(), layout.state_images), frame(persistent.span(), layout.frame) {
+      state_images(context.span(), layout.state_images),
+      frame(persistent.span(), layout.frame, state_images.scratch_row()) {
     if (workspace.general_capacity == 0 || workspace.capacity < workspace.general_capacity) {
         throw std::invalid_argument("Qwen3.5 execution workspace layout is inconsistent");
     }

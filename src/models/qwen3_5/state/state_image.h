@@ -34,6 +34,18 @@ class StateImageViews {
 public:
     StateImageViews(MemorySpan arena, const StateImageDeviceLayout& layout);
 
+    // Extent of the pool-managed records at the head of the arena: the session's state pool and
+    // graph preparation allocate strictly below it, and the one scratch State row follows.
+    [[nodiscard]] std::size_t pool_bytes() const noexcept { return pool_bytes_; }
+
+    // Byte offset of the one scratch State row at the arena tail: the arena is exactly the pool
+    // extent plus this image (see Resources). Decode graph padding rows point their GDN State
+    // destinations here, so a bucket replay never writes a pooled record.
+    [[nodiscard]] std::int64_t scratch_row() const noexcept
+    {
+        return static_cast<std::int64_t>(pool_bytes_);
+    }
+
     [[nodiscard]] StateImageStorage& storage() noexcept { return storage_; }
 
     [[nodiscard]] const StateImageStorage& storage() const noexcept { return storage_; }
@@ -55,6 +67,7 @@ private:
     StateImageStorage storage_;
     LinearAttentionStateView linear_;
     StateField hidden_;
+    std::size_t pool_bytes_ = 0;
     std::optional<CyclicKVCacheView> dflash_local_;
     std::optional<LayoutRegion> dflash_group_;
 };

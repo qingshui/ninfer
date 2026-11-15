@@ -22,6 +22,10 @@ ninfer_add_test(ninfer_qwen3_5_state_image_layout_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_state_image_layout.cpp"
   LIBRARIES ninfer_engine ninfer_core)
 
+ninfer_add_test(ninfer_qwen3_5_decode_graph_padding_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_decode_graph_padding.cpp"
+  LIBRARIES ninfer_model_execution ninfer_core)
+
 ninfer_add_test(ninfer_qwen3_5_native_transactions_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_native_transactions.cpp"
   LIBRARIES ninfer_model_execution ninfer_model_loading ninfer_core)

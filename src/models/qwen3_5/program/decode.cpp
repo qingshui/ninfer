@@ -218,9 +218,10 @@ void RankProgramImpl::begin_target(ComputeOperation& operation) {
     auto input = forward ? frame.input_view(width, batch) : frame.decode_view(width, batch);
     if (!forward && graphs) {
         const auto phase = operation.speculative ? GraphPhase::Verify : GraphPhase::Main;
-        // The target bucket pads its batch through the zeroed host row state (a GDN Main graph
-        // only replays its exact batch); an uncovered batch runs the eager traversal below, which
-        // computes the same rows without graph replay.
+        // The target bucket pads its batch through the zeroed host row state; a padding row's
+        // GDN State destination points at the scratch State row, so the replay never writes a
+        // pooled record. An uncovered batch runs the eager traversal below, which computes the
+        // same rows without graph replay.
         if (graphs->captured_batch(phase, operation.batch)) {
             std::uint32_t frontier = 0;
             for (const auto& row : operation.rows) frontier = std::max(frontier, row.main_frontier);

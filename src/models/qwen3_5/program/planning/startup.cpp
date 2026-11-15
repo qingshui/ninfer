@@ -754,9 +754,14 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
     impl->context_cache.host_capacity_bytes = context::host_context_capacity(
         impl->context_cache.host_capacity_bytes, impl->persistent.state_images.images.image_bytes);
     impl->persistent.host_context_bytes = impl->context_cache.host_capacity_bytes.value();
-    impl->workspace                     = build_workspace_plan(*impl);
-    impl->device_reservation_bytes      = checked_add(
-        checked_add(impl->persistent.bytes, impl->context_bytes, "Context arena capacity"),
+    impl->workspace = build_workspace_plan(*impl);
+    // The context arena carries one scratch State image beyond the pool-managed records (see
+    // Resources); the device reservation counts it with the arena.
+    const auto context_arena_bytes =
+        checked_add(impl->context_bytes, impl->persistent.state_images.images.image_bytes,
+                    "Context arena capacity");
+    impl->device_reservation_bytes = checked_add(
+        checked_add(impl->persistent.bytes, context_arena_bytes, "Context arena capacity"),
         impl->workspace.capacity, "sequence device capacity");
     if (impl->workspace.vision)
         impl->device_reservation_bytes +=
