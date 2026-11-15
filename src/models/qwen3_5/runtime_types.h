@@ -29,6 +29,9 @@ struct RuntimeTypes {
     using PendingBatch      = qwen3_5::PendingBatch;
     using PrefillProgress   = qwen3_5::PrefillProgress;
     using MixedProgress     = qwen3_5::MixedProgress;
+    using PrefillStart      = qwen3_5::PrefillStart;
+    using MixedStart        = qwen3_5::MixedStart;
+    using ForkResult        = qwen3_5::ForkResult;
     using ReplayProgress    = qwen3_5::ReplayProgress;
     using CommitResult      = qwen3_5::CommitResult;
     using DiscardResult     = qwen3_5::DiscardResult;

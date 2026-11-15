@@ -8,9 +8,15 @@ void EngineCore<Instance>::commit_pending(PendingBatch&& pending, ComputeFlight 
     if (frame_index >= retiring_.size() || retiring_[frame_index])
         throw std::logic_error("another model commit is still retiring on this frame");
     EnginePhaseScope phase(*this, EngineHostPhase::CommitOutput);
-    const auto lane_indices     = std::span<const std::uint32_t>(flight.lanes);
-    const bool decode_round     = flight.kind == UnitKind::Decode;
-    const std::size_t row_count = flight.requests.size();
+    // The batch rows of a mixed or packed-final flight map back to their flight members; an
+    // empty mapping is the identity (every batch row follows its member).
+    const auto member_of = [&flight](std::size_t row) -> std::size_t {
+        return flight.batch_rows.empty() ? row : flight.batch_rows[row];
+    };
+    const std::size_t batch_rows = flight.batch_rows.empty() ? flight.requests.size()
+                                                            : flight.batch_rows.size();
+    const bool decode_flight = flight.kind == FlightKind::Decode;
+    const std::size_t row_count = batch_rows;
     for (const auto& request : flight.requests)
         request->pending_execution = pending.execution_sample();
     if (row_count == 0 || row_count != pending.row_count() || pending.row_stride() == 0 ||
@@ -29,7 +35,7 @@ void EngineCore<Instance>::commit_pending(PendingBatch&& pending, ComputeFlight 
     bool generated_staged         = false;
     const auto rollback_generated = [&]() {
         for (std::size_t row = 0; row < row_count; ++row) {
-            const auto& request = flight.requests[row];
+            const auto& request = flight.requests[member_of(row)];
             if (request != nullptr) { request->output.discard_preview(); }
             if (generated_staged && request != nullptr &&
                 request->generated.size() >= generated_sizes[row]) {
@@ -40,16 +46,20 @@ void EngineCore<Instance>::commit_pending(PendingBatch&& pending, ComputeFlight 
     };
     try {
         for (std::size_t row = 0; row < row_count; ++row) {
-            const std::uint32_t lane = lane_indices[row];
-            const auto& request      = flight.requests[row];
+            const std::uint32_t lane = flight.lanes[member_of(row)];
+            const auto& request      = flight.requests[member_of(row)];
+            // A decode row of a mixed batch counts as a decode round; a producing prefill
+            // segment row is the branch's begin row instead.
+            const bool decode_row =
+                decode_flight || (flight.kind == FlightKind::Mixed && row < flight.decode_rows);
             if (request == nullptr || !request->sequence || !request->lane ||
                 request->lane->value != lane || !request->budget ||
-                request->sequence != flight.sequences[row] ||
-                request->residency != flight.residencies[row]) {
+                request->sequence != flight.sequences[member_of(row)] ||
+                request->residency != flight.residencies[member_of(row)]) {
                 throw std::logic_error("pending row has no active Engine request");
             }
-            if (decode_round) { ++request->host_timing.decode_rounds; }
-            cancelled[row] = flight.cancelled[row];
+            if (decode_row) { ++request->host_timing.decode_rounds; }
+            cancelled[row] = flight.cancelled[member_of(row)];
             failed[row]    = !cancelled[row] && pending.constraint_failed(row);
             const std::int32_t raw_count =
                 pending.row_counts().empty() ? 1 : pending.row_counts()[row];
@@ -97,7 +107,7 @@ void EngineCore<Instance>::commit_pending(PendingBatch&& pending, ComputeFlight 
         for (std::size_t row = 0; row < row_count; ++row) {
             const std::uint32_t accepted = decisions[row].accepted_tokens;
             if (accepted == 0) { continue; }
-            const auto& request = flight.requests[row];
+            const auto& request = flight.requests[member_of(row)];
             if (request->generated.size() > request->generated.capacity() ||
                 accepted > request->generated.capacity() - request->generated.size()) {
                 throw std::logic_error("admission did not reserve generated-token capacity");
@@ -136,6 +146,9 @@ void EngineCore<Instance>::commit_pending(PendingBatch&& pending, ComputeFlight 
         throw std::logic_error("Runtime commit result is not row aligned");
     }
     for (std::size_t row = 0; row < row_count; ++row) {
+        const auto member = member_of(row);
+        const bool decode_row =
+            decode_flight || (flight.kind == FlightKind::Mixed && row < flight.decode_rows);
         const CommitDisposition expected = failed[row]      ? CommitDisposition::FailedReleased
                                            : cancelled[row] ? CommitDisposition::CancelledReleased
                                            : decisions[row].terminal ? CommitDisposition::Finishable
@@ -143,8 +156,7 @@ void EngineCore<Instance>::commit_pending(PendingBatch&& pending, ComputeFlight 
         if (committed.rows[row].disposition != expected) {
             throw std::logic_error("Runtime commit row disposition is invalid");
         }
-        if (committed.capture_ready[row] &&
-            (decode_round || expected != CommitDisposition::Active)) {
+        if (committed.capture_ready[row] && (decode_row || expected != CommitDisposition::Active)) {
             throw std::logic_error("Runtime exposed a capture outside a committed Begin row");
         }
     }
@@ -153,7 +165,8 @@ void EngineCore<Instance>::commit_pending(PendingBatch&& pending, ComputeFlight 
                     [](const CommitDecision& decision) { return decision.terminal; });
 
     for (std::size_t row = 0; row < row_count; ++row) {
-        const auto& request  = flight.requests[row];
+        const auto member  = member_of(row);
+        const auto& request = flight.requests[member];
         auto& observed       = request->speculative_stats;
         const auto& counters = committed.rows[row].speculative;
         cumulative_stats_.speculative_rounds += counters.rounds - observed.rounds;
@@ -176,25 +189,27 @@ void EngineCore<Instance>::commit_pending(PendingBatch&& pending, ComputeFlight 
         observed.rounds                 = counters.rounds;
         observed.drafted_tokens         = counters.drafted_tokens;
         observed.accepted_tokens        = counters.accepted_tokens;
-        observed.fallback_steps         = counters.fallback_steps;
+        observed.fallback_steps          = counters.fallback_steps;
         observed.committed_draft_tokens = counters.committed_draft_tokens;
         if (cancelled[row] || failed[row]) {
             request->speculative_stats = std::move(committed.rows[row].speculative);
         }
     }
 
-    if (decode_round) {
+    if (decode_flight) {
         for (std::size_t row = 0; row < row_count; ++row) {
             if (!cancelled[row]) {
                 cumulative_stats_.committed_decode_tokens += decisions[row].accepted_tokens;
-                flight.requests[row]->committed_decode_tokens += decisions[row].accepted_tokens;
+                flight.requests[member_of(row)]->committed_decode_tokens +=
+                    decisions[row].accepted_tokens;
             }
         }
     }
 
     for (std::size_t row = 0; row < row_count; ++row) {
-        const std::uint32_t lane     = lane_indices[row];
-        const auto& request          = flight.requests[row];
+        const auto member           = member_of(row);
+        const std::uint32_t lane     = flight.lanes[member];
+        const auto& request          = flight.requests[member];
         const std::uint32_t accepted = decisions[row].accepted_tokens;
         if (failed[row]) {
             request->terminal_error     = std::make_exception_ptr(RequestError(
@@ -204,7 +219,7 @@ void EngineCore<Instance>::commit_pending(PendingBatch&& pending, ComputeFlight 
             continue;
         }
         if (!cancelled[row]) {
-            flight.progressed[row] = accepted != 0;
+            flight.progressed[member] = accepted != 0;
             request->budget->commit(accepted);
             request->placement_tokens = instance_.session->load_tokens(*request->sequence);
         }
@@ -260,31 +275,44 @@ void EngineCore<Instance>::resolve_prefill_flight(
     if (progress.rows.size() != flight.requests.size() || progress.rows.empty()) {
         throw std::logic_error("prefill result changed its frozen membership");
     }
-    // The wall clock of the whole flight is shared by its segments in proportion to their tokens.
-    const auto elapsed            = elapsed_ns(flight.started, Clock::now());
-    std::uint64_t unshared_ns     = elapsed;
-    std::uint64_t unshared_tokens = 0;
-    for (const auto& row : progress.rows) unshared_tokens += row.processed_prompt_tokens;
+    std::optional<PendingBatch> batch;
+    std::vector<bool> produced(progress.rows.size(), false);
     for (std::size_t row = 0; row < progress.rows.size(); ++row) {
         const std::uint32_t tokens = progress.rows[row].processed_prompt_tokens;
-        const std::uint64_t share =
-            unshared_tokens == 0 ? 0 : unshared_ns * tokens / unshared_tokens;
-        scheduler_.prefill_executed(flight.lanes[row], max_concurrency_, tokens, share);
-        unshared_ns -= share;
-        unshared_tokens -= tokens;
+        flight.prefill_tokens += tokens;
         flight.progressed[row] = tokens != 0;
+        if (progress.rows[row].pending) {
+            if (batch) { throw std::logic_error("prefill result carried two pending batches"); }
+            batch.emplace(std::move(*progress.rows[row].pending));
+            produced[row] = true;
+        }
     }
     record_service(flight);
     for (std::size_t row = 0; row < progress.rows.size(); ++row) {
         const auto request = flight.requests[row];
-        resolve_prefill_progress(request, std::move(progress.rows[row]), flight);
+        resolve_prefill_progress(request, std::move(progress.rows[row]), produced[row]);
         update_recovery(request);
     }
+    if (!batch) { return; }
+    // The batch of a packed final carries one decision row per producing segment, in member
+    // order; it rides the first producing row. The producing members therefore come from the
+    // flags the flight froze at its start when the Session reports them, and from the pending
+    // row alone otherwise.
+    for (std::size_t member = 0; member < flight.requests.size(); ++member) {
+        const bool producing = member < flight.produces.size() ? flight.produces[member]
+                                                              : produced[member];
+        if (producing) { flight.batch_rows.push_back(member); }
+    }
+    if (flight.batch_rows.empty()) {
+        throw std::logic_error("a packed prefill produced a batch without a producing segment");
+    }
+    flight.decode_rows = 0;
+    commit_pending(std::move(*batch), std::move(flight));
 }
 
 template <class Instance>
 void EngineCore<Instance>::resolve_prefill_progress(const std::shared_ptr<Request>& request,
-                                                    PrefillRow&& progress, ComputeFlight& flight) {
+                                                    PrefillRow&& progress, bool produced) {
     EnginePhaseScope phase(*this, EngineHostPhase::CommitOutput);
     ++request->host_timing.prefill_units;
     cumulative_stats_.computed_prefill_tokens += progress.processed_prompt_tokens;
@@ -322,24 +350,56 @@ void EngineCore<Instance>::resolve_prefill_progress(const std::shared_ptr<Reques
         return;
     }
     if (!progress.complete) { return; }
-    if (!request->lane || !progress.pending) {
+    if (!request->lane || produced != progress.pending.has_value()) {
         throw std::logic_error("completed prefill has no lane or pending token");
-    }
-    if (flight.requests.size() != 1) {
-        throw std::logic_error("a packed prefill flight produced a pending token");
     }
     if (!request->admitted_begin || progress.summary != *request->admitted_begin) {
         throw std::logic_error("runtime Begin summary differs from committed admission");
     }
     request->begin = progress.summary;
-    phase.finish();
-    commit_pending(std::move(*progress.pending), std::move(flight));
-    progress.pending.reset();
+}
+
+template <class Instance>
+void EngineCore<Instance>::resolve_mixed_flight(typename ModelContract::MixedProgress&& progress,
+                                                 ComputeFlight flight) {
+    const std::size_t segments = flight.prefill_members;
+    const std::size_t producing =
+        std::count(flight.produces.begin(), flight.produces.end(), true);
+    if (flight.kind != FlightKind::Mixed || flight.decode_rows == 0 ||
+        segments == 0 || segments > flight.requests.size() ||
+        progress.prefill.rows.size() != segments ||
+        progress.decode.row_count() != flight.decode_rows + producing) {
+        throw std::logic_error("mixed result changed its frozen membership");
+    }
+    // The prefill segments settle first: their prompt progress is committed by the shared
+    // batch, so none of their rows carries its own pending batch.
+    for (std::size_t row = 0; row < progress.prefill.rows.size(); ++row) {
+        const std::uint32_t tokens = progress.prefill.rows[row].processed_prompt_tokens;
+        flight.prefill_tokens += tokens;
+        flight.progressed[row] = tokens != 0;
+        if (progress.prefill.rows[row].pending) {
+            throw std::logic_error("mixed prefill row carried its own pending batch");
+        }
+        resolve_prefill_progress(flight.requests[row], std::move(progress.prefill.rows[row]),
+                                 false);
+        update_recovery(flight.requests[row]);
+    }
+    // The shared batch: the decode rows first, then the producing segments, in member order.
+    flight.batch_rows.clear();
+    for (std::size_t row = 0; row < flight.decode_rows; ++row) {
+        flight.batch_rows.push_back(segments + row);
+    }
+    for (std::size_t member = 0; member < segments; ++member) {
+        if (flight.produces[member]) { flight.batch_rows.push_back(member); }
+    }
+    record_service(flight);
+    commit_pending(std::move(progress.decode), std::move(flight));
 }
 
 template <class Instance>
 [[nodiscard]] typename EngineCore<Instance>::ComputeFlight
-EngineCore<Instance>::freeze_members(std::span<const std::uint32_t> lanes, UnitKind kind) const {
+EngineCore<Instance>::freeze_members(std::span<const std::uint32_t> lanes,
+                                     FlightKind kind) const {
     ComputeFlight flight;
     flight.kind = kind;
     flight.requests.reserve(lanes.size());
@@ -363,7 +423,8 @@ EngineCore<Instance>::freeze_members(std::span<const std::uint32_t> lanes, UnitK
 }
 
 template <class Instance>
-[[nodiscard]] bool EngineCore<Instance>::start_prefill(std::span<const std::uint32_t> lanes) {
+[[nodiscard]] bool EngineCore<Instance>::start_prefill(std::span<const std::uint32_t> lanes,
+                                                       std::uint64_t host_submit_ns) {
     if (lanes.empty() || lanes.size() > kMaximumConcurrency) {
         throw std::logic_error("prefill membership is invalid");
     }
@@ -371,22 +432,26 @@ template <class Instance>
     if (replay && lanes.size() != 1) {
         throw std::logic_error("a replaying lane cannot share an execution");
     }
-    auto flight = freeze_members(lanes, replay ? UnitKind::Replay : UnitKind::Prefill);
+    auto flight = freeze_members(lanes, replay ? FlightKind::Replay : FlightKind::Prefill);
     // The Session reads a contiguous constrained flag per segment.
     auto constrained = std::make_unique<bool[]>(flight.requests.size());
     for (std::size_t row = 0; row < flight.requests.size(); ++row) {
         constrained[row] = flight.requests[row]->output.constrained();
     }
     std::optional<ExecutionTicket> ticket;
+    std::optional<PrefillStart> admitted;
     std::size_t segments = 1;
-    flight.started       = Clock::now();
+    flight.started        = Clock::now();
     ExecutionCallScope call(*this);
     if (replay) {
         ticket = instance_.session->start_replay(flight.sequences.front());
-    } else if (const auto started = instance_.session->start_prefill(
-                   flight.sequences, {constrained.get(), flight.requests.size()})) {
-        ticket   = started->ticket;
-        segments = started->segments;
+    } else {
+        admitted = instance_.session->start_prefill(
+            flight.sequences, {constrained.get(), flight.requests.size()});
+        if (admitted) {
+            ticket   = admitted->ticket;
+            segments = admitted->segments;
+        }
     }
     call.finish();
     if (!ticket) return false;
@@ -400,29 +465,170 @@ template <class Instance>
     flight.lanes.resize(segments);
     flight.cancelled.resize(segments);
     flight.progressed.resize(segments);
-    flight.ticket = *ticket;
+    flight.ticket        = *ticket;
+    flight.host_submit_ns = host_submit_ns;
+    if (!replay) {
+        // The producing flags of the admitted segments, for the packed-final batch mapping. A
+        // Session that reports only the segment count freezes none; its pending row names its
+        // producing member on its own.
+        flight.produces.assign(segments, false);
+        if constexpr (requires { admitted->segments[std::size_t{0}].produces_token; }) {
+            for (std::size_t segment = 0; segment < segments; ++segment) {
+                flight.produces[segment] = admitted->segments[segment].produces_token;
+            }
+        }
+    } else {
+        flight.prefill_members = 1;
+    }
     admit_compute(std::move(flight));
     for (const auto lane : lanes) reserved_units_[lane].reset();
     return true;
 }
 
 template <class Instance>
-[[nodiscard]] bool EngineCore<Instance>::start_decode(const RoundMembership& membership) {
-    auto flight = freeze_members(membership.lane_span(), UnitKind::Decode);
+[[nodiscard]] bool EngineCore<Instance>::start_decode(std::span<const std::uint32_t> lanes,
+                                                      std::uint64_t host_submit_ns) {
+    if (lanes.empty() || lanes.size() > kMaximumConcurrency) {
+        throw std::logic_error("decode membership is invalid");
+    }
+    auto flight = freeze_members(lanes, FlightKind::Decode);
+    flight.decode_rows = static_cast<std::uint32_t>(flight.requests.size());
+    std::vector<RoundBudget> budgets;
+    budgets.reserve(flight.requests.size());
     // The Session reads a contiguous constrained flag per row.
     auto constrained = std::make_unique<bool[]>(flight.requests.size());
     for (std::size_t row = 0; row < flight.requests.size(); ++row) {
-        constrained[row] = flight.requests[row]->output.constrained();
+        const auto& request = flight.requests[row];
+        if (!request->budget) {
+            throw std::logic_error("decode-ready request has no generation budget");
+        }
+        budgets.push_back(RoundBudget{
+            .generated_tokens_remaining =
+                request->recovery_pending
+                    ? 1U
+                    : request->output.model_token_budget_remaining(request->budget->remaining())});
+        if (budgets.back().generated_tokens_remaining == 0) {
+            throw std::logic_error("decode-ready request has no licensed model tokens");
+        }
+        constrained[row] = request->output.constrained();
     }
+    flight.started        = Clock::now();
+    flight.host_submit_ns = host_submit_ns;
     ExecutionCallScope call(*this);
     const auto ticket = instance_.session->start_decode(
-        flight.sequences, membership.budget_span(), {constrained.get(), flight.requests.size()});
+        flight.sequences, budgets, {constrained.get(), flight.requests.size()});
     call.finish();
     if (!ticket) return false;
     flight.ticket = *ticket;
     for (const auto lane : flight.lanes) reserved_units_[lane].reset();
     admit_compute(std::move(flight));
     return true;
+}
+
+// Starts one mixed flight: the planned prefill segments in order, followed by the planned
+// decode rows. Returns the decode rows the Session admitted.
+template <class Instance>
+[[nodiscard]] std::optional<std::uint32_t>
+EngineCore<Instance>::start_mixed(std::span<const std::uint32_t> prefill_lanes,
+                                  std::span<const std::uint32_t> prefill_caps,
+                                  std::span<const std::uint32_t> decode_lanes,
+                                  std::uint64_t host_submit_ns) {
+    if (prefill_lanes.empty() || decode_lanes.empty() || prefill_caps.size() != prefill_lanes.size() ||
+        prefill_lanes.size() + decode_lanes.size() > kMaximumConcurrency) {
+        throw std::logic_error("mixed membership is invalid");
+    }
+    std::vector<std::uint32_t> lanes(prefill_lanes.begin(), prefill_lanes.end());
+    lanes.insert(lanes.end(), decode_lanes.begin(), decode_lanes.end());
+    auto flight = freeze_members(lanes, FlightKind::Mixed);
+    std::vector<RoundBudget> budgets;
+    budgets.reserve(decode_lanes.size());
+    auto prefill_constrained = std::make_unique<bool[]>(prefill_lanes.size());
+    auto decode_constrained  = std::make_unique<bool[]>(decode_lanes.size());
+    for (std::size_t row = 0; row < prefill_lanes.size(); ++row) {
+        prefill_constrained[row] = flight.requests[row]->output.constrained();
+    }
+    for (std::size_t row = 0; row < decode_lanes.size(); ++row) {
+        const auto& request = flight.requests[prefill_lanes.size() + row];
+        if (!request->budget) {
+            throw std::logic_error("decode-ready request has no generation budget");
+        }
+        budgets.push_back(RoundBudget{
+            .generated_tokens_remaining =
+                request->recovery_pending
+                    ? 1U
+                    : request->output.model_token_budget_remaining(request->budget->remaining())});
+        if (budgets.back().generated_tokens_remaining == 0) {
+            throw std::logic_error("decode-ready request has no licensed model tokens");
+        }
+        decode_constrained[row] = request->output.constrained();
+    }
+    flight.started        = Clock::now();
+    flight.host_submit_ns = host_submit_ns;
+    std::optional<MixedStart> started;
+    {
+        ExecutionCallScope call(*this);
+        started = instance_.session->start_mixed(
+            {flight.sequences.data(), prefill_lanes.size()},
+            {prefill_constrained.get(), prefill_lanes.size()},
+            {flight.sequences.data() + prefill_lanes.size(), decode_lanes.size()}, budgets,
+            {decode_constrained.get(), decode_lanes.size()});
+        call.finish();
+    }
+    if (!started) { return std::nullopt; }
+    // A Session that reports only the segment count names no producing flag; a mixed flight
+    // of such a Session cannot exist, so its produces stay empty.
+    const auto fill_produces = [&flight, &started](std::size_t count) {
+        flight.produces.assign(count, false);
+        if constexpr (requires { started->segments[std::size_t{0}].produces_token; }) {
+            for (std::size_t segment = 0; segment < count; ++segment) {
+                flight.produces[segment] = started->segments[segment].produces_token;
+            }
+        }
+    };
+    const std::size_t segments = [&] {
+        if constexpr (requires { started->segments.size(); }) {
+            return started->segments.size();
+        } else {
+            return static_cast<std::size_t>(started->segments);
+        }
+    }();
+    const std::uint32_t rows    = started->decode_rows;
+    if (segments == 0 || segments > prefill_lanes.size() || rows > decode_lanes.size()) {
+        throw std::logic_error("Session admitted an invalid mixed membership");
+    }
+    if (rows == 0) {
+        // The Session fell back to a pure packed prefill: no decode row rides, and the
+        // membership is the admitted prefill prefix alone.
+        flight.requests.resize(segments);
+        flight.sequences.resize(segments);
+        flight.residencies.resize(segments);
+        flight.lanes.resize(segments);
+        flight.cancelled.resize(segments);
+        flight.progressed.resize(segments);
+        flight.kind        = FlightKind::Prefill;
+        flight.decode_rows = 0;
+        fill_produces(segments);
+        flight.ticket = started->ticket;
+        admit_compute(std::move(flight));
+        for (const auto lane : lanes) reserved_units_[lane].reset();
+        return 0U;
+    }
+    // The membership is the admitted prefill prefix plus the admitted decode rows.
+    flight.requests.resize(segments + rows);
+    flight.sequences.resize(segments + rows);
+    flight.residencies.resize(segments + rows);
+    flight.lanes.resize(segments + rows);
+    flight.cancelled.resize(segments + rows);
+    flight.progressed.resize(segments + rows);
+    flight.decode_rows   = rows;
+    flight.prefill_members = segments;
+    fill_produces(segments);
+    flight.decode_lanes.assign(flight.lanes.begin() + static_cast<std::ptrdiff_t>(segments),
+                               flight.lanes.end());
+    flight.ticket = started->ticket;
+    admit_compute(std::move(flight));
+    for (const auto lane : lanes) reserved_units_[lane].reset();
+    return rows;
 }
 
 template <class Instance>
@@ -442,13 +648,15 @@ template <class Instance>
         membership.tokens.size() != membership.size * membership.row_stride) {
         throw std::logic_error("thinking control membership is invalid");
     }
-    auto flight           = freeze_members(membership.lane_span(), UnitKind::Control);
+    auto flight           = freeze_members(membership.lane_span(), FlightKind::Control);
     flight.control_tokens = membership.tokens;
     flight.control_stride = membership.row_stride;
     flight.generated_sizes.reserve(flight.requests.size());
     for (const auto& request : flight.requests) {
         flight.generated_sizes.push_back(request->generated.size());
     }
+    flight.started        = Clock::now();
+    flight.host_submit_ns = 0;
     std::vector<std::optional<std::uint32_t>> splits(flight.requests.size());
     try {
         EnginePhaseScope phase(*this, EngineHostPhase::CommitOutput);
@@ -565,7 +773,7 @@ void EngineCore<Instance>::record_decision_upload(const DecisionConsumed& consum
 template <class Instance>
 [[nodiscard]] bool EngineCore<Instance>::poll_execution(HostPhaseMeasurement& boundary) {
     const bool context_was_pending = instance_.session->has_context_operation();
-    const auto owner               = materializing_ ? materializing_->request : context_owner_;
+    const auto owner               = context_owner_;
     if (owner && owner->cancelled.load(std::memory_order_acquire) &&
         instance_.session->has_context_operation()) {
         instance_.session->cancel_context();
@@ -605,16 +813,18 @@ template <class Instance>
                 complete->row_count != flight->requests.size())
                 throw std::logic_error("execution completion changed its frozen membership");
             const auto kind = static_cast<std::size_t>(complete->sample.work.kind);
+            const std::size_t batch_rows =
+                flight->batch_rows.empty() ? flight->requests.size() : flight->batch_rows.size();
             for (const auto& request : flight->requests) {
                 request->executions[kind].observe(complete->sample.latency);
                 if (complete->sample.work.kind == ExecutionKind::Decode)
-                    request->decode_by_batch[flight->requests.size() - 1].observe(
-                        complete->sample.latency);
+                    request->decode_by_batch[batch_rows - 1].observe(complete->sample.latency);
                 accumulate_gpu(request->max_rank_gpu, complete->sample.max_rank_gpu);
                 request->pending_execution.reset();
             }
             flight->retired_ns = complete->sample.latency.total_ns;
             record_service(*flight);
+            record_flight(*flight, complete->sample);
             if (retiring) retiring_[event->ticket.frame.index].reset();
             continue;
         }
@@ -624,26 +834,32 @@ template <class Instance>
         }
         auto flight = std::move(*computing);
         compute_[event->ticket.frame.index].reset();
-        set_host_work_class(flight.kind == UnitKind::Decode    ? HostWorkClass::Decode
-                            : flight.kind == UnitKind::Control ? HostWorkClass::Control
-                                                               : HostWorkClass::Prefill,
-                            flight.kind == UnitKind::Decode
+        const bool decode_flight =
+            flight.kind == FlightKind::Decode ||
+            (flight.kind == FlightKind::Mixed && flight.decode_rows != 0);
+        set_host_work_class(decode_flight ? HostWorkClass::Decode
+                            : flight.kind == FlightKind::Control ? HostWorkClass::Control
+                                                                  : HostWorkClass::Prefill,
+                            flight.kind == FlightKind::Decode
                                 ? std::span<const std::uint32_t>(flight.lanes)
-                                : std::span<const std::uint32_t>{});
+                                : flight.kind == FlightKind::Mixed
+                                    ? std::span<const std::uint32_t>(flight.decode_lanes)
+                                    : std::span<const std::uint32_t>{});
         if (auto* pending = std::get_if<PendingBatch>(&event->result)) {
             commit_pending(std::move(*pending), std::move(flight));
         } else if (auto* prefill =
                        std::get_if<typename ModelContract::PrefillProgress>(&event->result)) {
             resolve_prefill_flight(std::move(*prefill), std::move(flight));
+        } else if (auto* mixed =
+                       std::get_if<typename ModelContract::MixedProgress>(&event->result)) {
+            resolve_mixed_flight(std::move(*mixed), std::move(flight));
         } else if (auto* replay =
                        std::get_if<typename ModelContract::ReplayProgress>(&event->result)) {
             const auto& request = flight.requests.front();
             if (!request->recovery) throw std::logic_error("replay progress has no restoration");
             request->recovery->frontier = replay->frontier;
             if (replay->processed_tokens) request->last_progress = Clock::now();
-            scheduler_.prefill_executed(flight.lanes.front(), max_concurrency_,
-                                        replay->processed_tokens,
-                                        elapsed_ns(flight.started, Clock::now()));
+            flight.prefill_tokens = replay->processed_tokens;
             request->replayed_tokens += replay->processed_tokens;
             cumulative_stats_.replayed_tokens += replay->processed_tokens;
             if (replay->capture_ready) reserve_active_capture(request, EngineRequestState::Replay);
@@ -654,6 +870,7 @@ template <class Instance>
                 observe_scheduling(request, GenerationSchedulingTransition::ReplayComplete);
             }
             update_recovery(request);
+            record_service(flight);
         } else if (std::holds_alternative<typename ModelContract::ControlComplete>(event->result)) {
             resolve_control(flight);
         } else {
@@ -668,18 +885,47 @@ template <class Instance>
 }
 
 template <class Instance>
-[[nodiscard]] bool EngineCore<Instance>::execution_outstanding() const noexcept {
-    return compute_flights() != 0 || instance_.session->has_context_operation() ||
-           instance_.executor->has_pending_work();
+void EngineCore<Instance>::record_flight(const ComputeFlight& flight,
+                                         const ExecutionSample& sample) noexcept {
+    auto& stats = cumulative_stats_;
+    stats.flight_prefill_tokens += flight.prefill_tokens;
+    stats.flight_prefill_segments +=
+        flight.kind == FlightKind::Mixed
+            ? flight.prefill_members
+            : (flight.kind == FlightKind::Prefill || flight.kind == FlightKind::Replay
+                   ? static_cast<std::uint32_t>(flight.requests.size())
+                   : 0U);
+    stats.flight_decode_rows += flight.kind == FlightKind::Decode
+                                    ? static_cast<std::uint32_t>(flight.requests.size())
+                                    : flight.decode_rows;
+    stats.flight_host_submit_ns += flight.host_submit_ns;
+    stats.flight_gpu_ns += sample.latency.total_ns;
+    constexpr std::size_t kRecentFlights = 16;
+    stats.recent_flights.push_back(FlightRecord{
+        .index           = flight.index,
+        .prefill_tokens  = flight.prefill_tokens,
+        .prefill_segments = flight.kind == FlightKind::Mixed
+                                ? flight.prefill_members
+                                : (flight.kind == FlightKind::Prefill ||
+                                               flight.kind == FlightKind::Replay
+                                           ? static_cast<std::uint32_t>(flight.requests.size())
+                                           : 0U),
+        .decode_rows     = flight.kind == FlightKind::Decode
+                               ? static_cast<std::uint32_t>(flight.requests.size())
+                               : flight.decode_rows,
+        .host_submit_ns  = flight.host_submit_ns,
+        .gpu_ns          = sample.latency.total_ns,
+        .gpu_timing      = sample,
+    });
+    if (stats.recent_flights.size() > kRecentFlights) {
+        stats.recent_flights.erase(stats.recent_flights.begin());
+    }
 }
 
 template <class Instance>
-bool EngineCore<Instance>::compute_pending() const noexcept {
-    if (compute_flights() != 0) return true;
-    return std::any_of(slots_.begin(), slots_.end(), [&](const auto& request) {
-        return request && request->sequence &&
-               instance_.session->execution_pending(*request->sequence);
-    });
+[[nodiscard]] bool EngineCore<Instance>::execution_outstanding() const noexcept {
+    return compute_flights() != 0 || instance_.session->has_context_operation() ||
+           instance_.executor->has_pending_work();
 }
 
 template <class Instance>
@@ -729,13 +975,15 @@ void EngineCore<Instance>::admit_compute(ComputeFlight&& flight) {
     if (flight.ticket.frame.kind != FrameKind::Compute || index >= compute_.size() ||
         compute_[index] || retiring_[index])
         throw std::logic_error("execution ticket names an occupied compute frame");
+    flight.index = flight_index_++;
+    ++cumulative_stats_.flights;
     compute_[index].emplace(std::move(flight));
 }
 
 template <class Instance>
 void EngineCore<Instance>::record_service(ComputeFlight& flight) noexcept {
     if (!flight.retired_ns || flight.service_accounted) return;
-    if (flight.kind == UnitKind::Replay) {
+    if (flight.kind == FlightKind::Replay) {
         for (const auto& request : flight.requests)
             scheduler_.recovery_work(request->id, *flight.retired_ns);
         flight.service_accounted = true;
@@ -756,9 +1004,9 @@ void EngineCore<Instance>::log_worker_failure(std::exception_ptr error) const no
     // Do not depend on a product-specific logger, or throw from the failure handler.
     const auto report = [&](const char* reason) {
         std::fprintf(stderr,
-                     "NInfer worker failed: %s | cycle=%u progress_owner=%llu paused=%zu "
+                     "NInfer worker failed: %s | progress_owner=%llu paused=%zu "
                      "context=%d compute=%d retiring=%d\n",
-                     reason, static_cast<unsigned>(cycle_step_),
+                     reason,
                      static_cast<unsigned long long>(scheduler_.progress_owner().value_or(0)),
                      paused_.size(), instance_.session->has_context_operation(),
                      static_cast<int>(std::count_if(compute_.begin(), compute_.end(),
@@ -792,17 +1040,22 @@ void EngineCore<Instance>::fail_all(std::exception_ptr error) noexcept {
         measurement = std::move(measurement_);
     }
     scheduler_ = Scheduling{max_concurrency_};
-    const std::shared_ptr<Request> materializing_request =
-        materializing_ ? materializing_->request : nullptr;
+    std::vector<std::shared_ptr<Request>> materializing;
+    for (auto& entry : materializing_) {
+        if (entry) { materializing.push_back(entry->request); }
+        entry.reset();
+    }
     // Native retires all transfer readers before any external checkpoint owner is destroyed.
     instance_.session->fail_all_cleanup();
     for (auto& flight : compute_) {
-        if (flight && flight->kind == UnitKind::Control) discard_control_preview(*flight);
+        if (flight && flight->kind == FlightKind::Control) discard_control_preview(*flight);
         flight.reset();
     }
     for (auto& flight : retiring_) flight.reset();
-    cycle_step_ = CycleStep::Boundary;
-    materializing_.reset();
+    {
+        std::lock_guard lock(queue_mutex_);
+        groups_.clear();
+    }
     admission_decision_.reset();
     for (auto& decision : capture_decisions_) { decision.reset(); }
     for (auto& unit : reserved_units_) { unit.reset(); }
@@ -816,7 +1069,7 @@ void EngineCore<Instance>::fail_all(std::exception_ptr error) noexcept {
     };
     for (const auto& request : paused) { release(request); }
     for (const auto& request : residents) { release(request); }
-    release(materializing_request);
+    for (const auto& request : materializing) { release(request); }
     for (const auto& request : pending) { release(request); }
     resources_.release_all(*instance_.session);
     publish_runtime_stats();
@@ -825,7 +1078,7 @@ void EngineCore<Instance>::fail_all(std::exception_ptr error) noexcept {
     };
     for (const auto& request : paused) { publish(request); }
     for (const auto& request : residents) { publish(request); }
-    publish(materializing_request);
+    for (const auto& request : materializing) { publish(request); }
     for (const auto& request : pending) { publish(request); }
     if (measurement) measurement->completion.set_exception(error);
     queue_cv_.notify_all();

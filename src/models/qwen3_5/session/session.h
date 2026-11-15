@@ -134,6 +134,10 @@ struct BindingReservation {
     // The binding is complete when start_binding returns: the lane is already schedulable and no
     // ContextProgress will follow. False keeps the asynchronous completion contract.
     bool synchronous       = false;
+    // The installed sequence of the bound lane, present only when `synchronous`.
+    std::optional<SequenceHandle> sequence;
+    // The installed residency of the bound lane, present only when `synchronous`.
+    std::optional<runtime::ResidencyId> residency;
     ContextAssessment assessment;
     std::vector<CheckpointHandle> retired_points;
     std::optional<CheckpointHandle> consumed_source;
@@ -534,7 +538,11 @@ public:
     // its base plan's fork_frontier. Children share the parent's whole-page KV, copy its tail
     // page and GDN/conv state through the stream order of their first execution, and return
     // synchronously: an unreserved result names no child. The parent keeps its own lane.
-    [[nodiscard]] ForkResult fork(SequenceHandle parent, std::span<const runtime::LaneId> children);
+    // `sampling`, when not empty, is parallel to `children` and names the sampling parameters
+    // each child decodes with; empty repeats the parent's.
+    [[nodiscard]] ForkResult
+    fork(SequenceHandle parent, std::span<const runtime::LaneId> children,
+         std::span<const ResolvedSamplingParameters> sampling = {});
     // Upper bound on the decode rows one start_mixed call carries; zero when this Session never
     // mixes (offloaded experts, masked draft windows, scoring, a single lane).
     [[nodiscard]] std::uint32_t mixed_decode_limit() const noexcept;

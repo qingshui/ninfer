@@ -1,12 +1,12 @@
-// T5 / F3: multi-request prefill scheduling, through Scheduler's public interface only.
-// A "flight" is the set of lanes returned by prefill_candidates(); the Engine commits it once
-// and reports each segment to prefill_executed() as one unit.
+// T6 / mixed-flight scheduling, through Scheduler's public interface only. One iteration plans
+// one flight: every decode row rides it, and the prefill segments the token budget admits ride
+// beside them. The Engine submits the planned membership as one Session call; these tests check
+// the plan the Engine turns into that flight.
 #include "runtime/engine/scheduler.h"
 
 #include <algorithm>
 #include <array>
 #include <cstdint>
-#include <deque>
 #include <iostream>
 #include <memory>
 #include <optional>
@@ -19,6 +19,7 @@ namespace {
 struct Request {
     using SequenceHandle = std::uint64_t;
     enum class Phase { Waiting, Prefill, Replay, Decode };
+    enum class Flag { DecodeReady, ControlReady, Prefilling, Replaying };
 
     struct Budget {
         [[nodiscard]] std::uint32_t remaining() const noexcept { return 8; }
@@ -49,114 +50,120 @@ struct Request {
 
 using Scheduler  = ninfer::runtime::Scheduler<Request>;
 using RequestPtr = std::shared_ptr<Request>;
-// Lane slot tables are runtime-sized; tests carry their own capacity.
 constexpr std::uint32_t kSlots = 6;
-using Slots                     = std::array<RequestPtr, kSlots>;
 
 void require(bool condition, const char* message) {
     if (!condition) throw std::runtime_error(message);
 }
 
-RequestPtr request(std::uint64_t id, Request::Phase phase = Request::Phase::Waiting) {
-    auto value      = std::make_shared<Request>();
-    value->id       = id;
-    value->phase    = phase;
-    value->sequence = id;
-    return value;
-}
+// One iteration's flight membership: every decode row plus the prefill segments the token
+// budget admits, with each prefill cap bounded by its lane's own limit.
+void test_one_iteration_is_one_mixed_flight() {
+    Scheduler scheduler(kSlots);
+    ninfer::runtime::LaneTable table;
+    table.lanes.resize(kSlots);
+    table.lanes[0].decode_ready    = true;
+    table.lanes[1].prefilling      = true;
+    table.lanes[1].prefill_limit   = 64;
+    table.lanes[2].decode_ready    = true;
+    table.lanes[3].prefilling      = true;
+    table.lanes[3].prefill_limit   = 256;
+    table.lanes[4].decode_ready    = true;
+    table.lanes[5].prefilling      = true;
+    table.lanes[5].prefill_limit   = 8;
 
-using ninfer::runtime::PrefillPacing;
-
-// Runs one Throughput cycle as flights: caps for the lanes, one candidate list per flight, one
-// prefill_executed per segment. The wall clock of a flight is shared by its segments in
-// proportion to their tokens. Returns tokens executed in the cycle. `left` is each lane's
-// remaining prompt.
-std::uint32_t run_cycle_as_flights(Scheduler& scheduler, Slots& slots, std::uint32_t lanes,
-                                   std::uint32_t chunk, std::array<std::uint32_t, 6>& left,
-                                   std::array<std::uint32_t, 6>& last_progress,
-                                   std::uint32_t cycle, std::uint32_t& flights) {
-    scheduler.begin_prefill_cycle(false);
-    std::uint32_t executed = 0;
-    for (;;) {
-        ninfer::runtime::PrefillUnitTokens limits(kSlots, 0);
-        for (std::uint32_t lane = 0; lane < lanes; ++lane)
-            if (slots[lane]) limits[lane] = std::min(chunk, left[lane]);
-        const auto caps   = scheduler.prefill_unit_caps(limits);
-        const auto flight = scheduler.prefill_candidates(slots, lanes, caps);
-        if (flight.empty()) break;
-        ++flights;
-        std::uint32_t flight_tokens = 0;
-        for (const std::uint32_t lane : flight.lane_span()) flight_tokens += caps[lane];
-        for (const std::uint32_t lane : flight.lane_span()) {
-            const std::uint32_t done = caps[lane];
-            left[lane] -= done;
-            executed += done;
-            last_progress[lane] = cycle;
-            scheduler.prefill_executed(lane, lanes, done,
-                                       std::uint64_t{flight_tokens} * 1000 * done / flight_tokens);
-            if (left[lane] == 0) slots[lane].reset();
-        }
+    const auto plan = scheduler.plan_iteration(table, ninfer::runtime::IterationBudget{
+                                                             .token_budget      = 200,
+                                                             .decode_rows_limit = kSlots,
+                                                             .prefill_floor_tokens = 0});
+    require(plan.decode_lanes == std::vector<std::uint32_t>({0, 2, 4}),
+            "a decode row was left out of the iteration's flight");
+    require(plan.prefill_token_total() <= 200,
+            "the flight's prefill segments exceeded the token budget");
+    for (std::size_t i = 0; i < plan.prefill_lanes.size(); ++i) {
+        require(plan.prefill_tokens[i] <= table.lanes[plan.prefill_lanes[i]].prefill_limit,
+                "a flight segment exceeded its lane's own limit");
     }
-    return executed;
+    // The budget ran out inside lane 3, so the trailing lane 5 waits for a later iteration.
+    require(std::find(plan.prefill_lanes.begin(), plan.prefill_lanes.end(), 5) ==
+                plan.prefill_lanes.end(),
+            "a lane was admitted past the exhausted budget");
 }
 
-// Each segment of a flight is charged as one unit against both budgets.
-
-// k = 2..6 prefilling lanes, flights per cycle: every lane completes, none waits > k cycles,
-// and prefill work between two decode rounds respects the Throughput token allowance.
-void test_flights_do_not_starve_and_gap_is_bounded() {
+// k = 2..6 prefilling lanes behind a permanent decode load: every lane completes, none waits
+// more than k iterations behind the decode rows, and each flight respects the token budget.
+void test_prefill_lanes_do_not_starve_behind_decode_rows() {
     constexpr std::uint32_t chunk = 128;
     for (std::uint32_t lanes = 2; lanes <= 6; ++lanes) {
-        for (const std::uint32_t budget : {32U, 100U, 128U, 256U, 512U}) {
+        for (const std::uint32_t budget : {32U, 100U, 128U, 256U}) {
             Scheduler scheduler(kSlots);
-            scheduler.configure_prefill(PrefillPacing{.throughput_tokens_per_cycle = budget});
-            Slots slots{};
-            std::array<std::uint32_t, 6> left{900, 128, 40, 513, 300, 1024};
-            std::array<std::uint32_t, 6> last{};
-            for (std::uint32_t lane = 0; lane < lanes; ++lane)
-                slots[lane] = request(lane + 1, Request::Phase::Prefill);
-            std::uint32_t flights = 0;
-            for (std::uint32_t cycle = 1; cycle <= 400; ++cycle) {
-                const auto executed =
-                    run_cycle_as_flights(scheduler, slots, lanes, chunk, left, last, cycle, flights);
-                require(executed <= budget,
-                        "prefill work between decode rounds exceeded the contract bound");
+            ninfer::runtime::LaneTable table;
+            table.lanes.resize(kSlots);
+            table.lanes[0].decode_ready = true;
+            std::array<std::uint32_t, kSlots> left{900, 128, 40, 513, 300, 1024};
+            std::array<std::uint32_t, kSlots> last{};
+            const auto bounds = ninfer::runtime::IterationBudget{
+                .token_budget = budget, .decode_rows_limit = kSlots,
+                .prefill_floor_tokens = budget};
+            for (std::uint32_t iteration = 1; iteration <= 400; ++iteration) {
+                for (std::uint32_t lane = 1; lane < lanes; ++lane) {
+                    table.lanes[lane].prefilling    = left[lane] != 0;
+                    table.lanes[lane].prefill_limit = std::min(chunk, left[lane]);
+                }
+                const auto plan = scheduler.plan_iteration(table, bounds);
+                require(plan.decode_lanes == std::vector<std::uint32_t>({0}),
+                        "a decode row was starved by prefill work");
+                require(plan.prefill_token_total() <= budget,
+                        "a flight exceeded the token budget between decode rounds");
+                for (std::size_t i = 0; i < plan.prefill_lanes.size(); ++i) {
+                    const auto lane = plan.prefill_lanes[i];
+                    left[lane] -= plan.prefill_tokens[i];
+                    if (left[lane] == 0) { table.lanes[lane].prefilling = false; }
+                    last[lane] = iteration;
+                }
                 bool live = false;
-                for (std::uint32_t lane = 0; lane < lanes; ++lane) {
-                    if (!slots[lane]) continue;
+                for (std::uint32_t lane = 1; lane < lanes; ++lane) {
+                    if (left[lane] == 0) continue;
                     live = true;
-                    require(cycle - last[lane] <= lanes, "a prefilling lane was starved");
+                    require(iteration - last[lane] <= lanes, "a prefilling lane was starved");
                 }
                 if (!live) break;
             }
-            for (std::uint32_t lane = 0; lane < lanes; ++lane)
-                require(!slots[lane] && left[lane] == 0, "a lane did not finish prefill");
+            for (std::uint32_t lane = 1; lane < lanes; ++lane) {
+                require(left[lane] == 0, "a lane did not finish prefill behind decode rows");
+            }
         }
     }
 }
 
-// Concurrent lanes advance together in a cycle when the budget allows it.
-void test_budget_lets_several_lanes_advance_per_cycle() {
-    constexpr std::uint32_t four = 4;
-    Scheduler scheduler(four);
-    scheduler.configure_prefill(PrefillPacing{.throughput_tokens_per_cycle = 512});
-    Slots slots{};
-    for (std::uint32_t lane = 0; lane < 4; ++lane)
-        slots[lane] = request(lane + 1, Request::Phase::Prefill);
-    ninfer::runtime::PrefillUnitTokens limits(four, 128);
-    const auto caps   = scheduler.prefill_unit_caps(limits);
-    const auto flight = scheduler.prefill_candidates(slots, 4, caps);
-    require(flight.size == 4, "ample budget still limited the cycle to fewer lanes");
+// Ample budget lets one flight carry several prefill lanes beside the decode rows.
+void test_ample_budget_packs_several_lanes_into_one_flight() {
+    Scheduler scheduler(4);
+    ninfer::runtime::LaneTable table;
+    table.lanes.resize(4);
+    table.lanes[0].decode_ready  = true;
+    table.lanes[1].prefilling    = true;
+    table.lanes[1].prefill_limit = 128;
+    table.lanes[2].prefilling    = true;
+    table.lanes[2].prefill_limit = 128;
+    table.lanes[3].prefilling    = true;
+    table.lanes[3].prefill_limit = 128;
+    const auto plan = scheduler.plan_iteration(table, ninfer::runtime::IterationBudget{
+                                                             .token_budget      = 512,
+                                                             .decode_rows_limit = 4,
+                                                             .prefill_floor_tokens = 0});
+    require(plan.prefill_lanes == std::vector<std::uint32_t>({1, 2, 3}) &&
+                plan.prefill_token_total() == 384,
+            "ample budget still limited the flight to fewer prefill lanes");
 }
-
-// Several waiting requests are offered in one scan; FIFO head leads and bypass credit holds.
 
 } // namespace
 
 int main() {
     try {
-        test_flights_do_not_starve_and_gap_is_bounded();
-        test_budget_lets_several_lanes_advance_per_cycle();
+        test_one_iteration_is_one_mixed_flight();
+        test_prefill_lanes_do_not_starve_behind_decode_rows();
+        test_ample_budget_packs_several_lanes_into_one_flight();
         std::cout << "ok\n";
         return 0;
     } catch (const std::exception& error) {

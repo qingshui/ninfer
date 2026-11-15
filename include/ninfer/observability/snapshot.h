@@ -6,6 +6,7 @@
 #include "ninfer/deployment.h"
 
 #include <filesystem>
+#include <variant>
 
 namespace ninfer {
 
@@ -33,6 +34,23 @@ struct RuntimeHostWorkStats {
 
     std::uint64_t stats_publication_ns          = 0;
     std::uint64_t stats_publication_invocations = 0;
+};
+
+// One iteration flight the Engine submitted, with its planning facts and timing. `gpu_timing`
+// carries the executor's retirement sample when the flight retired with one, and Unavailable
+// when it ended without one (a discarded or failed execution). `host_submit_ns` measures the
+// host work from planning the iteration to the Session call returning; `gpu_ns` is the flight's
+// device latency from its sample, zero when unavailable.
+struct GpuTimingUnavailable {};
+
+struct FlightRecord {
+    std::uint64_t index               = 0;
+    std::uint32_t prefill_tokens       = 0;
+    std::uint32_t prefill_segments     = 0;
+    std::uint32_t decode_rows          = 0;
+    std::uint64_t host_submit_ns       = 0;
+    std::uint64_t gpu_ns               = 0;
+    std::variant<ExecutionSample, GpuTimingUnavailable> gpu_timing{GpuTimingUnavailable{}};
 };
 
 // Monotonic execution counters, boundary-consistent current gauges, and explicitly named last
@@ -102,6 +120,15 @@ struct RuntimeStats {
     // Sum of the largest per-rank copy time in each completed Context operation.
     // Host scheduling gaps are excluded.
     double actual_context_transfer_seconds = 0.0;
+    // Iteration flight statistics. `flights` counts submitted flights and the flight_* counters
+    // are their sums; `recent_flights` keeps the most recent records for per-flight logging.
+    std::uint64_t flights                = 0;
+    std::uint64_t flight_prefill_tokens  = 0;
+    std::uint64_t flight_prefill_segments = 0;
+    std::uint64_t flight_decode_rows     = 0;
+    std::uint64_t flight_host_submit_ns  = 0;
+    std::uint64_t flight_gpu_ns          = 0;
+    std::vector<FlightRecord> recent_flights;
 };
 
 enum class ContextCostPresetSource : std::uint8_t {

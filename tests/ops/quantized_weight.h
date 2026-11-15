@@ -760,7 +760,7 @@ inline PackedWeight make_patterned_weight(QType qtype, std::int32_t n, std::int3
                 const float value = ((pattern >> 8) & 0xffU) * (1.0F / 65536.0F) - 1.0F / 512.0F;
                 detail::store_u16_le(packed.payload,
                                      (static_cast<std::size_t>(row) * k + column) * 2,
-                                     f32_to_bf16(value));
+                                     float_codec::f32_to_bf16_bits(value));
             }
         }
 

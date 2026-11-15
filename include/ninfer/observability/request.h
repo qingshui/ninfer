@@ -78,7 +78,10 @@ struct RequestSnapshot {
     RequestPhase phase = RequestPhase::Waiting;
     std::optional<std::uint32_t> placement;
     std::uint64_t submitted_ns = 0;
-    std::optional<std::uint64_t> admitted_ns, first_token_ns;
+    std::optional<std::uint64_t> admitted_ns, first_token_ns, completed_ns;
+    // The request's HTTP flush time, on the same clock. The engine never fills it: the serve
+    // layer owns the flush boundary and records it here.
+    std::optional<std::uint64_t> http_flush_ns;
     std::uint32_t prompt_tokens = 0, reused_prompt_tokens = 0, processed_prompt_tokens = 0;
     std::uint32_t generated_tokens = 0, injected_control_tokens = 0;
     std::uint32_t logical_context_tokens = 0;

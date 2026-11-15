@@ -485,6 +485,115 @@ GenerationHandle Engine::submit(PreparedPrompt prompt, RequestOptions options,
         impl_->core);
 }
 
+std::vector<GenerationHandle>
+Engine::submit_samples(PreparedPrompt prompt, RequestOptions options,
+                       std::uint32_t sample_count, OutputConsumerMode consumer_mode,
+                       GenerationObservationOptions observation,
+                       std::chrono::steady_clock::time_point pending_deadline) {
+    if (impl_ == nullptr) { throw std::logic_error("Engine is moved from"); }
+    if (impl_->options.purpose != EnginePurpose::Generation) {
+        throw std::logic_error("submit_samples requires a Generation Engine");
+    }
+    if (prompt.impl_ == nullptr) { throw std::invalid_argument("PreparedPrompt is empty"); }
+    if (sample_count == 0) { throw std::invalid_argument("sample count must be positive"); }
+    if (prompt.impl_->domain != impl_->frontend_domain)
+        throw std::invalid_argument("PreparedPrompt belongs to a different Frontend");
+    if (consumer_mode != OutputConsumerMode::Streaming &&
+        (observation.live_timings || observation.prompt_progress)) {
+        throw std::invalid_argument("live generation observations require a Streaming consumer");
+    }
+
+    runtime::ResolvedRequestOptions resolved_options =
+        resolve_request_options(prompt.impl_->sampling, std::move(options));
+    const ResolvedSamplingParameters resolved_sampling = resolved_options.execution.sampling;
+
+    const PromptSummary prompt_summary = prompt.impl_->summary;
+    if (prompt_summary.prompt_tokens > impl_->options.max_context) {
+        throw RequestError(RequestErrorKind::ContextLengthExceeded,
+                           runtime::context_length_error_message(prompt_summary.prompt_tokens,
+                                                                 impl_->options.max_context));
+    }
+    if (!is_available())
+        throw RequestError(RequestErrorKind::Unavailable, "inference engine is unavailable");
+    const double prepare_seconds = prompt.impl_->prepare.seconds;
+    if (resolved_options.execution.requested_output_tokens == 0) {
+        struct ImmediateSubmission {
+            GenerationResult result;
+            OutputConsumerMode consumer_mode = OutputConsumerMode::Aggregate;
+
+            [[nodiscard]] std::uint64_t request_id() const noexcept { return 0; }
+
+            void wait_for_admission(const CancellationView& cancellation) {
+                try {
+                    if (cancellation.requested()) {
+                        result.finish_reason = FinishReason::Cancelled;
+                    }
+                } catch (...) {
+                    result.finish_reason = FinishReason::Cancelled;
+                    throw;
+                }
+                if (result.finish_reason == FinishReason::Cancelled) {
+                    throw RequestError(RequestErrorKind::Cancelled,
+                                       "inference request cancelled before admission");
+                }
+            }
+
+            GenerationResult wait(OutputSink* sink, const CancellationView& cancellation) {
+                const bool streaming = consumer_mode == OutputConsumerMode::Streaming;
+                if (streaming != (sink != nullptr)) {
+                    throw std::invalid_argument(
+                        "GenerationHandle wait sink does not match its submitted consumer mode");
+                }
+                if (cancellation.requested()) { result.finish_reason = FinishReason::Cancelled; }
+                return std::move(result);
+            }
+        };
+        std::vector<GenerationHandle> handles;
+        handles.reserve(sample_count);
+        for (std::uint32_t branch = 0; branch < sample_count; ++branch) {
+            ImmediateSubmission immediate{.consumer_mode = consumer_mode};
+            immediate.result.prompt        = prompt_summary;
+            immediate.result.finish_reason = FinishReason::OutputLimit;
+            immediate.result.stats.thinking.configured_budget =
+                resolved_options.execution.thinking.budget;
+            immediate.result.stats.timings.prepare_seconds = prepare_seconds;
+            immediate.result.stats.timings.total_seconds   = prepare_seconds;
+            ResolvedSamplingParameters branch_sampling    = resolved_sampling;
+            branch_sampling.seed = derive_sample_seed(resolved_sampling.seed, branch);
+            handles.push_back(GenerationHandle(std::make_unique<GenerationHandle::Impl>(
+                impl_, std::move(immediate), branch_sampling)));
+        }
+        prompt.impl_.reset();
+        return handles;
+    }
+
+    return std::visit(
+        [&](auto& core) -> std::vector<GenerationHandle> {
+            using CoreState = std::remove_cvref_t<decltype(core)>;
+            if constexpr (std::is_same_v<CoreState, std::monostate>) {
+                throw std::logic_error("Engine core is unavailable");
+            } else if constexpr (CoreState::element_type::purpose == EnginePurpose::CausalScoring) {
+                throw std::logic_error("Engine generation core is unavailable");
+            } else {
+                auto submissions = core->submit_samples(
+                    prompt.impl_->take<typename CoreState::element_type::PreparedPrompt>(),
+                    prompt_summary, prepare_seconds, std::move(resolved_options), sample_count,
+                    consumer_mode, std::move(observation), pending_deadline);
+                std::vector<GenerationHandle> handles;
+                handles.reserve(submissions.size());
+                for (std::uint32_t branch = 0; branch < submissions.size(); ++branch) {
+                    ResolvedSamplingParameters branch_sampling = resolved_sampling;
+                    branch_sampling.seed = derive_sample_seed(resolved_sampling.seed, branch);
+                    handles.push_back(GenerationHandle(
+                        std::make_unique<GenerationHandle::Impl>(
+                            impl_, std::move(submissions[branch]), branch_sampling)));
+                }
+                return handles;
+            }
+        },
+        impl_->core);
+}
+
 GenerationResult Engine::generate(PreparedPrompt prompt, RequestOptions options, OutputSink* sink,
                                   const CancellationView& cancellation) {
     const OutputConsumerMode consumer_mode =

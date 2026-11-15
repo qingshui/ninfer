@@ -5,7 +5,6 @@
 #include <cstdint>
 #include <deque>
 #include <iostream>
-#include <limits>
 #include <memory>
 #include <optional>
 #include <span>
@@ -309,187 +308,167 @@ void test_bounded_service_under_continuous_contention() {
             "continuous contention starved a request");
 }
 
-ninfer::runtime::PrefillUnitTokens units_of(std::uint32_t tokens, std::uint32_t lanes) {
-    return ninfer::runtime::PrefillUnitTokens(lanes, tokens);
-}
-
-using ninfer::runtime::PrefillPacing;
-using ninfer::runtime::PrefillRegime;
-
-// A Throughput pacing with the given token and unit allowance.
-PrefillPacing throughput(std::uint32_t tokens, std::uint32_t units) {
-    return {.throughput_tokens_per_cycle = tokens, .throughput_units_per_cycle = units};
-}
-
-void test_prefill_replay_round_robin() {
+// One iteration plans every decode row in lane order up to the row limit, and prefill work
+// never displaces a decode row: a decode row waits only when the row limit excludes it.
+void test_plan_iteration_decode_rows_ride_within_limit() {
     Scheduler scheduler(kSlots);
-    Slots slots{};
-    slots[0]         = request(1, Request::Phase::Decode);
-    slots[1]         = request(2, Request::Phase::Prefill);
-    slots[2]         = request(3, Request::Phase::Replay);
-    slots[3]         = request(4, Request::Phase::Prefill);
-    const auto units = units_of(16, kSlots);
-    for (const std::uint32_t expected : {1U, 2U, 3U, 1U}) {
-        const auto lane = scheduler.next_prefill(slots, 4, units);
-        require(lane == expected, "prefill and replay did not receive rotating execution units");
-        scheduler.prefill_executed(*lane, 4, 16, 0);
-    }
-    slots[2]->capture_pending = true;
-    require(scheduler.next_prefill(slots, 4, units) == 3,
-            "capture dependency blocked unrelated ready prefill work");
-    scheduler.prefill_executed(3, 4, 16, 0);
-    slots[1]->phase = Request::Phase::Decode;
-    slots[3]->phase = Request::Phase::Finished;
-    require(!scheduler.next_prefill(slots, 4, units), "unready prefill member was scheduled");
-    slots[2]->capture_pending = false;
-    require(scheduler.next_prefill(slots, 4, units) == 2,
-            "completed capture did not restore replay eligibility");
+    ninfer::runtime::LaneTable table;
+    table.lanes.resize(kSlots);
+    table.lanes[0].decode_ready = true;
+    table.lanes[1].prefilling   = true;
+    table.lanes[1].prefill_limit = 128;
+    table.lanes[2].decode_ready = true;
+    table.lanes[3].decode_ready = true;
+    table.lanes[4].prefilling   = true;
+    table.lanes[4].prefill_limit = 64;
+
+    const auto plan = scheduler.plan_iteration(table, ninfer::runtime::IterationBudget{
+                                                             .token_budget      = 256,
+                                                             .decode_rows_limit = 2,
+                                                             .prefill_floor_tokens = 0});
+    require(plan.decode_lanes == std::vector<std::uint32_t>({0, 2}),
+            "decode rows were not admitted in lane order up to the limit");
+    require(!plan.prefill_lanes.empty() && plan.prefill_token_total() <= 256,
+            "prefill displaced or out-budgeted the decode rows");
+
+    // Every decode row rides when the row limit covers them, even with a tiny token budget.
+    const auto all_decodes = scheduler.plan_iteration(table, ninfer::runtime::IterationBudget{
+                                                                    .token_budget = 1,
+                                                                    .decode_rows_limit = kSlots,
+                                                                    .prefill_floor_tokens = 0});
+    require(all_decodes.decode_lanes == std::vector<std::uint32_t>({0, 2, 3}),
+            "a decode row waited behind prefill work");
 }
 
-void test_prefill_cycle_budget() {
+// The token budget bounds the prefill segments one iteration carries: a lane whose limit does
+// not fit is admitted at the budget left, and the floor keeps the first visited prefill lane
+// advancing beside the decode rows even when the budget left is smaller than the floor.
+void test_plan_iteration_prefill_budget_and_floor() {
     Scheduler scheduler(kSlots);
-    scheduler.configure_prefill(throughput(100, 3));
-    require(scheduler.prefill_pacing().throughput_units_per_cycle == 3 &&
-                scheduler.prefill_regime() == PrefillRegime::Throughput &&
-                scheduler.prefill_tokens_remaining() == 100 &&
-                scheduler.prefill_units_remaining() == 3 &&
-                scheduler.prefill_ns_remaining() == std::numeric_limits<std::uint64_t>::max(),
-            "configured pacing did not open a full Throughput cycle");
-    Slots slots{};
-    slots[1] = request(1, Request::Phase::Prefill);
-    slots[2] = request(2, Request::Phase::Replay);
-    slots[3] = request(3, Request::Phase::Prefill);
+    ninfer::runtime::LaneTable table;
+    table.lanes.resize(kSlots);
+    table.lanes[0].prefilling    = true;
+    table.lanes[0].prefill_limit = 100;
+    table.lanes[1].prefilling    = true;
+    table.lanes[1].prefill_limit = 100;
+    table.lanes[2].prefilling    = true;
+    table.lanes[2].prefill_limit = 64;
 
-    // The first unit is admitted even when it alone exceeds the token allowance.
-    auto units = units_of(0, kSlots);
-    units[1]   = 150;
-    units[2]   = 30;
-    units[3]   = 30;
-    require(scheduler.next_prefill(slots, 4, units) == 1, "first unit of a cycle was refused");
-    scheduler.prefill_executed(1, 4, 150, 0);
-    require(scheduler.prefill_tokens_remaining() == 0 && scheduler.prefill_units_remaining() == 2,
-            "actual tokens were not charged");
-    require(!scheduler.next_prefill(slots, 4, units), "an exhausted token budget admitted a unit");
+    const auto plan = scheduler.plan_iteration(table, ninfer::runtime::IterationBudget{
+                                                             .token_budget      = 256,
+                                                             .decode_rows_limit = kSlots,
+                                                             .prefill_floor_tokens = 0});
+    require(plan.prefill_lanes == std::vector<std::uint32_t>({0, 1, 2}) &&
+                plan.prefill_tokens == std::vector<std::uint32_t>({100, 100, 56}),
+            "the last lane was not admitted at the budget left");
 
-    // Charging follows the tokens the Session reports, not the declared upper bound.
-    scheduler.begin_prefill_cycle(false);
-    units[1] = units[2] = units[3] = 60;
-    require(scheduler.next_prefill(slots, 4, units) == 2, "cursor did not stay after lane 1");
-    scheduler.prefill_executed(2, 4, 10, 0);
-    require(scheduler.prefill_tokens_remaining() == 90, "short unit was charged its bound");
-    require(scheduler.next_prefill(slots, 4, units) == 3, "fitting unit was refused");
-    scheduler.prefill_executed(3, 4, 60, 0);
-    require(scheduler.prefill_tokens_remaining() == 30, "second unit was not charged");
-
-    // The first lane that does not fit ends the cycle; a later, smaller lane may not jump it.
-    units[1] = 40;
-    units[2] = 5;
-    require(!scheduler.next_prefill(slots, 4, units), "a smaller lane bypassed the blocked lane");
-    scheduler.begin_prefill_cycle(false);
-    require(scheduler.next_prefill(slots, 4, units) == 1,
-            "blocked lane did not lead the next cycle");
-
-    // The unit-count limit applies even when tokens remain.
-    scheduler.begin_prefill_cycle(false);
-    units = units_of(1, kSlots);
-    for (unsigned n = 0; n < 3; ++n) {
-        const auto lane = scheduler.next_prefill(slots, 4, units);
-        require(lane.has_value(), "unit within the count limit was refused");
-        scheduler.prefill_executed(*lane, 4, 1, 0);
-    }
-    require(scheduler.prefill_units_remaining() == 0 && !scheduler.next_prefill(slots, 4, units),
-            "unit-count limit was exceeded");
+    // A floor larger than the budget still admits the first lane's own limit, and nothing
+    // after it.
+    const auto floored = scheduler.plan_iteration(table, ninfer::runtime::IterationBudget{
+                                                                 .token_budget      = 32,
+                                                                 .decode_rows_limit = kSlots,
+                                                                 .prefill_floor_tokens = 128});
+    require(floored.prefill_lanes == std::vector<std::uint32_t>({0}) &&
+                floored.prefill_tokens[0] == 100,
+            "the floor did not keep the head prefill lane advancing");
 }
 
+// The plan visits prefill lanes round-robin from its cursor: the priority lane leads, a lane
+// that exhausted the budget keeps the cursor so the next iteration starts with it, and k
+// prefilling lanes each advance within k iterations behind decode rows.
+void test_plan_iteration_round_robin_and_priority() {
+    Scheduler scheduler(kSlots);
+    ninfer::runtime::LaneTable table;
+    table.lanes.resize(kSlots);
+    for (std::uint32_t lane = 0; lane < 4; ++lane) {
+        table.lanes[lane].prefilling    = true;
+        table.lanes[lane].prefill_limit = 64;
+    }
+    const auto budget = ninfer::runtime::IterationBudget{
+        .token_budget = 64, .decode_rows_limit = kSlots, .prefill_floor_tokens = 64};
 
-// Runs prefill cycles over `lanes` prefilling lanes whose prompts are `left` tokens long. Each
-// unit is limited by `chunk`, sized by prefill_unit_caps and costs `cost[lane]` ns per token.
-// `regime_of(cycle)` selects the regime. Returns false when a bound or the progress guarantee
-// is violated.
-struct CycleRun {
-    std::uint32_t lanes = 0;
-    std::uint32_t chunk = 0;
-    std::array<std::uint32_t, 6> left{};
-    std::array<std::uint64_t, 6> cost{};
-};
+    const auto first = scheduler.plan_iteration(table, budget);
+    require(first.prefill_lanes == std::vector<std::uint32_t>({0}),
+            "the token budget admitted more than the first lane");
+    const auto second = scheduler.plan_iteration(table, budget);
+    require(second.prefill_lanes == std::vector<std::uint32_t>({1}),
+            "the cursor did not advance past the admitted lane");
 
-void run_cycles(Scheduler& scheduler, CycleRun run, bool (*waiting)(std::uint32_t),
-                const char* tag) {
-    Slots slots{};
-    for (std::uint32_t lane = 0; lane < run.lanes; ++lane)
-        slots[lane] = request(lane + 1, Request::Phase::Prefill);
-    std::array<std::uint32_t, 6> last{};
-    const auto pacing = scheduler.prefill_pacing();
-    for (std::uint32_t cycle = 1; cycle <= 600; ++cycle) {
-        const bool decode_waiting = waiting(cycle);
-        scheduler.begin_prefill_cycle(decode_waiting);
-        std::uint32_t tokens = 0;
-        std::uint64_t ns     = 0;
-        for (;;) {
-            auto limits = units_of(0, kSlots);
-            for (std::uint32_t lane = 0; lane < run.lanes; ++lane)
-                if (slots[lane]) limits[lane] = std::min(run.chunk, run.left[lane]);
-            const auto caps = scheduler.prefill_unit_caps(limits);
-            const auto lane = scheduler.next_prefill(slots, run.lanes, caps);
-            if (!lane) break;
-            require(caps[*lane] != 0 && caps[*lane] <= limits[*lane], tag);
-            // The Session may process fewer tokens than the cap.
-            const std::uint32_t done    = caps[*lane] > ((cycle + *lane) % 3)
-                                              ? caps[*lane] - (cycle + *lane) % 3
-                                              : caps[*lane];
-            const std::uint64_t elapsed = std::uint64_t{done} * run.cost[*lane];
-            run.left[*lane] -= done;
-            tokens += done;
-            ns += elapsed;
-            last[*lane] = cycle;
-            scheduler.prefill_executed(*lane, run.lanes, done, elapsed);
-            if (run.left[*lane] == 0) {
-                slots[*lane].reset();
-                scheduler.prefill_lane_released(*lane);
+    // The priority lane leads its iteration and takes the floor.
+    table.priority_lane = 3;
+    const auto led = scheduler.plan_iteration(table, budget);
+    require(!led.prefill_lanes.empty() && led.prefill_lanes.front() == 3,
+            "the priority lane did not lead the prefill list");
+    table.priority_lane.reset();
+
+    // Replaying lanes are never prefill candidates; a lane with no prefill work keeps the order.
+    table.lanes[2].prefilling = false;
+    table.lanes[2].replaying  = true;
+    const auto skip = scheduler.plan_iteration(table, budget);
+    require(std::find(skip.prefill_lanes.begin(), skip.prefill_lanes.end(), 2) ==
+                skip.prefill_lanes.end(),
+            "a replaying lane joined the prefill list");
+}
+
+// A table whose size does not match the configured lanes is rejected.
+void test_plan_iteration_rejects_foreign_lane_table() {
+    Scheduler scheduler(kSlots);
+    ninfer::runtime::LaneTable table;
+    table.lanes.resize(kSlots + 1);
+    bool threw = false;
+    try {
+        (void)scheduler.plan_iteration(table, ninfer::runtime::IterationBudget{});
+    } catch (const std::logic_error&) {
+        threw = true;
+    }
+    require(threw, "a foreign lane table was planned");
+}
+
+// k prefilling lanes with more work than the budget admits per iteration: each lane advances
+// within k iterations, none is skipped, and every iteration respects the token budget.
+void test_plan_iteration_does_not_starve_prefill_lanes() {
+    for (std::uint32_t lanes = 2; lanes <= 5; ++lanes) {
+        for (const std::uint32_t budget_tokens : {32U, 100U, 256U}) {
+            Scheduler scheduler(kSlots);
+            ninfer::runtime::LaneTable table;
+            table.lanes.resize(kSlots);
+            std::array<std::uint32_t, kSlots> left{900, 128, 40, 513, 300, 1024};
+            std::array<std::uint32_t, kSlots> last{};
+            for (std::uint32_t lane = 0; lane < lanes; ++lane) {
+                table.lanes[lane].prefilling = true;
+            }
+            const auto budget = ninfer::runtime::IterationBudget{
+                .token_budget = budget_tokens, .decode_rows_limit = kSlots,
+                .prefill_floor_tokens = budget_tokens};
+            for (std::uint32_t iteration = 1; iteration <= 400; ++iteration) {
+                for (std::uint32_t lane = 0; lane < lanes; ++lane) {
+                    table.lanes[lane].prefill_limit = left[lane] > 0 ? std::min(left[lane], 128U) : 0;
+                }
+                const auto plan = scheduler.plan_iteration(table, budget);
+                require(plan.prefill_token_total() <= budget_tokens,
+                        "an iteration exceeded its token budget");
+                for (std::size_t i = 0; i < plan.prefill_lanes.size(); ++i) {
+                    const auto lane = plan.prefill_lanes[i];
+                    require(plan.prefill_tokens[i] <= table.lanes[lane].prefill_limit,
+                            "a segment cap exceeded its lane limit");
+                    left[lane] -= plan.prefill_tokens[i];
+                    if (left[lane] == 0) { table.lanes[lane].prefilling = false; }
+                    last[lane] = iteration;
+                }
+                bool live = false;
+                for (std::uint32_t lane = 0; lane < lanes; ++lane) {
+                    if (left[lane] == 0) continue;
+                    live = true;
+                    require(iteration - last[lane] <= lanes, "a prefilling lane was starved");
+                }
+                if (!live) break;
+            }
+            for (std::uint32_t lane = 0; lane < lanes; ++lane) {
+                require(left[lane] == 0, "a prefilling lane did not finish");
             }
         }
-        if (decode_waiting) {
-            require(tokens <= pacing.interleave_tokens_per_cycle, tag);
-        } else {
-            require(tokens <= pacing.throughput_tokens_per_cycle, tag);
-        }
-        bool live = false;
-        for (std::uint32_t lane = 0; lane < run.lanes; ++lane) {
-            if (!slots[lane]) continue;
-            live = true;
-            require(cycle - last[lane] <= run.lanes, tag);
-        }
-        if (!live) return;
-    }
-    throw std::runtime_error(tag);
-}
-
-
-
-
-void test_no_lane_starves_across_regimes() {
-    for (std::uint32_t lanes = 2; lanes <= 6; ++lanes) {
-        Scheduler scheduler(kSlots);
-        scheduler.configure_prefill({.throughput_tokens_per_cycle = 256,
-                                     .throughput_units_per_cycle  = 4,
-                                     .interleave_ns               = 3'000'000,
-                                     .interleave_tokens_per_cycle = 128,
-                                     .interleave_cold_tokens      = 32,
-                                     .unit_granularity            = 16});
-        CycleRun run{.lanes = lanes,
-                     .chunk = 128,
-                     .left  = {900, 128, 40, 513, 300, 1024},
-                     .cost  = {20'000, 5'000, 80'000, 1'000, 40'000, 10'000}};
-        run_cycles(
-            scheduler, run, [](std::uint32_t) { return true; },
-            "Interleave starved a lane or exceeded its allowance");
-        run_cycles(
-            scheduler, run, [](std::uint32_t cycle) { return cycle % 3 != 0; },
-            "alternating regimes starved a lane or exceeded their allowance");
     }
 }
-
-
 
 void test_decode_and_control_membership() {
     Scheduler scheduler(kSlots);
@@ -520,29 +499,26 @@ void test_decode_and_control_membership() {
 }
 
 // Lane tables are sized by the configured concurrency, not by any fixed upper bound: a
-// scheduler with more than 16 lanes admits, caps and charges lanes beyond the old ceiling
+// scheduler with more than 16 lanes plans, caps and charges lanes beyond the old ceiling
 // exactly like the lanes below it.
 void test_lane_tables_follow_the_configured_capacity() {
     constexpr std::uint32_t lanes = 20;
     Scheduler scheduler(lanes);
-    scheduler.configure_prefill(throughput(64, 8));
+    ninfer::runtime::LaneTable table;
+    table.lanes.resize(lanes);
+    for (std::uint32_t lane = 16; lane < lanes; ++lane) {
+        table.lanes[lane].prefilling    = true;
+        table.lanes[lane].prefill_limit = 16;
+    }
+    const auto plan = scheduler.plan_iteration(table, ninfer::runtime::IterationBudget{
+                                                             .token_budget      = 64,
+                                                             .decode_rows_limit = lanes,
+                                                             .prefill_floor_tokens = 0});
+    require(!plan.prefill_lanes.empty() && plan.prefill_lanes.front() == 16 &&
+                plan.prefill_tokens.front() == 16,
+            "a lane beyond the old ceiling was not planned");
+
     std::vector<RequestPtr> slots(lanes);
-    for (std::uint32_t lane = 16; lane < lanes; ++lane)
-        slots[lane] = request(lane, Request::Phase::Prefill);
-
-    auto limits = units_of(0, lanes);
-    for (std::uint32_t lane = 16; lane < lanes; ++lane) limits[lane] = 16;
-    const auto caps = scheduler.prefill_unit_caps(limits);
-    require(caps.size() == lanes, "caps table did not follow the configured capacity");
-    require(scheduler.next_prefill(slots, lanes, caps) == 16,
-            "a lane beyond the old ceiling was not schedulable");
-    require(caps[16] == 16, "a lane beyond the old ceiling received no unit cap");
-    scheduler.prefill_executed(16, lanes, 16, 1000);
-    require(scheduler.prefill_cost_ns_per_token(16).value_or(0) != 0,
-            "the cost estimate of a lane beyond the old ceiling was dropped");
-    require(scheduler.next_prefill(slots, lanes, caps) == 17,
-            "round robin did not continue past the old ceiling");
-
     slots[19] = request(100, Request::Phase::Decode);
     const auto round = scheduler.build_round_membership(slots, lanes);
     require(round.size == 1 && round.lanes[0] == 19 &&
@@ -560,9 +536,11 @@ int main() {
         test_pressure_handoff_and_fair_service();
         test_bounded_service_under_continuous_contention();
         test_recovery_cost_has_a_bounded_service_allowance();
-        test_prefill_replay_round_robin();
-        test_prefill_cycle_budget();
-        test_no_lane_starves_across_regimes();
+        test_plan_iteration_decode_rows_ride_within_limit();
+        test_plan_iteration_prefill_budget_and_floor();
+        test_plan_iteration_round_robin_and_priority();
+        test_plan_iteration_rejects_foreign_lane_table();
+        test_plan_iteration_does_not_starve_prefill_lanes();
         test_decode_and_control_membership();
         test_lane_tables_follow_the_configured_capacity();
         std::cout << "ok\n";

@@ -37,6 +37,9 @@ class Frontend {
 public:
     [[nodiscard]] PreparedPrompt prepare(PromptInput input,
                                          const PreparationControl& control = {}) const;
+    // A deep copy of an already-prepared prompt, for sample groups that plan one branch per
+    // request from the same prompt.
+    [[nodiscard]] PreparedPrompt clone(const PreparedPrompt&) const;
     [[nodiscard]] std::uint32_t count_tokens(PromptInput input,
                                              const PreparationControl& control = {}) const;
     [[nodiscard]] PreparedPrompt prepare_tokens(std::vector<TokenId> tokens,

@@ -331,7 +331,6 @@ void EngineCore<Instance>::release_request(const std::shared_ptr<Request>& reque
         capture_decisions_[lane].reset();
         reserved_units_[lane].reset();
         slots_[lane].reset();
-        scheduler_.prefill_lane_released(lane);
     }
     request->sequence.reset();
     request->lane.reset();
@@ -610,6 +609,11 @@ void EngineCore<Instance>::cancel_active_requests(
     for (std::uint32_t lane = 0; lane < max_concurrency_; ++lane) {
         const auto request = slots_[lane];
         if (request == nullptr || !cancelled_at_boundary[lane]) { continue; }
+        if (request->model_state == EngineRequestState::Forking) {
+            // A forking sample-group member holds no sequence: the group settlement ends it
+            // with its parent.
+            continue;
+        }
         if (request->capture_pending || lane_terminal_blocked(*request)) { continue; }
         if (!request->sequence || !request->lane || request->lane->value != lane) {
             throw std::logic_error("active cancellation has no sequence binding");

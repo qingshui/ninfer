@@ -110,6 +110,19 @@ public:
            GenerationObservationOptions observation               = {},
            std::chrono::steady_clock::time_point pending_deadline = {});
 
+    // Submits one sample group of `sample_count` branches from the same prepared prompt and
+    // returns one handle per branch, in branch order. Branch i derives its sampling seed from
+    // (the request seed, i). The group occupies its lanes atomically: a Session that can fork
+    // prefills the shared prefix once and forks one child sequence per branch; a Session that
+    // cannot fork (sample_fork_limit() == 0) prefills every branch independently. Every branch
+    // keeps the consumer mode and observation options of the call, and a group either gains its
+    // lanes together or keeps waiting.
+    [[nodiscard]] std::vector<GenerationHandle>
+    submit_samples(PreparedPrompt prompt, RequestOptions options, std::uint32_t sample_count,
+                   OutputConsumerMode consumer_mode                       = OutputConsumerMode::Aggregate,
+                   GenerationObservationOptions observation               = {},
+                   std::chrono::steady_clock::time_point pending_deadline = {});
+
     GenerationResult generate(PreparedPrompt prompt, RequestOptions options,
                               OutputSink* sink                     = nullptr,
                               const CancellationView& cancellation = {});

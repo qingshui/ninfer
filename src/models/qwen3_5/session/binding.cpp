@@ -288,7 +288,11 @@ BindingReservation SessionImpl::start_binding(const RequestBasePlan& base, runti
             clear_lane(sequences[lane], requests[lane]);
             throw;
         }
+        // A synchronous installation is complete when start_binding returns: hand the installed
+        // sequence and residency to the caller, which adopts the lane without a ContextProgress.
         result.synchronous = true;
+        result.sequence    = sequences[lane].id;
+        result.residency   = sequences[lane].residency;
         return result;
     }
     context_operation_   = std::make_unique<PendingContext>(directory, std::move(transaction));

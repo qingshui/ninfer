@@ -36,6 +36,9 @@ struct RuntimeTypes {
     using PendingBatch      = glm5next::PendingBatch;
     using PrefillProgress   = glm5next::PrefillProgress;
     using MixedProgress     = glm5next::MixedProgress;
+    using PrefillStart      = glm5next::PrefillStart;
+    using MixedStart        = glm5next::MixedStart;
+    using ForkResult        = glm5next::ForkResult;
     using ReplayProgress    = glm5next::ReplayProgress;
     using ControlComplete   = glm5next::ControlComplete;
     using ScoreComplete     = glm5next::ScoreComplete;

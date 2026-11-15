@@ -409,7 +409,9 @@ public:
     [[nodiscard]] std::optional<PrefillStart> start_prefill(std::span<const SequenceHandle>,
                                                             std::span<const bool> constrained);
     [[nodiscard]] std::uint32_t sample_fork_limit() const noexcept;
-    [[nodiscard]] ForkResult fork(SequenceHandle parent, std::span<const runtime::LaneId> children);
+    [[nodiscard]] ForkResult
+    fork(SequenceHandle parent, std::span<const runtime::LaneId> children,
+         std::span<const ResolvedSamplingParameters> sampling = {});
     [[nodiscard]] std::uint32_t mixed_decode_limit() const noexcept;
     [[nodiscard]] bool prefill_mixable(SequenceHandle) const;
     [[nodiscard]] std::optional<MixedStart>

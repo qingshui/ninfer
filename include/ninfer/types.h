@@ -234,6 +234,18 @@ struct ResolvedSamplingParameters {
     std::uint64_t seed      = 0;
 };
 
+// The sampling seed of branch `branch` of a sample group submitted with `seed`: a splitmix64
+// finalizer over (seed, branch), so every branch of one request decorrelates its counter-based
+// sampling stream (the RNG key has no row term) without touching any other sampling parameter.
+// Deterministic in (seed, branch): the same submission repeats the same branch seeds.
+[[nodiscard]] constexpr std::uint64_t derive_sample_seed(std::uint64_t seed,
+                                                         std::uint32_t branch) noexcept {
+    std::uint64_t z = seed + 0x9E37'79B9'7F4A'7C15ULL * (static_cast<std::uint64_t>(branch) + 1ULL);
+    z = (z ^ (z >> 30)) * 0xBF58'476D'1CE4'E5B9ULL;
+    z = (z ^ (z >> 27)) * 0x94D0'49BB'1331'11EBULL;
+    return z ^ (z >> 31);
+}
+
 enum class OutputChannel : std::uint8_t {
     Content,
     Reasoning,

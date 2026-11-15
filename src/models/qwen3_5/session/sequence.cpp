@@ -197,10 +197,13 @@ void SessionImpl::release_residency(runtime::ResidencyId residency) {
 // last prompt token like an ordinary active sequence. The copies ride each child's first
 // execution in its stream order; the deferred transaction keeps the parent's images and pages
 // alive until that execution retires.
-ForkResult SessionImpl::fork(SequenceHandle parent, std::span<const runtime::LaneId> children) {
+ForkResult SessionImpl::fork(SequenceHandle parent, std::span<const runtime::LaneId> children,
+                             std::span<const ResolvedSamplingParameters> sampling) {
     ForkResult result;
     if (!valid_sequence(parent))
         throw std::logic_error("fork requires a resident parent sequence");
+    if (!sampling.empty() && sampling.size() != children.size())
+        throw std::invalid_argument("fork sampling must be empty or parallel to its children");
     const auto parent_lane = lane(parent);
     auto& state   = sequences[parent_lane];
     auto& request = requests[parent_lane];
@@ -285,7 +288,9 @@ ForkResult SessionImpl::fork(SequenceHandle parent, std::span<const runtime::Lan
             control       = RequestControl{};
             control.base  = request.base;
             control.lifecycle           = Lifecycle::Active;
-            control.sampling_host       = base.sampling;
+            // Each child decodes with its own sampling when the caller names one; an empty span
+            // repeats the parent's, which makes every child sample identically.
+            control.sampling_host       = sampling.empty() ? base.sampling : sampling[i];
             control.publish_continuation = request.publish_continuation;
             control.speculative_stats   = request.speculative_stats;
             initialize_captures(control, frontier, base.summary.prompt_tokens);
@@ -319,9 +324,10 @@ ForkResult SessionImpl::fork(SequenceHandle parent, std::span<const runtime::Lan
         context_operation_->silent = true;
         context_operation_->reservation.emplace(std::move(*frame));
         ContextWork work;
-        for (const auto handle : installed)
+        for (std::size_t i = 0; i < installed.size(); ++i)
             work.bindings.push_back(
-                {{handle, sequences[lane(handle)].residency}, base.sampling});
+                {{installed[i], sequences[lane(installed[i])].residency},
+                 sampling.empty() ? base.sampling : sampling[i]});
         (void)submit_context(*context_operation_, std::move(work));
     } catch (...) {
         abort_context();

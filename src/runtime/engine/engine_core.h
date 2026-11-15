@@ -46,6 +46,9 @@ public:
 
     using ModelContract      = typename Instance::ModelContract;
     using ContextAssessment  = typename ModelContract::Session::ContextAssessment;
+    using PrefillStart       = typename ModelContract::PrefillStart;
+    using MixedStart         = typename ModelContract::MixedStart;
+    using ForkResult         = typename ModelContract::ForkResult;
     using ExecutionUnit      = typename ModelContract::ExecutionUnit;
     using UnitKind           = typename ModelContract::ExecutionUnitKind;
     using Checkpoint         = typename ModelContract::CheckpointHandle;
@@ -85,8 +88,8 @@ public:
         // The resolved lane count sizes every lane table of the engine and its executor before
         // any execution can start.
         instance_.executor->configure_decode_statistics(max_concurrency_);
-        scheduler_.configure_prefill(prefill_pacing(instance_.session->prefill_pack_tokens(),
-                                                    prefill_chunk_, max_concurrency_));
+        materializing_.resize(max_concurrency_);
+        lane_residency_epochs_.resize(max_concurrency_, 1);
         cumulative_stats_.context_transfers.kv.resize(instance_.session->kv_pools().size());
         for (const auto& pool : instance_.session->kv_pools()) {
             cumulative_stats_.kv_pools.push_back({pool.id.index, std::string(pool.label), 0});
@@ -148,89 +151,36 @@ public:
     EngineCore(const EngineCore&)            = delete;
     EngineCore& operator=(const EngineCore&) = delete;
 
-    // The only definition of the prefill pacing constants. `pack_tokens` is
-    // Session::prefill_pack_tokens(): the most tokens one prefill execution carries over all its
-    // segments. Without a resolved chunk there is no unit size to budget, so a Throughput cycle
-    // keeps one unit.
-    //  - Throughput: one packed execution of pack_tokens per cycle, over up to max(2, C) units.
-    //  - Interleave: at most interleave_chunks chunks of tokens per decode round, and no more
-    //    than interleave_ns of predicted time; a lane without an estimate starts with
-    //    interleave_cold_tokens.
-    //  - Two calibrations, selected by the engine's resolved concurrency `C`:
-    //  - Small batch (C < kLargeBatchLanes, the default serving regime of a few lanes):
-    //    interleave_ns bounds the decode stall that the prefill work in front of a decode round
-    //    may cause, and with it the pacing of request completion: a request needs one decode
-    //    round per output token, so the bound is one cycle's prefill share, not a whole chunk.
-    //    The single 1024-token chunk per cycle that preceded this pacing cost 50 ms at depth 0
-    //    and 125 ms at 160K (measured prefill cost per token: 48 us at depth 0, 77 us at 64K,
-    //    106 us at 128K, 120 us at 160K). A flight also has a fixed cost of roughly 14 ms
-    //    (inferred from flights of a few hundred tokens) that the measured ns/token spreads over
-    //    its tokens; 100 ms keeps that fixed share bounded for deep-context models (400 us/token
-    //    and up) while still spending a shallow cycle on most of a small-model chunk. A smaller
-    //    budget fragments prefill into more flights, each paying the same fixed host submission
-    //    cost again, and measured slower end to end (mini load: 1.28 req/s at 40 ms vs 1.57 req/s
-    //    at 100 ms).
-    //  - Large batch (C >= kLargeBatchLanes; direction values, not tuned results): the pack
-    //    budget merges many request segments into single flights of up to kPrefillPackChunks
-    //    chunks (2048-16384 tokens at the resident chunk), and such an engine holds 130+ resident
-    //    decode lanes. The large-batch interleave_chunks follows the pack budget so one
-    //    Interleave cycle can carry one whole merged flight, and interleave_ns rises with it:
-    //    fragmenting a 16384-token flight at the 100 ms budget re-pays the fixed submission cost
-    //    on every fragment. Cold lanes start with a full chunk for the same reason. The debt
-    //    pair adapts the decode yield to a large resident batch: with 130+ lanes decoding, one
-    //    decode round serves the whole resident batch, so each cycle repays twice the debt while
-    //    the cap still lets a short request prefill across several cycles without waiting. These
-    //    numbers are direction values for that regime; throughput and latency targets are owned
-    //    by the tuning phase, which re-measures them against the recorded loads.
-    //  - Time-derived units are multiples of kUnitGranularity, the chunk alignment.
-    //  - Debt: a decode round takes 4-6 ms alone, but a lane that shares every cycle with the
-    //    prefill budget decodes at a fraction of its solo rate, for as long as the prefill
-    //    lasts (tens of seconds at 128K-200K contexts). The Scheduler counts the prefill time
-    //    that ran beside a waiting lane as a debt. interleave_debt_cap_ns lets a short request
-    //    prefill without waiting (several interleave cycles), and each Interleave cycle repays
-    //    interleave_repay_ns, so a long prefill keeps a bounded share of the time while the
-    //    resident lanes decode.
-    static constexpr std::uint32_t kLargeBatchLanes = 64;
-    // Small-batch calibration: the measured mini-load regime of the default serving lanes.
-    static constexpr std::uint64_t kSmallInterleaveNs         = 100'000'000;
-    static constexpr std::uint32_t kSmallInterleaveChunks     = 2;
-    static constexpr std::uint32_t kSmallInterleaveColdTokens = 1024;
-    static constexpr std::uint64_t kSmallInterleaveDebtCapNs  = 300'000'000;
-    static constexpr std::uint64_t kSmallInterleaveRepayNs    = 4'000'000;
-    // Large-batch calibration: direction values for engines configured with a large resident
-    // batch (the explicit --max-concurrency regime). interleave_chunks tracks the pack budget
-    // (kPrefillPackChunks) so one Interleave cycle carries one whole merged flight.
-    static constexpr std::uint64_t kLargeInterleaveNs         = 200'000'000;
-    static constexpr std::uint32_t kLargeInterleaveChunks     = 8;
-    static constexpr std::uint32_t kLargeInterleaveColdTokens = 2048;
-    static constexpr std::uint64_t kLargeInterleaveDebtCapNs  = 400'000'000;
-    static constexpr std::uint64_t kLargeInterleaveRepayNs    = 8'000'000;
-    static constexpr std::uint32_t kUnitGranularity           = 128;
-
-    [[nodiscard]] static PrefillPacing prefill_pacing(std::uint32_t pack_tokens,
-                                                      std::uint32_t prefill_chunk,
-                                                      std::uint32_t concurrency) noexcept {
-        const bool large_batch = concurrency >= kLargeBatchLanes;
-        PrefillPacing pacing;
-        pacing.interleave_ns = large_batch ? kLargeInterleaveNs : kSmallInterleaveNs;
-        if (prefill_chunk == 0) {
-            pacing.throughput_units_per_cycle = 1;
-            return pacing;
-        }
-        pacing.throughput_tokens_per_cycle = std::max(pack_tokens, prefill_chunk);
-        pacing.throughput_units_per_cycle  = std::max(2U, concurrency);
-        pacing.interleave_tokens_per_cycle =
-            (large_batch ? kLargeInterleaveChunks : kSmallInterleaveChunks) * prefill_chunk;
-        pacing.interleave_cold_tokens =
-            std::min(prefill_chunk,
-                     large_batch ? kLargeInterleaveColdTokens : kSmallInterleaveColdTokens);
-        pacing.unit_granularity       = kUnitGranularity;
-        pacing.interleave_debt_cap_ns = large_batch ? kLargeInterleaveDebtCapNs
-                                                    : kSmallInterleaveDebtCapNs;
-        pacing.interleave_repay_ns    = large_batch ? kLargeInterleaveRepayNs
-                                                    : kSmallInterleaveRepayNs;
-        return pacing;
+    // The iteration bounds. `prefill_pack_tokens()` is the Session's own bound on the prefill
+    // tokens one packed execution carries, so it is the token budget of one iteration; the
+    // decode row limit is the Session's mixed-flight row bound (the lane capacity when the
+    // Session never mixes, so every decode row still rides); and the floor keeps the head
+    // prefill lane advancing beside the decode rows even when its own limit exceeds the budget.
+    [[nodiscard]] IterationBudget iteration_budget() const noexcept {
+        const std::uint32_t rows = instance_.session->mixed_decode_limit();
+        return IterationBudget{
+            .token_budget         = std::max(instance_.session->prefill_pack_tokens(), 1U),
+            .decode_rows_limit    = rows != 0 ? rows : max_concurrency_,
+            .prefill_floor_tokens = prefill_chunk_ != 0 ? prefill_chunk_ : 1U,
+        };
     }
+
+    // A sample group of one prepared prompt: `members` are the branch requests, each derived
+    // from the same prompt with its own sampling seed. A forking group reserves one parent lane
+    // (the hidden parent helper that prefills the shared prompt prefix) plus one child lane per
+    // member; the members hold their child lanes in the Forking state until the parent rests at
+    // the fork frontier and forks them in. A non-forking group admits its members as ordinary
+    // requests that each prefill the whole prompt.
+    struct SampleGroup {
+        std::uint64_t id = 0;
+        std::vector<std::shared_ptr<Request>> members;
+        std::shared_ptr<Request> parent;
+        std::vector<std::uint32_t> child_lanes;
+        // `forking`: the group holds its parent helper and child lanes. `forked`: the fork
+        // installed the children and only the parent's completion may still be pending.
+        bool forking = false;
+        bool forked  = false;
+    };
 
     class Submission {
     public:
@@ -307,87 +257,85 @@ public:
                                "inference request expired before submission");
         }
 
-        std::uint64_t request_id        = 0;
-        std::uint64_t publication_order = 0;
-        {
-            std::unique_lock lock(queue_mutex_);
-            if (!queue_cv_.wait_until(lock, pending_deadline,
-                                      [&] { return stopping_ || failed_ || !measurement_; }))
-                throw RequestError(RequestErrorKind::QueueTimeout,
-                                   "inference request expired at a measurement boundary");
-            if (stopping_ || failed_) {
-                throw RequestError(RequestErrorKind::Unavailable,
-                                   "inference engine is unavailable");
-            }
-            if (outstanding_ >= max_outstanding_) {
-                throw RequestError(RequestErrorKind::Overloaded, "inference request queue is full");
-            }
-            if (next_request_id_ == 0 || next_publication_order_ == 0) {
-                throw std::overflow_error("request identity space exhausted");
-            }
-            ++outstanding_;
-            ++preparing_requests_;
-            request_id        = next_request_id_++;
-            publication_order = next_publication_order_++;
-        }
-
-        std::shared_ptr<Request> request;
-        try {
-            const auto constraint_started =
-                observation.constraint_timings ? Clock::now() : submitted;
-            auto output = instance_.frontend.make_output_session(
-                prompt, options.stop, options.output, options.execution.thinking,
-                options.constraint, options.tool_choice);
-            if (Clock::now() >= pending_deadline) {
-                throw RequestError(RequestErrorKind::QueueTimeout,
-                                   "inference request expired during grammar preparation");
-            }
-            const std::uint32_t capacity_output =
-                max_context_ - prompt_summary.prompt_tokens + static_cast<std::uint32_t>(1);
-            try {
-                output.validate_generation_capacity(
-                    std::min(options.execution.requested_output_tokens, capacity_output));
-            } catch (const std::invalid_argument& error) {
-                throw RequestError(RequestErrorKind::ThinkingBudgetCapacityInsufficient,
-                                   error.what());
-            }
-            const auto ready = Clock::now();
-            output.observe_constraint(
-                observation.constraint_timings,
-                std::chrono::duration<double>(ready - constraint_started).count());
-            prepare_seconds += std::chrono::duration<double>(ready - submitted).count();
-            request = std::make_shared<Request>(request_id, publication_order, std::move(prompt),
-                                                std::move(output), prompt_summary, prepare_seconds,
-                                                std::move(options), consumer_mode,
-                                                std::move(observation), pending_deadline, ready);
-            request->decode_by_batch.resize(max_concurrency_);
-            request->speculative_stats.attempted_per_position.resize(speculative_positions_);
-            request->speculative_stats.accepted_per_position.resize(speculative_positions_);
-            request->context_transfers.resize(instance_.session->kv_pools().size() + 1);
-        } catch (...) {
-            {
-                std::lock_guard lock(queue_mutex_);
-                --preparing_requests_;
-                --outstanding_;
-            }
-            queue_cv_.notify_all();
-            throw;
-        }
-
-        {
-            std::lock_guard lock(queue_mutex_);
-            --preparing_requests_;
-            if (stopping_ || failed_) {
-                --outstanding_;
-                throw RequestError(RequestErrorKind::Unavailable,
-                                   "inference engine is unavailable");
-            }
-            pending_.push_back(request);
-            ++submitted_requests_;
-        }
+        auto request = create_request(std::move(prompt), std::move(options), prompt_summary,
+                                      prepare_seconds, consumer_mode, std::move(observation),
+                                      pending_deadline, submitted);
         request_admission_check();
         queue_cv_.notify_one();
         return Submission(*this, std::move(request));
+    }
+
+    // One sample group: `sample_count` branch requests of the same prepared prompt, in branch
+    // order. Branch i derives its sampling seed from (the request seed, i). The branches are
+    // queued consecutively and linked to one SampleGroup, so admission takes the group as a
+    // unit: a forking group gains one parent lane plus one child lane per branch together, and
+    // a non-forking group holds its lane count as its reservation floor.
+    [[nodiscard]] std::vector<Submission>
+    submit_samples(PreparedPrompt prompt, PromptSummary prompt_summary, double prepare_seconds,
+                   ResolvedRequestOptions options, std::uint32_t sample_count,
+                   OutputConsumerMode consumer_mode, GenerationObservationOptions observation,
+                   Clock::time_point pending_deadline = {}) {
+        if (sample_count == 0) {
+            throw std::invalid_argument("sample count must be positive");
+        }
+        // A forking group needs its parent helper lane beside one child lane per branch.
+        const std::uint32_t lane_capacity =
+            instance_.session->sample_fork_limit() != 0 ? max_concurrency_ - 1 : max_concurrency_;
+        if (sample_count > lane_capacity) {
+            throw std::invalid_argument("sample group exceeds the engine lane capacity");
+        }
+        const Clock::time_point submitted = Clock::now();
+        if (pending_deadline == Clock::time_point{}) {
+            pending_deadline = submitted + pending_timeout_;
+        }
+        if (submitted >= pending_deadline) {
+            throw RequestError(RequestErrorKind::QueueTimeout,
+                               "inference request expired before submission");
+        }
+
+        std::vector<PreparedPrompt> prompts;
+        prompts.reserve(sample_count - 1);
+        for (std::uint32_t branch = 1; branch < sample_count; ++branch) {
+            prompts.push_back(instance_.frontend.clone(prompt));
+        }
+        auto group = std::make_shared<SampleGroup>();
+        group->members.reserve(sample_count);
+        {
+            std::lock_guard lock(queue_mutex_);
+            group->id = next_group_id_++;
+            groups_.push_back(group);
+        }
+        std::vector<std::shared_ptr<Request>> branches;
+        branches.reserve(sample_count);
+        try {
+            for (std::uint32_t branch = 0; branch < sample_count; ++branch) {
+                ResolvedRequestOptions branch_options = options;
+                branch_options.execution.sampling.seed =
+                    derive_sample_seed(options.execution.sampling.seed, branch);
+                PreparedPrompt branch_prompt =
+                    branch == 0 ? std::move(prompt) : std::move(prompts[branch - 1]);
+                auto branch_request = create_request(
+                    std::move(branch_prompt), std::move(branch_options), prompt_summary,
+                    prepare_seconds, consumer_mode, observation, pending_deadline, submitted);
+                branch_request->sample_group_id = group->id;
+                branch_request->branch_index    = branch;
+                group->members.push_back(branch_request);
+                branches.push_back(std::move(branch_request));
+            }
+        } catch (...) {
+            // A partially created group cancels its branches: every request that queued keeps
+            // its completion path, and the caller observes only the submission failure.
+            for (const auto& branch_request : branches) { abandon_request(branch_request); }
+            throw;
+        }
+        request_admission_check();
+        queue_cv_.notify_one();
+        std::vector<Submission> submissions;
+        submissions.reserve(branches.size());
+        for (auto& branch_request : branches) {
+            submissions.push_back(Submission(*this, std::move(branch_request)));
+        }
+        return submissions;
     }
 
     [[nodiscard]] EngineSnapshot snapshot(SnapshotOptions options = {}) const {
@@ -430,7 +378,7 @@ private:
         Control,
     };
 
-    enum class CycleStep : std::uint8_t { Boundary, Control, Decode, Prefill, Complete };
+    enum class FlightKind : std::uint8_t { Prefill, Decode, Control, Replay, Mixed };
 
     struct UnitPermit {
         ExecutionUnit unit;
@@ -439,7 +387,7 @@ private:
 
     struct ComputeFlight {
         ExecutionTicket ticket;
-        UnitKind kind = UnitKind::Decode;
+        FlightKind kind = FlightKind::Prefill;
         std::vector<std::shared_ptr<Request>> requests;
         std::vector<SequenceHandle> sequences;
         std::vector<ResidencyId> residencies;
@@ -452,8 +400,26 @@ private:
         std::vector<TokenId> control_tokens;
         std::uint32_t control_stride = 0;
         std::vector<std::size_t> generated_sizes;
-        // Wall clock at the Session call that started a prefill or replay execution.
+        // Batch layout of a flight whose pending batch is not its membership in order. Empty
+        // means the identity mapping (every batch row follows its member). `decode_rows` counts
+        // the leading batch rows that are decode rows; the rows after them are the producing
+        // prefill segments of a mixed or packed-final flight.
+        std::vector<std::size_t> batch_rows;
+        std::uint32_t decode_rows = 0;
+        // The flight's prefill segments in membership order: whether each produced a token.
+        std::vector<bool> produces;
+        // The prefill segment count of a mixed flight's membership prefix.
+        std::uint32_t prefill_members = 0;
+        // The decode-row lanes of a mixed flight, in batch order (pure decode flights use
+        // `lanes`).
+        std::vector<std::uint32_t> decode_lanes;
+        // The flight's submission index and statistics: the prefill tokens its segments
+        // actually processed, and the host work of its iteration from planning to the Session
+        // call returning.
+        std::uint64_t index           = 0;
+        std::uint32_t prefill_tokens  = 0;
         Clock::time_point started{};
+        std::uint64_t host_submit_ns = 0;
     };
 
     using EngineHostPhase = RequestEngineHostPhase;
@@ -597,6 +563,9 @@ private:
         return admission_check_pending_.exchange(false, std::memory_order_acq_rel);
     }
 
+    // One lane's asynchronous binding in flight. The table is indexed by the binding's
+    // destination lane; the Session's single context-operation slot keeps at most one entry
+    // waiting for its ContextProgress at a time.
     struct MaterializingRequest {
         std::shared_ptr<Request> request;
         LaneId destination;
@@ -622,7 +591,7 @@ private:
     // ResourceManagement may release a checkpoint that a Capture or Demote transaction still
     // reads, so the Engine calls publish/finish/abandon/release_source only while the Session has
     // no context operation. A request that ends during one keeps its Session result and lane
-    // release; only this resource tail is recorded here and replayed by begin_cycle.
+    // release; only this resource tail is recorded here and replayed by begin_iteration.
     // `finished`: publish the continuation checkpoint, then finish its owner. Otherwise: release
     // the request's waiting source, then abandon its owner.
     struct DeferredSettlement {
@@ -724,19 +693,27 @@ private:
     using PrefillRow = typename decltype(std::declval<typename ModelContract::PrefillProgress&>()
                                              .rows)::value_type;
 
-    // Applies the prefill result of one flight: charges every segment to the cycle budget, then
-    // resolves its rows in member order.
+    // Applies the prefill result of one flight: charges every segment to the request's prompt
+    // progress, then resolves its rows in member order.
     void resolve_prefill_flight(typename ModelContract::PrefillProgress&& progress,
                                 ComputeFlight flight);
 
-    // `flight` is consumed only by a row that carries a pending token, which exists only in a
-    // single-segment flight.
+    // Applies the result of one mixed flight: the prefill rows settle their segments, then the
+    // shared pending batch commits through the flight's batch-row mapping.
+    void resolve_mixed_flight(typename ModelContract::MixedProgress&& progress,
+                              ComputeFlight flight);
+
+    // Applies one prefill segment's prompt progress. `produced` names whether the segment's
+    // row carried the flight's pending batch (it completes the prompt and produces the first
+    // token).
     void resolve_prefill_progress(const std::shared_ptr<Request>& request, PrefillRow&& progress,
-                                  ComputeFlight& flight);
+                                  bool produced);
 
     void ensure_base_plan(const std::shared_ptr<Request>& request);
 
     [[nodiscard]] std::optional<std::uint32_t> free_lane() const noexcept;
+
+    [[nodiscard]] std::uint32_t free_lane_count() const noexcept;
 
     [[nodiscard]] bool resident_empty() const noexcept;
 
@@ -766,10 +743,65 @@ private:
                                  const typename ResourceManagement::SourceChoice& choice,
                                  bool restoring);
 
-    bool try_admit_one(bool restoring);
+    // The outcome of one admission attempt.
+    enum class AdmissionStatus : std::uint8_t { Admitted, Deferred, Blocked };
 
-    // Longest an admission that waits for capacity keeps the Engine in begin_cycle to chain its
-    // reclaim steps (see begin_cycle).
+    // The outcome of engaging a forking sample group. `Failed` ends the group: its lanes or its
+    // shared plan cannot carry the fork, and the members fail on their own passes.
+    enum class Engagement : std::uint8_t { Engaged, Waiting, Failed };
+
+    // One request's ordinary admission path (root or reused source): the per-request state
+    // machine over `admission_decision_`, with source selection, reclamation and binding.
+    // While flights compute, only a predicted-synchronous root binding proceeds; every path
+    // that would start or reclaim through an asynchronous context operation defers to a
+    // quiescent iteration.
+    [[nodiscard]] AdmissionStatus admit_request(const std::shared_ptr<Request>& request,
+                                                 bool restoring);
+
+    // One admission pass over the queue: groups engage atomically, single requests admit in
+    // scan order, and each started binding retires before the next one begins.
+    [[nodiscard]] bool admit_pending(HostPhaseMeasurement& boundary);
+
+    // Engages a forking sample group: one parent helper lane plus one child lane per member,
+    // taken together or not at all. `first` names the member whose plan carried the fork
+    // frontier; its stashed prompt clone seeds the parent helper.
+    [[nodiscard]] Engagement engage_fork_group(const std::shared_ptr<SampleGroup>& group,
+                                               const std::shared_ptr<Request>& first);
+
+    // Forks every engaged group whose parent rests at its fork frontier, adopts the children
+    // as their members' sequences, and ends the parent helper.
+    void advance_sample_groups(HostPhaseMeasurement& boundary);
+
+    // Cancels and settles groups whose parent or members ended (cancelled, failed, helper
+    // error) before the fork completed.
+    void settle_sample_groups(HostPhaseMeasurement& boundary);
+
+    [[nodiscard]] std::shared_ptr<SampleGroup> find_group(std::uint64_t id) const noexcept;
+
+    // Ends a forking parent helper: aborts its sequence, settles its resources, releases its
+    // lane and capacity, and counts no request statistic.
+    void complete_helper(const std::shared_ptr<Request>& parent);
+
+    // Creates one queued request: queue accounting, the output session, the Request record and
+    // its pending entry. `queued` false keeps an engine-internal helper out of the pending
+    // queue.
+    [[nodiscard]] std::shared_ptr<Request>
+    create_request(PreparedPrompt prompt, ResolvedRequestOptions options,
+                   PromptSummary prompt_summary, double prepare_seconds,
+                   OutputConsumerMode consumer_mode, GenerationObservationOptions observation,
+                   Clock::time_point pending_deadline, Clock::time_point submitted,
+                   bool queued = true);
+
+    // Adopts a synchronously completed root binding: the lane, sequence, residency and
+    // resources become the request's without a ContextProgress.
+    void adopt_bound_request(const std::shared_ptr<Request>& request,
+                             const typename ResourceManagement::SourceChoice& source,
+                             std::uint32_t lane, std::optional<SequenceHandle> sequence,
+                             std::optional<ResidencyId> residency,
+                             const BeginSummary& summary);
+
+    // Longest an admission that waits for capacity keeps the Engine in its iteration to chain its
+    // reclaim steps (see begin_iteration).
     static constexpr std::chrono::milliseconds kAdmissionBurst{50};
 
     // Polls until the running context operation finishes or `deadline` passes. True when no
@@ -785,61 +817,55 @@ private:
 
     [[nodiscard]] ExecutionUnit execution_unit(const Request& request) const;
 
-    void reserve_resident_units(ReservationScope scope = ReservationScope::Round);
-
     using LaneSlots = std::vector<std::shared_ptr<Request>>;
 
-    // The lanes that can take a prefill/replay unit in this reservation pass: resident lanes
-    // without a pending capture, cancellation or Session execution, and not blocked by a
-    // context operation.
-    [[nodiscard]] LaneSlots prefill_slots() const;
+    // The lanes one iteration may take work from: resident lanes without a pending capture,
+    // cancellation, Session execution or context block.
+    [[nodiscard]] LaneSlots runnable_lanes() const;
 
-    // Most tokens the next prefill/replay unit of every lane could process: the public prefill
-    // chunk, limited by the prompt suffix a prefilling request still has to compute. Lanes
-    // that are not in `slots` or do not prefill get 0.
-    [[nodiscard]] PrefillUnitTokens prefill_unit_limits(const LaneSlots& slots) const;
+    // Mirrors the resident lanes into the Scheduler's planning table: decode- and control-ready
+    // lanes flag their readiness, prefilling lanes carry the most tokens their next unit could
+    // process (0 for a lane that takes none, including a fork parent resting at its frontier),
+    // and the priority lane names the Session's prefill continuation.
+    [[nodiscard]] LaneTable build_lane_table(const LaneSlots& slots) const;
 
-    // Upper bound of the next unit of every lane: the Scheduler's caps for `limits`, with an
-    // exclusive lane capped as if it were the only prefilling lane because it runs alone.
-    [[nodiscard]] PrefillUnitTokens prefill_unit_caps(const LaneSlots& slots,
-                                                      const PrefillUnitTokens& limits) const;
+    // The planned membership of one iteration, with the token caps the plan admitted. The
+    // replay lane runs alone ahead of the mixed flight.
+    struct IterationMembership {
+        std::vector<std::uint32_t> control_lanes;
+        std::vector<std::uint32_t> decode_lanes;
+        std::vector<std::uint32_t> prefill_lanes;
+        std::vector<std::uint32_t> prefill_caps;
+        std::optional<std::uint32_t> replay_lane;
+    };
 
-    // The lane the Session's Vision window continues, when it can run now.
-    [[nodiscard]] std::optional<std::uint32_t> continuation_prefill_lane(const LaneSlots&) const;
+    // Reserves the units of the planned membership in order. Reclamation, pressure handoffs and
+    // pauses run only while nothing computes; otherwise a lane that cannot reserve keeps its
+    // work for a quiescent iteration.
+    void reserve_planned_units(const IterationMembership& membership);
 
-    // The prefilling or replaying lane that must run alone: the progress owner, else the Vision
-    // continuation lane. nullopt when every prefill lane may be packed.
-    [[nodiscard]] std::optional<std::uint32_t> exclusive_prefill_lane(const LaneSlots&) const;
-
-    [[nodiscard]] std::optional<std::uint32_t> next_prefill(const LaneSlots&,
-                                                            const PrefillUnitTokens& caps) const;
-
-    // Segments the Session may join into one prefill execution, bounded by the lane count.
-    [[nodiscard]] std::uint32_t prefill_pack_limit() const;
-
-    // The lanes of the next prefill execution: next_prefill() first, then the lanes the cycle
-    // allowance admits behind it while the group may be packed. Packing starts only from a
-    // prefilling lane, ends at the first Replay lane and excludes an exclusive lane. `caps` are
-    // the tokens the lanes' permits carry.
-    [[nodiscard]] std::vector<std::uint32_t>
-    next_prefill_lanes(const LaneSlots&, const PrefillUnitTokens& caps) const;
-
-    // Whether any lane that is not blocked by a capture waits for a decode or control round.
-    [[nodiscard]] bool decode_waiting() const;
-
-    // Admission can pin an existing writer's tail after its reservation. Membership must
-    // observe current context dependencies, including pauses selected during reclamation.
     [[nodiscard]] bool unit_runnable(std::uint32_t lane) const;
 
     [[nodiscard]] ComputeFlight freeze_members(std::span<const std::uint32_t> lanes,
-                                               UnitKind kind) const;
+                                               FlightKind kind) const;
 
-    // Starts one execution for a non-empty prefix of `lanes`, which are all prefilling or a
-    // single replaying lane. Lanes the Session does not admit keep their sequences and lose
-    // their Engine unit; the next cycle step reserves them again.
-    [[nodiscard]] bool start_prefill(std::span<const std::uint32_t> lanes);
+    // Starts one prefill execution for a non-empty prefix of `lanes`, which are all prefilling
+    // or a single replaying lane. Lanes the Session does not admit keep their sequences and lose
+    // their Engine unit; the next iteration reserves them again.
+    [[nodiscard]] bool start_prefill(std::span<const std::uint32_t> lanes,
+                                     std::uint64_t host_submit_ns = 0);
 
-    [[nodiscard]] bool start_decode(const RoundMembership& membership);
+    [[nodiscard]] bool start_decode(std::span<const std::uint32_t> lanes,
+                                    std::uint64_t host_submit_ns = 0);
+
+    // Starts one mixed flight: the planned prefill segments followed by the planned decode rows.
+    // The flight's membership carries both; its pending batch maps back through `batch_rows`.
+    // Returns the decode rows the flight admitted (zero when it fell back to a pure packed
+    // prefill), or nullopt when no flight started.
+    [[nodiscard]] std::optional<std::uint32_t>
+    start_mixed(std::span<const std::uint32_t> prefill_lanes,
+                std::span<const std::uint32_t> prefill_caps,
+                std::span<const std::uint32_t> decode_lanes, std::uint64_t host_submit_ns);
 
     void discard_control_preview(const ComputeFlight& flight) noexcept;
 
@@ -855,7 +881,6 @@ private:
 
     [[nodiscard]] bool execution_outstanding() const noexcept;
 
-    [[nodiscard]] bool compute_pending() const noexcept;
 
     // The flight a ticket names in `compute_` / `retiring_`; null when the ticket's frame holds
     // another flight or none.
@@ -874,13 +899,24 @@ private:
     // Records a started flight in the table entry of its ticket's frame.
     void admit_compute(ComputeFlight&& flight);
 
+    // Records one fully retired flight in the runtime statistics.
+    void record_flight(const ComputeFlight& flight, const ExecutionSample& sample) noexcept;
+
     void record_service(ComputeFlight& flight) noexcept;
     void log_worker_failure(std::exception_ptr error) const noexcept;
     void fail_all(std::exception_ptr error) noexcept;
 
-    void begin_cycle(HostPhaseMeasurement& boundary);
+    // One iteration's boundary: settles finished work, starts due captures, hands the service
+    // turn over, restores the pressure owner, advances forking sample groups, and admits new
+    // work. Admission of a synchronous root binding and the fork step run while flights
+    // compute; reclamation and asynchronous bindings keep waiting for a quiescent iteration.
+    void begin_iteration(HostPhaseMeasurement& boundary);
 
-    [[nodiscard]] bool advance_cycle();
+    // Plans and submits one iteration's flights: the control rows, one replaying lane, and one
+    // mixed flight of every planned decode row plus the prefill segments the token budget
+    // admits. A Session that cannot mix, or a first prefill segment that is not mixable,
+    // falls back to separate decode and prefill flights. True when any flight was submitted.
+    [[nodiscard]] bool submit_iteration(HostPhaseMeasurement& boundary);
 
     void worker_loop() noexcept;
 
@@ -905,7 +941,12 @@ private:
     std::uint64_t submitted_requests_     = 0;
     std::uint64_t next_publication_order_ = 1;
     std::vector<std::shared_ptr<Request>> slots_;
-    std::optional<MaterializingRequest> materializing_;
+    // Asynchronous bindings in flight, indexed by destination lane; the Session's single
+    // context-operation slot keeps at most one entry waiting at a time.
+    std::vector<std::optional<MaterializingRequest>> materializing_;
+    std::vector<std::shared_ptr<SampleGroup>> groups_;
+    std::vector<std::uint64_t> lane_residency_epochs_;
+    std::uint64_t next_group_id_ = 1;
     std::optional<AdmissionDecision> admission_decision_;
     std::uint64_t admission_generation_ = 1;
     std::vector<std::optional<CaptureDecision>> capture_decisions_;
@@ -919,7 +960,7 @@ private:
     // waits for device retirement in `retiring_`. A frame holds at most one of the two.
     std::vector<std::optional<ComputeFlight>> compute_;
     std::vector<std::optional<ComputeFlight>> retiring_;
-    CycleStep cycle_step_ = CycleStep::Boundary;
+    std::uint64_t flight_index_     = 0;
     std::vector<bool> control_executed_{};
     std::vector<std::optional<UnitPermit>> reserved_units_{};
     std::atomic<bool> admission_check_pending_{false};

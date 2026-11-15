@@ -22,6 +22,10 @@ ninfer_add_test(ninfer_sampling_defaults_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../runtime/test_sampling_defaults.cpp"
   LIBRARIES ninfer_engine ninfer_core)
 
+ninfer_add_test(ninfer_sample_seed_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../runtime/test_sample_seed.cpp"
+  LIBRARIES ninfer_runtime_support)
+
 ninfer_add_test(ninfer_grammar_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_grammar.cpp"
   LIBRARIES ninfer_grammar)

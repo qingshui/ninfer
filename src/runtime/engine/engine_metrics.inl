@@ -175,6 +175,11 @@ RequestSnapshot EngineCore<Instance>::observe_request(const Request& request) co
     case EngineRequestState::Materializing:
         out.phase = RequestPhase::Materializing;
         break;
+    case EngineRequestState::Forking:
+        // A forking member shares its prompt with the group parent's prefill; the observable
+        // phase is the prefill it waits behind.
+        out.phase = RequestPhase::Prefill;
+        break;
     case EngineRequestState::Prefill:
         out.phase = RequestPhase::Prefill;
         break;
@@ -202,6 +207,7 @@ RequestSnapshot EngineCore<Instance>::observe_request(const Request& request) co
     out.submitted_ns = elapsed_ns({}, request.submitted);
     if (request.admitted_at) out.admitted_ns = elapsed_ns({}, *request.admitted_at);
     if (request.first_token) out.first_token_ns = elapsed_ns({}, *request.first_token);
+    if (request.completed_at) out.completed_ns = elapsed_ns({}, *request.completed_at);
     out.prompt_tokens = request.prompt_summary.prompt_tokens;
     if (request.admitted_begin)
         out.reused_prompt_tokens = request.admitted_begin->reused_prompt_tokens;
@@ -230,7 +236,10 @@ void EngineCore<Instance>::record_completion(const std::shared_ptr<Request>& req
                                              FinishReason reason, bool failed) {
     if (request->completion_observed) return;
     request->completion_observed = true;
-    auto& counters               = cumulative_stats_.requests;
+    if (!request->completed_at) { request->completed_at = Clock::now(); }
+    // A hidden sample-group helper carries no consumer and counts no request statistic.
+    if (request->sample_helper) return;
+    auto& counters = cumulative_stats_.requests;
     if (failed)
         ++counters.failed;
     else if (reason == FinishReason::Cancelled)
@@ -275,25 +284,37 @@ void EngineCore<Instance>::publish_runtime_stats() {
         status                      = stopping_ ? EngineStatus::Stopping
                                       : failed_ ? EngineStatus::Failed
                                                 : EngineStatus::Ready;
-        for (const auto& request : pending_)
-            request_observations_.push_back(observe_request(*request));
+        for (const auto& request : pending_) {
+            if (!request->sample_helper) {
+                request_observations_.push_back(observe_request(*request));
+            }
+        }
     }
     snapshot.prefilling_requests    = 0;
     snapshot.paused_requests        = static_cast<std::uint32_t>(paused_.size());
     snapshot.replaying_requests     = 0;
-    snapshot.materializing_requests = materializing_.has_value() ? 1U : 0U;
+    snapshot.materializing_requests = static_cast<std::uint32_t>(std::count_if(
+        materializing_.begin(), materializing_.end(), [](const auto& entry) {
+            return entry.has_value() && !entry->request->sample_helper;
+        }));
     for (std::uint32_t lane = 0; lane < max_concurrency_; ++lane) {
         if (slots_[lane] == nullptr) { continue; }
-        request_observations_.push_back(observe_request(*slots_[lane]));
+        const auto& request = *slots_[lane];
+        if (request.sample_helper) { continue; }  // hidden fork parents carry no consumer
+        request_observations_.push_back(observe_request(request));
         ++snapshot.running_requests;
-        if (slots_[lane]->is_prefilling()) { ++snapshot.prefilling_requests; }
-        if (slots_[lane]->is_replaying()) { ++snapshot.replaying_requests; }
-        if (slots_[lane]->is_decode_ready()) { ++snapshot.decode_ready_requests; }
-        if (slots_[lane]->capture_pending) { ++snapshot.capture_pending_requests; }
-        if (slots_[lane]->terminal_reason) { ++snapshot.terminal_pending_requests; }
+        if (request.is_prefilling()) { ++snapshot.prefilling_requests; }
+        if (request.is_replaying()) { ++snapshot.replaying_requests; }
+        if (request.is_decode_ready()) { ++snapshot.decode_ready_requests; }
+        if (request.capture_pending) { ++snapshot.capture_pending_requests; }
+        if (request.terminal_reason) { ++snapshot.terminal_pending_requests; }
     }
     for (const auto& request : paused_) request_observations_.push_back(observe_request(*request));
-    if (materializing_) request_observations_.push_back(observe_request(*materializing_->request));
+    for (const auto& entry : materializing_) {
+        if (entry && !entry->request->sample_helper) {
+            request_observations_.push_back(observe_request(*entry->request));
+        }
+    }
     std::sort(request_observations_.begin(), request_observations_.end(),
               [](const auto& a, const auto& b) { return a.id < b.id; });
     request_observations_.erase(
@@ -393,9 +414,16 @@ void EngineCore<Instance>::record_context_work(
         }
         longest_rank_ns = std::max(longest_rank_ns, rank_ns);
     }
-    if (owner && materializing_ && materializing_->resumed &&
-        progress.kind == decltype(progress.kind)::Bind)
-        scheduler_.recovery_work(owner->id, longest_rank_ns);
+    if (owner && progress.kind == decltype(progress.kind)::Bind) {
+        const auto entry =
+            std::find_if(materializing_.begin(), materializing_.end(),
+                         [&owner](const auto& candidate) {
+                             return candidate && candidate->request == owner;
+                         });
+        if (entry != materializing_.end() && (*entry)->resumed) {
+            scheduler_.recovery_work(owner->id, longest_rank_ns);
+        }
+    }
 
     cumulative_stats_.actual_context_transfer_seconds += longest_rank_ns * 1.0e-9;
 }

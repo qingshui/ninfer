@@ -386,9 +386,10 @@ std::uint32_t Session::prefill_pack_tokens() const noexcept { return impl_->pref
 
 std::uint32_t Session::sample_fork_limit() const noexcept { return impl_->sample_fork_limit(); }
 
-ForkResult Session::fork(SequenceHandle parent, std::span<const runtime::LaneId> children) {
+ForkResult Session::fork(SequenceHandle parent, std::span<const runtime::LaneId> children,
+                         std::span<const ResolvedSamplingParameters> sampling) {
     impl_->note_context_change();
-    return impl_->fork(parent, children);
+    return impl_->fork(parent, children, sampling);
 }
 
 std::optional<PrefillStart> Session::start_prefill(std::span<const SequenceHandle> sequences,

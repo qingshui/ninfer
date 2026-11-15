@@ -498,6 +498,11 @@ MediaCacheSummary Frontend::media_cache_summary() const {
     return impl_->media_cache->stats().public_stats();
 }
 
+PreparedPrompt Frontend::clone(const PreparedPrompt& prompt) const {
+    if (prompt.data_ == nullptr) { throw std::logic_error("prepared prompt is empty"); }
+    return PreparedPrompt(std::make_unique<PreparedPromptData>(*prompt.data_));
+}
+
 PreparedPrompt Frontend::prepare_tokens(std::vector<TokenId> token_ids,
                                         bool allow_prefix_identity) const {
     const auto start = Clock::now();

@@ -236,6 +236,11 @@ std::uint32_t Frontend::count_tokens(PromptInput input, const PreparationControl
     return checked_count(encoded.input_ids.size());
 }
 
+PreparedPrompt Frontend::clone(const PreparedPrompt& prompt) const {
+    if (prompt.data_ == nullptr) { throw std::logic_error("prepared prompt is empty"); }
+    return PreparedPrompt(std::make_unique<PreparedPromptData>(*prompt.data_));
+}
+
 PreparedPrompt Frontend::prepare_tokens(std::vector<TokenId> tokens,
                                         bool allow_prefix_identity) const {
     const auto start = Clock::now();

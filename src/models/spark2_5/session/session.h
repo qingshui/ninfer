@@ -50,6 +50,8 @@ public:
     [[nodiscard]] const runtime::RequestPlanSummary& summary() const noexcept;
     [[nodiscard]] const models::frontend::PreparedContextCache& context_cache() const noexcept;
     [[nodiscard]] std::optional<PrefixShortlistKey> prefix_shortlist_key(std::uint32_t) const;
+    // This model never forks a sample group: no request carries a fork frontier.
+    [[nodiscard]] std::uint32_t fork_frontier() const noexcept { return 0; }
 private:
     std::shared_ptr<const detail::RequestPlan> plan_;
 
@@ -91,6 +93,12 @@ struct BindingEvaluation {
 
 struct BindingReservation {
     bool reserved = false, source_valid = true, capacity_possible = true;
+    // Every binding of this model completes asynchronously, so this stays false.
+    bool synchronous = false;
+    // The installed sequence and residency of the bound lane, present only when `synchronous`;
+    // every binding of this model is asynchronous, so they stay empty.
+    std::optional<SequenceHandle> sequence;
+    std::optional<runtime::ResidencyId> residency;
     ContextAssessment assessment;
     std::vector<CheckpointHandle> retired_points;
     std::optional<CheckpointHandle> consumed_source;
@@ -206,6 +214,14 @@ struct MixedStart {
     runtime::ExecutionTicket ticket;
     std::uint32_t segments    = 0;
     std::uint32_t decode_rows = 0;
+};
+
+// This model never forks a sample group; the type exists so every model presents the same
+// Session surface. A fork call reserves nothing and names no child.
+struct ForkResult {
+    std::vector<SequenceHandle> children;
+    bool reserved          = false;
+    ContextAssessment assessment;
 };
 
 struct MixedProgress {
@@ -430,6 +446,10 @@ public:
     start_prefill(std::span<const SequenceHandle> sequences, std::span<const bool> constrained);
     // This model never forks: each sampled request keeps its own single sequence.
     [[nodiscard]] std::uint32_t sample_fork_limit() const noexcept;
+    // A contract-violating call on a model that never forks: the result reserves nothing.
+    [[nodiscard]] ForkResult
+    fork(SequenceHandle parent, std::span<const runtime::LaneId> children,
+         std::span<const ResolvedSamplingParameters> sampling = {});
     // This model never mixes: the limit is zero, no window is mixable and start_mixed is a
     // contract violation.
     [[nodiscard]] std::uint32_t mixed_decode_limit() const noexcept;

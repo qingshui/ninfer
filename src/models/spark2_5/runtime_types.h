@@ -39,6 +39,9 @@ struct RuntimeTypes {
     using PendingBatch      = spark2_5::PendingBatch;
     using PrefillProgress   = spark2_5::PrefillProgress;
     using MixedProgress     = spark2_5::MixedProgress;
+    using PrefillStart      = spark2_5::PrefillStart;
+    using MixedStart        = spark2_5::MixedStart;
+    using ForkResult        = spark2_5::ForkResult;
     using ReplayProgress    = spark2_5::ReplayProgress;
     using ControlComplete   = spark2_5::ControlComplete;
     using ScoreComplete     = spark2_5::ScoreComplete;

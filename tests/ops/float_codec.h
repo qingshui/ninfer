@@ -73,6 +73,20 @@ inline std::int32_t round_even_to_i32(float value) {
     return (lower & 1) == 0 ? lower : lower + 1;
 }
 
+// BF16 bits of an fp32 value, round-to-nearest-even like the device packing, keeping NaN.
+// The fixture header is self-contained: a caller must not depend on op_tester.h including a
+// same-named helper first.
+inline std::uint16_t f32_to_bf16_bits(float value) {
+    std::uint32_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(bits));
+    if ((bits & 0x7fffffffu) > 0x7f800000u) {
+        return static_cast<std::uint16_t>((bits >> 16) | 0x0040u); // keep NaN
+    }
+    const std::uint32_t lsb = (bits >> 16) & 1u;
+    bits += 0x7fffu + lsb;
+    return static_cast<std::uint16_t>(bits >> 16);
+}
+
 inline float decode_e4m3fn_positive(std::uint8_t code) {
     if (code == 0x7fU) return std::numeric_limits<float>::quiet_NaN();
     const int exponent = (code >> 3) & 0x0f;
