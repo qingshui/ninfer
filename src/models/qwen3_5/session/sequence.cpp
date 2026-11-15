@@ -171,6 +171,9 @@ void SessionImpl::release_sequence_kv(SequenceState& state) noexcept { state.kv.
 void SessionImpl::clear_lane(SequenceState& state, RequestControl& request) noexcept {
     vision_window.revoke({state.id, state.residency});
     const auto lane = state.lane;
+    // A lane cleared before its first flight discards its deferred installation; the actions
+    // were never submitted to a stream, so nothing on the device references the lane.
+    discard_deferred_binding(lane);
     if (!closing && state.residency.generation) release_residency(state.residency);
     request.prefill.reset();
     release_sequence_kv(state);
@@ -186,6 +189,155 @@ void SessionImpl::release_residency(runtime::ResidencyId residency) {
     if (owner && owner->residency == residency) vision_window.revoke(*owner);
     if (std::find(releases.begin(), releases.end(), residency) == releases.end())
         releases.push_back(residency);
+}
+
+// Installs one child sequence in each of `children`'s lanes from the rested `parent`: every child
+// shares the parent's whole-page KV through the fork frontier, copies the tail page, the GDN/conv
+// State image and the continuation metadata, and carries the full prompt ledger, so it decodes the
+// last prompt token like an ordinary active sequence. The copies ride each child's first
+// execution in its stream order; the deferred transaction keeps the parent's images and pages
+// alive until that execution retires.
+ForkResult SessionImpl::fork(SequenceHandle parent, std::span<const runtime::LaneId> children) {
+    ForkResult result;
+    if (!valid_sequence(parent))
+        throw std::logic_error("fork requires a resident parent sequence");
+    const auto parent_lane = lane(parent);
+    auto& state   = sequences[parent_lane];
+    auto& request = requests[parent_lane];
+    const auto& base = *request.base;
+    const auto frontier = base.fork_frontier;
+    if (!frontier || request.lifecycle != Lifecycle::Prefilling || !request.prefill ||
+        request.prefill->cursor != frontier ||
+        state.continuation.metadata.execution_frontier != frontier || !state.kv ||
+        request.capture_pending || execution_pending(parent) || children.empty() ||
+        children.size() > sample_fork_limit())
+        throw std::logic_error("fork requires a rested forking parent and its children");
+    for (std::size_t i = 0; i < children.size(); ++i) {
+        const auto lane = children[i].value;
+        if (std::find(children.begin(), children.begin() + i, children[i]) != children.begin() + i ||
+            lane >= max_concurrency || lane == parent_lane ||
+            requests[lane].lifecycle != Lifecycle::Empty || deferred_bindings[lane])
+            throw std::logic_error("fork requires distinct free child lanes");
+    }
+    if (has_context_operation())
+        return {.assessment = {.status = context::ContextAvailability::Waiting}};
+    auto frame = executor().try_reserve(runtime::FrameKind::Context);
+    if (!frame) return {.assessment = {.status = context::ContextAvailability::Waiting}};
+
+    // One child decodes one token past the frontier on its own tail; later growth reserves its
+    // pages when the engine admits the decode unit.
+    const auto main_peak = frontier + 1;
+    const auto backend_frontier = backend_kv_valid(state);
+    const auto backend_peak =
+        speculative_backend == SpeculativeBackend::Mtp
+            ? (main_peak ? main_peak - 1 : 0)
+            : has_backend_pool() ? main_peak : 0;
+    auto text_source = text_kv_histories->retain_prefix(state.kv->text.handle(), frontier);
+    std::optional<context::HistoryPrefix> backend_source;
+    if (state.kv->backend)
+        backend_source = backend_kv_histories->retain_prefix(state.kv->backend->handle(),
+                                                             backend_frontier);
+    ContextDemand demand;
+    std::vector<context::ContextDemandId> state_ids, main_ids, backend_ids;
+    const auto state_variant = state_store->variant(state.continuation.image);
+    for (std::size_t i = 0; i < children.size(); ++i) {
+        state_ids.push_back(demand.add_state(
+            {.count = 1, .variant = state_variant, .logical_count = 1}));
+        main_ids.push_back(demand.add_history(
+            kTextKvPool.index,
+            text_kv_histories->binding_demand(&text_source, frontier, main_peak, {})));
+        if (state.kv->backend)
+            backend_ids.push_back(demand.add_history(
+                kBackendKvPool.index,
+                backend_kv_histories->binding_demand(&*backend_source, backend_frontier,
+                                                     backend_peak, {})));
+    }
+    const auto assessment = directory.assess(demand);
+    if (!assessment.ready()) return {.assessment = assessment};
+    auto reserved = directory.reserve(demand);
+    if (!reserved) return {.assessment = reserved.assessment};
+    auto& destinations = *reserved.reservation;
+
+    std::vector<SequenceHandle> installed;
+    try {
+        const auto image_bytes = state_store->image_bytes(0, state_variant);
+        for (std::size_t i = 0; i < children.size(); ++i) {
+            const auto lane = children[i].value;
+            context::ContextTransaction migration(directory);
+            migration.add_binding(
+                kTextKvPool.index,
+                text_kv_histories->prepare_binding(&text_source, frontier, main_peak, lane,
+                                                   destinations.take(main_ids[i]), false));
+            if (state.kv->backend)
+                migration.add_binding(
+                    kBackendKvPool.index,
+                    backend_kv_histories->prepare_binding(&*backend_source, backend_frontier,
+                                                          backend_peak, lane,
+                                                          destinations.take(backend_ids[i]),
+                                                          false));
+            const auto image =
+                state_store->reserve_destination(destinations.take(state_ids[i]));
+            migration.own_state(*image);
+            migration.add_state_group(state.continuation.image, 0, image_bytes);
+            migration.prepare_actions();
+            auto& control = requests[lane];
+            auto& child   = sequences[lane];
+            control       = RequestControl{};
+            control.base  = request.base;
+            control.lifecycle           = Lifecycle::Active;
+            control.sampling_host       = base.sampling;
+            control.publish_continuation = request.publish_continuation;
+            control.speculative_stats   = request.speculative_stats;
+            initialize_captures(control, frontier, base.summary.prompt_tokens);
+            child           = SequenceState{};
+            child.lane      = lane;
+            child.id        = SequenceHandle{next_sequence++, executor().epoch().value};
+            if (++lane_epochs[lane] == 0) ++lane_epochs[lane];
+            child.residency    = {{lane}, lane_epochs[lane]};
+            child.continuation = state.continuation;
+            child.continuation.image = *image;
+            child.pending_write      = {};
+            child.ledger = base.prompt->token_ids;
+            child.prefix_identity.assign(*base.prompt);
+            child.prefix_digests = base.prefix_digests;
+            auto& text = *migration.binding(kTextKvPool.index);
+            text.publish_restores();
+            SequenceKVBundle kv{.text = text.commit()};
+            if (auto* backend = migration.binding(kBackendKvPool.index)) {
+                backend->publish_restores();
+                kv.backend.emplace(backend->commit());
+            }
+            child.kv.emplace(std::move(kv));
+            (void)migration.state_destination().release();
+            deferred_bindings[lane].emplace(std::move(migration));
+            deferred_bindings[lane]->actions = deferred_bindings[lane]->transaction.actions();
+            deferred_bindings[lane]->retained.push_back(text_source);
+            if (backend_source) deferred_bindings[lane]->retained.push_back(*backend_source);
+            installed.push_back(child.id);
+        }
+        context_operation_ = std::make_unique<PendingContext>(directory, ResidencyOperation{});
+        context_operation_->silent = true;
+        context_operation_->reservation.emplace(std::move(*frame));
+        ContextWork work;
+        for (const auto handle : installed)
+            work.bindings.push_back(
+                {{handle, sequences[lane(handle)].residency}, base.sampling});
+        (void)submit_context(*context_operation_, std::move(work));
+    } catch (...) {
+        abort_context();
+        // Every child lane that is no longer empty carries a partial or complete installation;
+        // no child has a flight, so discarding its deferred work rolls the whole group back.
+        for (const auto id : children) {
+            const auto lane = id.value;
+            if (requests[lane].lifecycle == Lifecycle::Empty) continue;
+            if (deferred_bindings[lane]) discard_deferred_binding(lane);
+            clear_lane(sequences[lane], requests[lane]);
+        }
+        throw;
+    }
+    result.children = std::move(installed);
+    result.reserved = true;
+    return result;
 }
 
 void SessionImpl::submit_releases() {

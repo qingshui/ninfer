@@ -41,6 +41,9 @@ bool SessionImpl::context_pins(CheckpointHandle handle) const noexcept {
                 return has(action.sources);
             } else if constexpr (std::is_same_v<Action, PauseOperation>) {
                 return action.paused.impl_ && action.paused.impl_->snapshot == handle;
+            } else if constexpr (std::is_same_v<Action, ResidencyOperation>) {
+                // A silent residency installation borrows no checkpoint.
+                return false;
             } else {
                 // Maintenance may relocate any record, and carries the demotion or pause that
                 // follows it.
@@ -127,7 +130,9 @@ void SessionImpl::receive_context_result(runtime::ExecutionTicket ticket, Contex
 }
 
 void SessionImpl::cancel_context() noexcept {
-    if (context_operation_) context_operation_->transaction.cancel();
+    // A silent residency installation holds no adoptable state; cancelling it would tear down
+    // lanes the caller already owns.
+    if (context_operation_ && !context_operation_->silent) context_operation_->transaction.cancel();
     if (normalizing_pause_) pause_cancelled_ = true;
 }
 
@@ -173,6 +178,12 @@ void SessionImpl::retire_context(runtime::DeviceRetired retired) {
         out.complete = true;
     } else {
         transaction.publish();
+        // A silent operation finished an installation the caller already adopted: no lane state
+        // waits on it and no ContextProgress follows.
+        if (operation.silent) {
+            context_operation_.reset();
+            return;
+        }
         if (auto* maintenance = std::get_if<MaintenanceOperation>(&operation.action);
             maintenance && (maintenance->demotion || maintenance->pause_sequence)) {
             auto targets      = transaction.take_reservation();

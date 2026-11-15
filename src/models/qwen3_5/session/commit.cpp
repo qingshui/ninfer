@@ -5,12 +5,12 @@
 
 namespace ninfer::models::qwen3_5::detail {
 
-// The pending batch covers the decode rows of the execution: all of them for a decode or a
-// first-token prefill, the members behind the segments for a mixed execution.
+// The pending batch covers every decision row of the execution: all members of a decode
+// execution, the decode rows of a mixed one followed by its final segments, and the final
+// segments of a packed prefill.
 PendingBatch SessionImpl::generated_pending(const Execution& current,
                                             const GeneratedResult& generated) {
-    const auto first  = current.decode_begin;
-    const auto batch  = current.members.size() - first;
+    const auto batch = current.pending_members.size();
     if (!generated.row_stride || generated.tokens.size() != batch * generated.row_stride ||
         generated.counts.size() != batch || generated.dead_positions.size() != batch)
         throw std::logic_error("generated result has an invalid shape");
@@ -18,8 +18,10 @@ PendingBatch SessionImpl::generated_pending(const Execution& current,
         (generated.draft_extents.size() != batch || generated.accepted_drafts.size() != batch))
         throw std::logic_error("decode result omitted its proposal extents");
     PendingBatch out;
-    out.ticket_    = current.ticket;
-    out.members_.assign(current.members.begin() + first, current.members.end());
+    out.ticket_ = current.ticket;
+    out.members_.reserve(batch);
+    for (const auto member : current.pending_members)
+        out.members_.push_back(current.members[member]);
     out.tokens_    = generated.tokens;
     out.stride_    = generated.row_stride;
     out.execution_ = current.observed_result;
@@ -29,23 +31,21 @@ PendingBatch SessionImpl::generated_pending(const Execution& current,
             throw std::logic_error("generated result has an invalid licensed prefix");
         out.counts_.push_back(static_cast<std::int32_t>(count));
         out.failed_.push_back((generated.dead_positions[b] & ((1U << count) - 1)) != 0);
-        auto& state       = sequences[lane(current.members[first + b])];
+        auto& state       = sequences[lane(out.members_[b])];
         auto& request     = requests[state.lane];
         request.lifecycle = Lifecycle::Pending;
     }
     return out;
 }
 
-// The execution a pending batch belongs to, by its ticket, when the batch still names the decode
-// rows of that execution.
+// The execution a pending batch belongs to, by its ticket, when the batch still names the
+// decision rows of that execution.
 const SessionImpl::Execution*
 SessionImpl::matching_execution(const PendingBatch& pending) const noexcept {
     const auto* current = find_execution(pending.ticket_);
-    if (!current ||
-        current->members.size() - current->decode_begin != pending.members_.size() ||
-        !std::equal(current->members.begin() + current->decode_begin, current->members.end(),
-                    pending.members_.begin()))
-        return nullptr;
+    if (!current || current->pending_members.size() != pending.members_.size()) return nullptr;
+    for (std::size_t b = 0; b < pending.members_.size(); ++b)
+        if (current->members[current->pending_members[b]] != pending.members_[b]) return nullptr;
     return current;
 }
 
@@ -117,6 +117,8 @@ void SessionImpl::receive_result(runtime::ResultReady<ExecutionTypes>&& event) {
         if (current.kind != OperationKind::Decode)
             throw std::logic_error("decode result has the wrong execution kind");
         current.generated.emplace(std::move(*generated));
+        current.pending_members.resize(current.members.size());
+        for (std::size_t b = 0; b < current.members.size(); ++b) current.pending_members[b] = b;
         auto pending = generated_pending(current, *current.generated);
         events.push_back({current.ticket, current.members, std::move(pending)});
         return;
@@ -128,18 +130,27 @@ void SessionImpl::receive_result(runtime::ResultReady<ExecutionTypes>&& event) {
             !std::equal(mixed->prefill.processed_tokens.begin(),
                         mixed->prefill.processed_tokens.end(), current.columns.begin()))
             throw std::logic_error("mixed result changed its reserved input windows");
-        // The segments settle with the decode rows, so their metadata waits in `completed`.
+        // The segments settle with the decision rows, so their metadata waits in `completed`.
         MixedProgress progress;
         progress.prefill.rows.reserve(first);
         for (std::size_t b = 0; b < first; ++b) {
+            const bool produces = b < current.producing.size() && current.producing[b];
             current.completed.push_back(forward_metadata(current.bases[b].metadata,
                                                          current.columns[b], speculative_backend,
                                                          has_backend_pool()));
             progress.prefill.rows.push_back(prefill_row(*this, current, b));
-            if (progress.prefill.rows.back().complete)
+            // Only a non-final segment without its own decision row must not have finished the
+            // prompt; a final one reports complete and samples below.
+            if (progress.prefill.rows.back().complete && !produces)
                 throw std::logic_error("completed prefill omitted its first token");
         }
         current.generated.emplace(std::move(mixed->decode));
+        // The batch carries the decode rows first, then the final segments in segment order.
+        current.pending_members.clear();
+        for (std::size_t b = first; b < current.members.size(); ++b)
+            current.pending_members.push_back(static_cast<std::uint32_t>(b));
+        for (std::size_t b = 0; b < first; ++b)
+            if (current.producing[b]) current.pending_members.push_back(static_cast<std::uint32_t>(b));
         progress.decode = generated_pending(current, *current.generated);
         events.push_back({current.ticket, current.members, std::move(progress)});
         return;
@@ -161,12 +172,21 @@ void SessionImpl::receive_result(runtime::ResultReady<ExecutionTypes>&& event) {
                     progress.rows.back().capture_ready && !forward->generated;
             }
             if (forward->generated) {
-                if (progress.rows.size() != 1)
-                    throw std::logic_error("packed prefill produced a token");
-                if (!progress.rows[0].complete)
-                    throw std::logic_error("incomplete prefill produced a token");
+                // The batch carries one decision row per final segment, in segment order.
+                current.pending_members.clear();
+                for (std::size_t b = 0; b < current.members.size(); ++b) {
+                    if (!(b < current.producing.size() && current.producing[b])) continue;
+                    if (!progress.rows[b].complete)
+                        throw std::logic_error("incomplete prefill produced a token");
+                    current.pending_members.push_back(static_cast<std::uint32_t>(b));
+                }
+                if (current.pending_members.empty())
+                    throw std::logic_error("sampled prefill has no producing segment");
                 current.generated.emplace(std::move(*forward->generated));
-                progress.rows[0].pending.emplace(generated_pending(current, *current.generated));
+                // The whole batch rides the first producing row; its members name every
+                // producing segment of the execution.
+                auto pending = generated_pending(current, *current.generated);
+                progress.rows[current.pending_members.front()].pending.emplace(std::move(pending));
                 events.push_back({current.ticket, current.members, std::move(progress)});
                 return;
             }
@@ -293,15 +313,19 @@ CommitResult SessionImpl::commit(PendingBatch&& pending,
         current.decisions.assign(decisions.begin(), decisions.end());
         current.settlement = std::make_unique<context::ContextTransaction>(directory);
         if (current.kind == OperationKind::Decode || current.kind == OperationKind::Mixed) {
-            current.completed.reserve(first + decisions.size());
+            current.completed.reserve(current.members.size());
             for (std::size_t b = 0; b < decisions.size(); ++b) {
-                auto metadata =
-                    forward_metadata(current.bases[first + b].metadata, decisions[b].accepted_tokens,
-                                     speculative_backend, has_backend_pool());
+                const auto m = current.pending_members[b];
+                // A mixed execution's final segments settled their metadata when the result
+                // arrived; its decode rows and every decode row settle here.
+                if (current.kind == OperationKind::Mixed && m < first) continue;
+                auto metadata = forward_metadata(current.bases[m].metadata,
+                                                 decisions[b].accepted_tokens, speculative_backend,
+                                                 has_backend_pool());
                 if (is_masked_draft_backend(speculative_backend)) {
                     metadata.dflash_context_frontier =
                         decisions[b].terminal ? metadata.execution_frontier
-                                              : current.bases[first + b].metadata.execution_frontier;
+                                              : current.bases[m].metadata.execution_frontier;
                     metadata.backend_kv_valid =
                         has_backend_pool() ? metadata.dflash_context_frontier : 0;
                 }
@@ -313,7 +337,8 @@ CommitResult SessionImpl::commit(PendingBatch&& pending,
         if (current.kind == OperationKind::Mixed) prepare_segments(current, segment_recovery_span);
         for (std::size_t b = 0; b < decisions.size(); ++b) {
             const auto& d = decisions[b];
-            const auto l  = lane(current.members[first + b]);
+            const auto m  = current.pending_members[b];
+            const auto l  = lane(current.members[m]);
             auto& state   = sequences[l];
             result.rows[b].speculative.attempted_per_position.reserve(
                 requests[l].speculative_stats.attempted_per_position.size());
@@ -323,7 +348,7 @@ CommitResult SessionImpl::commit(PendingBatch&& pending,
             if (d.cancelled || d.failed) continue;
             prepare_identity(state, d.accepted_tokens, d.prefix_execution_split_after);
             recovery[b] = prepare_settlement(
-                l, current.completed[first + b],
+                l, current.completed[m],
                 d.terminal ? Lifecycle::Finishable : Lifecycle::Active,
                 state.ledger.size() + d.accepted_tokens, *current.settlement);
         }
@@ -340,16 +365,17 @@ CommitResult SessionImpl::commit(PendingBatch&& pending,
     if (current.kind == OperationKind::Mixed) adopt_segments(current, segment_recovery_span);
     for (std::size_t b = 0; b < decisions.size(); ++b) {
         const auto& d = decisions[b];
-        const auto l  = lane(current.members[first + b]);
+        const auto m  = current.pending_members[b];
+        const auto l  = lane(current.members[m]);
         auto& state   = sequences[l];
         auto& request = requests[l];
         if (!d.cancelled && !d.failed) {
-            adopt_unit(l, current.completed[first + b],
+            adopt_unit(l, current.completed[m],
                        current.kind == OperationKind::Decode ||
-                           current.kind == OperationKind::Mixed || current.columns[b] != 0,
+                           current.kind == OperationKind::Mixed || current.columns[m] != 0,
                        recovery[b]);
             if (current.kind == OperationKind::Prefill)
-                request.prefill->cursor = current.completed[b].execution_frontier;
+                request.prefill->cursor = current.completed[m].execution_frontier;
             const auto accepted = std::span<const TokenId>(pending.tokens_)
                                       .subspan(b * pending.stride_, d.accepted_tokens);
             append_identity(state, accepted, d.prefix_execution_split_after);
@@ -357,7 +383,7 @@ CommitResult SessionImpl::commit(PendingBatch&& pending,
             request.capture_pending =
                 request.capture_reservation &&
                 request.capture_reservation->frontier ==
-                    current.completed[first + b].execution_frontier;
+                    current.completed[m].execution_frontier;
         }
         if (d.terminal) {
             request.capture_pending = false;
@@ -400,7 +426,7 @@ DiscardResult SessionImpl::discard(PendingBatch&& pending) noexcept {
         auto& current    = *owner;
         const auto first = current.decode_begin;
         if (current.kind == OperationKind::Mixed) {
-            // The decode rows are dropped but their segments completed: commit every decode row
+            // The decision rows are dropped but their segments completed: commit every row
             // as discarded so the segments' State and KV settle and keep their progress.
             const auto recovery = std::make_unique<bool[]>(max_concurrency);
             const auto recovery_span = std::span<bool>(recovery.get(), max_concurrency);
@@ -408,7 +434,7 @@ DiscardResult SessionImpl::discard(PendingBatch&& pending) noexcept {
             prepare_segments(current, recovery_span);
             current.settlement->prepare_actions();
             Commit physical;
-            physical.rows.assign(current.members.size() - first, CommitRow{0, true, true});
+            physical.rows.assign(current.pending_members.size(), CommitRow{0, true, true});
             physical.context = current.settlement->actions();
             (void)executor().commit(current.ticket, std::move(physical));
             current.settlement->mark_submitted();
@@ -420,7 +446,7 @@ DiscardResult SessionImpl::discard(PendingBatch&& pending) noexcept {
         current.discarded = true;
         current.committed = true;
         pending.ticket_   = {};
-        return {runtime::ConsumeStatus::Consumed, current.members.size() - first};
+        return {runtime::ConsumeStatus::Consumed, current.pending_members.size()};
     } catch (...) { return {}; }
 }
 
@@ -487,6 +513,15 @@ void SessionImpl::retire(runtime::DeviceRetired event) {
         current.settlement->mark_completed();
         current.settlement->publish();
     }
+    // Deferred lane installations completed with this flight's stream order; their borrowed
+    // sources publish here. A lane cleared before this retirement already discarded its
+    // deferred work.
+    for (const auto handle : current.members) {
+        if (!valid_sequence(handle)) continue;
+        auto& deferred = deferred_bindings[lane(handle)];
+        if (deferred) publish_deferred_binding(*deferred);
+        deferred.reset();
+    }
     for (std::size_t b = 0; b < current.members.size(); ++b) {
         if (!valid_sequence(current.members[b])) continue;
         const auto l  = lane(current.members[b]);
@@ -502,13 +537,12 @@ void SessionImpl::retire(runtime::DeviceRetired event) {
     if (current.kind != OperationKind::Normalize && current.kind != OperationKind::Score)
         events.push_back({current.ticket, current.members,
                           runtime::ExecutionComplete{event.execution, current.members.size()}});
-    for (std::size_t b = 0; b < current.members.size(); ++b) {
+    for (std::size_t row = 0; row < current.pending_members.size(); ++row) {
+        const auto b = current.pending_members[row];
         if (!valid_sequence(current.members[b])) continue;
-        if (b < current.decode_begin) continue;
         const auto l  = lane(current.members[b]);
         auto& state   = sequences[l];
         auto& request = requests[l];
-        const auto row = b - current.decode_begin;
         if (current.discarded ||
             (!current.decisions.empty() &&
              (current.decisions[row].cancelled || current.decisions[row].failed)))

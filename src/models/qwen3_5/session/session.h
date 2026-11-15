@@ -71,6 +71,10 @@ public:
     [[nodiscard]] const models::frontend::PreparedContextCache& context_cache() const noexcept;
     [[nodiscard]] std::optional<PrefixShortlistKey>
     prefix_shortlist_key(std::uint32_t frontier) const noexcept;
+    // The prompt frontier where a sample fork splits this request: the parent prefills through
+    // fork_frontier - 1 and every child decodes the last prompt token with its own sampling.
+    // Zero when the request cannot fork.
+    [[nodiscard]] std::uint32_t fork_frontier() const noexcept;
 
 private:
     explicit RequestBasePlan(std::shared_ptr<detail::RequestBasePlanImpl> impl) noexcept;
@@ -127,11 +131,23 @@ struct BindingReservation {
     bool reserved          = false;
     bool source_valid      = true;
     bool capacity_possible = true;
+    // The binding is complete when start_binding returns: the lane is already schedulable and no
+    // ContextProgress will follow. False keeps the asynchronous completion contract.
+    bool synchronous       = false;
     ContextAssessment assessment;
     std::vector<CheckpointHandle> retired_points;
     std::optional<CheckpointHandle> consumed_source;
 
     explicit operator bool() const noexcept { return reserved; }
+};
+
+// The children one successful fork installed, in the order of the requested lanes. `reserved`
+// covers the whole group; an unreserved result names no child and carries the assessment the
+// admission measured.
+struct ForkResult {
+    std::vector<SequenceHandle> children;
+    bool reserved          = false;
+    ContextAssessment assessment;
 };
 
 struct PauseOption {
@@ -243,11 +259,42 @@ struct PrefillProgress {
     std::vector<PrefillRowProgress> rows;
 };
 
-// `segments` is the length of the candidate prefix the execution admitted. More than one segment
-// means every segment is a non-final, text-only window.
+// One admitted prefill segment of an execution. `produces_token` marks a final window: its row
+// carries one decision line of the execution's pending batch.
+struct PrefillSegmentStart {
+    bool produces_token = false;
+};
+
+// The segments an execution admitted, in candidate order. Also reads as the segment count, so a
+// caller that only sizes its membership keeps that use.
+class AdmittedSegments {
+public:
+    AdmittedSegments() = default;
+    AdmittedSegments(std::initializer_list<PrefillSegmentStart> segments) : segments_(segments) {}
+
+    void push_back(PrefillSegmentStart segment) { segments_.push_back(segment); }
+
+    [[nodiscard]] bool empty() const noexcept { return segments_.empty(); }
+
+    [[nodiscard]] std::size_t size() const noexcept { return segments_.size(); }
+
+    [[nodiscard]] const PrefillSegmentStart& operator[](std::size_t index) const {
+        return segments_.at(index);
+    }
+
+    [[nodiscard]] operator std::uint32_t() const noexcept {
+        return static_cast<std::uint32_t>(segments_.size());
+    }
+
+private:
+    std::vector<PrefillSegmentStart> segments_;
+};
+
+// `segments` describes the admitted prefix of the candidate list; a segment with
+// `produces_token` is a final window whose row joins the execution's pending batch.
 struct PrefillStart {
     runtime::ExecutionTicket ticket;
-    std::uint32_t segments = 0;
+    AdmittedSegments segments;
 };
 
 // `segments` and `decode_rows` are the prefixes of the candidate lists the execution admitted,
@@ -255,7 +302,7 @@ struct PrefillStart {
 // prefill and reports a PrefillProgress.
 struct MixedStart {
     runtime::ExecutionTicket ticket;
-    std::uint32_t segments    = 0;
+    AdmittedSegments segments;
     std::uint32_t decode_rows = 0;
 };
 
@@ -476,16 +523,25 @@ public:
     // window always fits (>= the prefill chunk).
     [[nodiscard]] std::uint32_t prefill_pack_tokens() const noexcept;
     // Admits a non-empty prefix of `sequences`. The first segment always runs; a later one joins
-    // only while every segment so far is a non-final, text-only window and the backend is not
-    // DFlash. A final (token-producing), Vision or DFlash segment runs alone. `constrained` is
-    // empty or parallel to `sequences`.
+    // while the pack stays inside the planned token axis and the backend is not DFlash. A final
+    // (token-producing) segment packs like any other and carries one decision row; Vision and
+    // DFlash segments still run alone. `constrained` is empty or parallel to `sequences`.
     [[nodiscard]] std::optional<PrefillStart>
     start_prefill(std::span<const SequenceHandle> sequences, std::span<const bool> constrained);
+    // Upper bound on the children one fork call admits; zero when this Session never forks.
+    [[nodiscard]] std::uint32_t sample_fork_limit() const noexcept;
+    // Installs one child sequence in each of `children`'s lanes from `parent`, which rests at
+    // its base plan's fork_frontier. Children share the parent's whole-page KV, copy its tail
+    // page and GDN/conv state through the stream order of their first execution, and return
+    // synchronously: an unreserved result names no child. The parent keeps its own lane.
+    [[nodiscard]] ForkResult fork(SequenceHandle parent, std::span<const runtime::LaneId> children);
     // Upper bound on the decode rows one start_mixed call carries; zero when this Session never
     // mixes (offloaded experts, masked draft windows, scoring, a single lane).
     [[nodiscard]] std::uint32_t mixed_decode_limit() const noexcept;
     // True when the sequence's next prefill window can share an execution with decode rows: a
-    // non-final, text-only window that stays inside one prefix execution segment.
+    // text-only window that stays inside one prefix execution segment. A final window shares
+    // only without speculative drafts, because its decision row then merges with the decode
+    // rows' single-token stride.
     [[nodiscard]] bool prefill_mixable(SequenceHandle) const;
     // Carries a packed prefill and decode rows in one execution. The first prefill segment must be
     // mixable; later ones follow the packing rules and additionally need prefill_mixable, and the

@@ -13,7 +13,8 @@ ninfer_add_test(ninfer_spark2_5_definition_test
 set_tests_properties(ninfer_spark2_5_definition_test PROPERTIES
   SKIP_RETURN_CODE 77 ENVIRONMENT "CUDA_VISIBLE_DEVICES=")
 
-# Frontend, execution and engine tests are declared beside their sources.
+# Frontend, session, execution and engine tests are declared beside their sources.
 include("${CMAKE_CURRENT_LIST_DIR}/frontend/tests.cmake" OPTIONAL)
+include("${CMAKE_CURRENT_LIST_DIR}/session/tests.cmake" OPTIONAL)
 include("${CMAKE_CURRENT_LIST_DIR}/execution/tests.cmake" OPTIONAL)
 include("${CMAKE_CURRENT_LIST_DIR}/engine/tests.cmake" OPTIONAL)

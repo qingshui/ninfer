@@ -44,7 +44,9 @@ struct RequestBasePlanImpl {
     std::shared_ptr<const PreparedCaptureBacking> capture_backing;
     qwen::PrefixShortlistDigests prefix_digests;
     std::uint32_t prefix_identity_tag = 0;
-    bool allow_prefix_reuse           = false;
+    // The prompt frontier a sample fork splits at; zero when the request cannot fork.
+    std::uint32_t fork_frontier = 0;
+    bool allow_prefix_reuse     = false;
 
     [[nodiscard]] bool accepts_capture(std::uint32_t frontier) const noexcept;
     [[nodiscard]] CaptureGroup capture_group(std::uint32_t frontier) const;
@@ -266,9 +268,16 @@ struct PauseOperation {
     bool preserve_state_device = true;
 };
 
+// The silent tail of a synchronous lane installation: the operation only carries residency
+// bindings to the rank program (host-side marking; no device work without penalty counts) and
+// publishes no ContextProgress. The installed lanes are already schedulable when it runs.
+struct ResidencyOperation {
+    static constexpr auto kind = ContextOperationKind::Bind;
+};
+
 struct PendingContext {
     using Action = std::variant<BindOperation, CaptureOperation, DemoteOperation, PauseOperation,
-                                MaintenanceOperation>;
+                                MaintenanceOperation, ResidencyOperation>;
 
     PendingContext(context::ContextDirectory& directory, Action value)
         : transaction(directory), action(std::move(value)) {}
@@ -285,6 +294,9 @@ struct PendingContext {
     context::ContextActionCursor cursor;
     bool submitted  = false;
     bool last_batch = false;
+    // The operation's result retires silently: it completes an already-synchronous binding and
+    // publishes no ContextProgress.
+    bool silent = false;
     std::vector<runtime::ContextTransferObservation> preceding_transfers;
 
     [[nodiscard]] std::optional<std::uint32_t> lane() const noexcept {
@@ -396,6 +408,8 @@ public:
                                                   std::uint32_t end) const;
     [[nodiscard]] std::optional<PrefillStart> start_prefill(std::span<const SequenceHandle>,
                                                             std::span<const bool> constrained);
+    [[nodiscard]] std::uint32_t sample_fork_limit() const noexcept;
+    [[nodiscard]] ForkResult fork(SequenceHandle parent, std::span<const runtime::LaneId> children);
     [[nodiscard]] std::uint32_t mixed_decode_limit() const noexcept;
     [[nodiscard]] bool prefill_mixable(SequenceHandle) const;
     [[nodiscard]] std::optional<MixedStart>
@@ -499,6 +513,13 @@ public:
         // Prefill segments first, then decode rows. Every per-member vector follows this order; a
         // Mixed execution's pending batch and decisions cover the members from `decode_begin` on.
         std::vector<SequenceHandle> members;
+        // Whether each member carries a decision row of the execution's pending batch: decode
+        // rows and final prefill segments produce; non-final segments do not.
+        std::vector<bool> producing;
+        // Member index of every decision row of the execution's pending batch, in row order.
+        // Decode rows are the trailing members of a mixed execution; the final segments of a
+        // packed prefill are their own members. Empty until the batch is generated.
+        std::vector<std::uint32_t> pending_members;
         std::vector<Continuation> bases;
         std::vector<ContinuationMetadata> completed;
         std::vector<std::uint32_t> columns;
@@ -586,7 +607,7 @@ public:
     [[nodiscard]] std::optional<std::uint32_t> mixable_end(const SequenceState&,
                                                            const RequestControl&) const;
     void append_prefill_row(Execution&, ForwardWork&, SequenceHandle, std::uint32_t begin,
-                            std::uint32_t end, bool constrained);
+                            std::uint32_t end, bool constrained, bool produces_token);
     void append_decode_row(Execution&, DecodeWork&, SequenceHandle,
                            const runtime::RoundBudget&, bool constrained);
     // Settle and adopt the prefill segments of a mixed execution together with its decode rows.
@@ -594,6 +615,27 @@ public:
     void adopt_segments(Execution&, std::span<const bool> recovery) noexcept;
     [[nodiscard]] std::optional<runtime::ExecutionTicket>
     submit_execution(Execution&&, runtime::ExecutionReservation, Work&&);
+
+    // Device work a synchronous lane installation deferred: its actions ride the stream order of
+    // the lane's first execution instead of a context operation. The transaction keeps every
+    // borrowed source (the fork parent's State image and tail page) alive until that execution
+    // retires, where `publish` runs; `retained` holds the fork parent's KV prefixes for the same
+    // window.
+    struct DeferredBinding {
+        context::ContextTransaction transaction;
+        context::ContextActions actions;
+        std::vector<context::HistoryPrefix> retained;
+        explicit DeferredBinding(context::ContextTransaction&& prepared)
+            : transaction(std::move(prepared)) {}
+        DeferredBinding(DeferredBinding&&) = default;
+    };
+
+    std::vector<std::optional<DeferredBinding>> deferred_bindings;
+    // Merges the deferred device work of an execution's member lanes ahead of the flight's own
+    // context actions, and completes those transactions with the flight.
+    void adopt_deferred_bindings(Execution&, Work&);
+    void publish_deferred_binding(DeferredBinding&) noexcept;
+    void discard_deferred_binding(std::uint32_t lane) noexcept;
 
     [[nodiscard]] bool can_release_checkpoint(CheckpointHandle) const noexcept;
     [[nodiscard]] std::optional<ContextReleaseSet>

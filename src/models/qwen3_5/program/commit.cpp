@@ -14,10 +14,16 @@ void RankProgramImpl::launch_commit(ComputeOperation& operation) {
     const auto* forward  = std::get_if<ForwardWork>(&operation.request.work.operation);
     const bool generated = decode || (forward && forward->sample != SamplePurpose::None);
     const bool mtp       = decode && operation.speculative && backend == SpeculativeBackend::Mtp;
+    // The decode rows of a mixed flight are its leading decision rows; its final segments commit
+    // like prefill rows, one accepted token each. A packed prefill has no decode row at all.
+    const auto decode_rows =
+        static_cast<std::uint32_t>(operation.mixed ? operation.rows.size() - operation.segments.size()
+                                                  : (decode ? operation.batch : 0U));
+    const auto forwards = forward_row_count(operation);
     bool count_tokens    = false;
     frame.clear_host_commit();
-    for (std::uint32_t i = 0; generated && i < operation.batch; ++i) {
-        const auto& row     = operation.rows[i];
+    for (std::uint32_t i = 0; generated && i < operation.sample_members.size(); ++i) {
+        const auto& row     = operation.rows[operation.sample_members[i]];
         const auto accepted = value.rows[i].discarded ? 0 : value.rows[i].accepted_tokens;
         frame.host_commit->state_destination_offsets[i] = row.state_offsets.destination;
         frame.host_commit->last_columns[i]              = static_cast<int>(accepted) - 1;
@@ -56,29 +62,50 @@ void RankProgramImpl::launch_commit(ComputeOperation& operation) {
         } else {
             if (operation.speculative)
                 resources.replay_fold->execute(
-                    frame.state_source_offsets.slice(0, 0, operation.batch),
-                    frame.commit_destination_offsets.slice(0, 0, operation.batch),
-                    frame.accepted_columns.slice(0, 0, operation.batch), device.execution_view());
+                    frame.state_source_offsets.slice(0, 0, decode_rows),
+                    frame.commit_destination_offsets.slice(0, 0, decode_rows),
+                    frame.accepted_columns.slice(0, 0, decode_rows), device.execution_view());
+            // Only the decode rows scatter a verify-block column; the final segments published
+            // their continuation hidden with the traversal, like any prefill window.
             const auto hidden = operation.mixed
                                     ? frame.verify_view(static_cast<int>(operation.prefill_tokens),
-                                                        operation.width, operation.batch)
+                                                        operation.width, decode_rows)
                                           .hidden
-                                    : frame.decode_view(operation.width, operation.batch).hidden;
+                                    : frame.decode_view(operation.width, decode_rows).hidden;
             ops::scatter_batch_columns(
-                hidden, frame.last_columns.slice(0, 0, operation.batch),
+                hidden, frame.last_columns.slice(0, 0, decode_rows),
                 resources.state_images.continuation_hidden(
-                    frame.commit_destination_offsets.slice(0, 0, operation.batch)),
+                    frame.commit_destination_offsets.slice(0, 0, decode_rows)),
                 device.execution_view());
         }
         if (draft_history) commit_draft_history(operation);
     }
     if (count_tokens && !mtp) {
         const int width = operation.speculative ? static_cast<int>(draft_window + 1) : 1;
-        Tensor tokens({frame.output_tokens.data, frame.output_tokens.bytes(), device.device()},
-                      DType::I32, {width, static_cast<int>(operation.batch)});
-        ops::increment_token_counts_batch(tokens, frame.count_columns.slice(0, 0, operation.batch),
-                                          frame.residency_slots.slice(0, 0, operation.batch),
-                                          resources.token_counts, device.execution_view());
+        if (decode_rows) {
+            Tensor tokens({frame.output_tokens.data, frame.output_tokens.bytes(), device.device()},
+                          DType::I32, {width, static_cast<int>(decode_rows)});
+            ops::increment_token_counts_batch(
+                tokens, frame.count_columns.slice(0, 0, decode_rows),
+                frame.residency_slots.slice(0, 0, decode_rows), resources.token_counts,
+                device.execution_view());
+        }
+        // A final segment counts its single accepted token per row: its lane is the producing
+        // segment's own residency, not one of the contiguous decode rows.
+        for (std::uint32_t j = 0; j < forwards; ++j) {
+            const auto row = decode_rows + j;
+            if (!frame.host_commit->count_columns[row]) continue;
+            const auto& member = operation.rows[operation.sample_members[row]];
+            auto counts =
+                resources.token_counts
+                    .slice(1, static_cast<int>(member.member.residency.lane.value), 1)
+                    .view({execution::dimension(parameters.profile->public_tokens)});
+            Tensor tokens({static_cast<TokenId*>(frame.output_tokens.data) + row,
+                           frame.output_tokens.bytes() - row * sizeof(TokenId), device.device()},
+                          DType::I32, {1});
+            ops::increment_token_counts(tokens, counts, device.execution_view());
+            device_work = true;
+        }
     }
     if (const auto* forward = std::get_if<ForwardWork>(&operation.request.work.operation);
         forward && forward->purpose == ForwardPurpose::Control) {

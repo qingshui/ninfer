@@ -175,7 +175,9 @@ ContextRecordBinding HistoryBinding::tail_destination(std::uint32_t rank) const 
 }
 
 void HistoryBinding::publish_restores() {
-    if (!store_ || restores_published_) throw std::logic_error("KV restores already published");
+    // A consumed binding published its replicas when it committed; a transaction that committed
+    // one early (a synchronous lane installation) republishes nothing.
+    if (!store_ || restores_published_) return;
     for (auto& restore : restores_) restore.publish();
     restores_.clear();
     auto& history = store_->require(this->history());

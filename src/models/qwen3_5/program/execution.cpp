@@ -122,13 +122,17 @@ void RankProgramImpl::progress_compute(std::uint32_t frame) {
                 operation.gpu.add_prefill(
                     static_cast<std::uint64_t>(slot().prefill_timer.elapsed_ms() * 1.0e6));
             if (operation.packed) {
-                // Every segment completed in the one traversal; none samples.
+                // Every segment completed in the one traversal; the producing segments sample one
+                // decision row each, the rest only report.
                 auto& result = std::get<ForwardResult>(operation.result->output);
                 for (const auto& segment : operation.segments)
                     result.processed_tokens.push_back(segment.tokens);
                 operation.forward_row    = static_cast<std::uint32_t>(operation.rows.size());
                 operation.forward_offset = 0;
-                operation.stage          = ComputeStage::Readback;
+                const auto* forward = std::get_if<ForwardWork>(&operation.request.work.operation);
+                operation.stage = forward && forward->sample != SamplePurpose::None
+                                      ? ComputeStage::AwaitDecision
+                                      : ComputeStage::Readback;
             } else if (const auto* forward =
                            std::get_if<ForwardWork>(&operation.request.work.operation)) {
                 auto& result       = std::get<ForwardResult>(operation.result->output);

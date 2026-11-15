@@ -428,6 +428,8 @@ public:
     // Admits the first sequence of `sequences`; `constrained` is empty or parallel to it.
     [[nodiscard]] std::optional<PrefillStart>
     start_prefill(std::span<const SequenceHandle> sequences, std::span<const bool> constrained);
+    // This model never forks: each sampled request keeps its own single sequence.
+    [[nodiscard]] std::uint32_t sample_fork_limit() const noexcept;
     // This model never mixes: the limit is zero, no window is mixable and start_mixed is a
     // contract violation.
     [[nodiscard]] std::uint32_t mixed_decode_limit() const noexcept;

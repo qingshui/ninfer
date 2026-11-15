@@ -31,7 +31,8 @@ void RankProgramImpl::request_decision(ComputeOperation& operation) {
     request.stage      = operation.decision_stage;
     request.vocabulary = parameters.profile->public_tokens;
     const auto* drafts = static_cast<const TokenId*>(resources.frame().host_drafts.data);
-    for (std::uint32_t row = 0; row < operation.batch; ++row) {
+    // One decision row per member of the pending batch, including producing prefill segments.
+    for (std::uint32_t row = 0; row < operation.sampling.size(); ++row) {
         if (!operation.sampling[row].constrained) continue;
         runtime::DecisionRequest::Row member;
         member.member = row;
@@ -47,6 +48,14 @@ void RankProgramImpl::request_decision(ComputeOperation& operation) {
     }
     operation.decision_requested = true;
     events.emplace_back(runtime::DecisionNeeded{operation.request.ticket, std::move(request)});
+}
+
+std::uint32_t RankProgramImpl::forward_row_count(const ComputeOperation& operation) const noexcept {
+    const auto decode_rows =
+        operation.mixed ? operation.rows.size() - operation.segments.size() : 0U;
+    return operation.sample_members.size() > decode_rows
+               ? static_cast<std::uint32_t>(operation.sample_members.size() - decode_rows)
+               : 0U;
 }
 
 void RankProgramImpl::project_decode(std::uint32_t batch_value, std::uint32_t width_value,
@@ -115,6 +124,53 @@ void RankProgramImpl::readback_decode(std::uint32_t batch, bool speculative) {
                                bytes, cudaMemcpyDeviceToHost, device.stream()));
 }
 
+// The producing segments of a packed prefill or a mixed execution: gathers their last hidden
+// columns into one plane, projects them and samples one decision row each, writing the tokens at
+// the egress rows [first_row, first_row + count). The configs and sampled positions were bound at
+// the same compact rows when the ingress was prepared.
+void RankProgramImpl::sample_forward_rows(ComputeOperation& operation, std::uint32_t first_row) {
+    auto& frame = resources.frame();
+    const auto decode_rows =
+        operation.mixed ? operation.rows.size() - operation.segments.size() : 0U;
+    std::vector<const execution::SequenceSegment*> producing;
+    for (const auto member : operation.sample_members) {
+        if (member < decode_rows) continue;
+        const auto found =
+            std::find_if(operation.segments.begin(), operation.segments.end(),
+                         [&](const auto& segment) { return segment.row == member; });
+        if (found == operation.segments.end())
+            throw std::logic_error("producing prefill row has no segment");
+        producing.push_back(&*found);
+    }
+    if (producing.empty()) throw std::logic_error("sampled prefill has no producing segment");
+    const auto count = static_cast<std::int32_t>(producing.size());
+    const auto axis   = operation.mixed ? operation.axis_tokens : operation.width;
+    auto hidden = frame.input_view(static_cast<std::int32_t>(axis), 1).hidden;
+    // Gather the last hidden column of every producing segment; the flight's kernels wrote the
+    // whole axis, so the gather is stream-ordered behind them.
+    auto gathered = resources.work().alloc(DType::BF16, {frame.spec.hidden, count});
+    for (std::int32_t j = 0; j < count; ++j) {
+        const auto source =
+            hidden.slice(1, static_cast<std::int32_t>(producing[j]->token_offset +
+                                                      producing[j]->tokens - 1),
+                         1);
+        const auto target = gathered.slice(1, j, 1);
+        CUDA_CHECK(cudaMemcpyAsync(target.data, source.data, target.bytes(),
+                                   cudaMemcpyDeviceToDevice, device.stream()));
+    }
+    const auto vocabulary = execution::dimension(parameters.profile->public_tokens);
+    Tensor logits        = prefix(frame.logits, {frame.spec.output_rows, count});
+    execution::project(gathered, parameters.text.output_head, logits, resources.work(),
+                       device.execution_view());
+    Tensor tokens({static_cast<TokenId*>(frame.output_tokens.data) + first_row,
+                   frame.output_tokens.bytes() - first_row * sizeof(TokenId),
+                   frame.output_tokens.device},
+                  DType::I32, {count});
+    ops::sample(logits, tokens, vocabulary, frame.sampling + first_row,
+                frame.sampling_positions.slice(0, first_row, static_cast<std::uint32_t>(count)),
+                ops::kSamplePurposePrefill, resources.work(), device.execution_view());
+}
+
 void RankProgramImpl::launch_decision(ComputeOperation& operation) {
     auto& frame          = resources.frame();
     const int batch      = static_cast<int>(operation.batch);
@@ -138,18 +194,28 @@ void RankProgramImpl::launch_decision(ComputeOperation& operation) {
     }
     resources.work().reset();
     if (has_decode(operation)) {
+        // The decode rows are the leading decision rows. Producing prefill segments decide after
+        // them without speculative drafts, so a flight that carries them samples eagerly: its rows
+        // join the decode batch behind its single-token stride.
+        const auto decode_rows = static_cast<std::uint32_t>(
+            operation.mixed ? operation.rows.size() - operation.segments.size() : operation.batch);
         if (!operation.projected) {
-            project_decode(operation.batch, operation.width);
+            project_decode(decode_rows, operation.width);
             slot().gpu_timer.end_target();
         }
         const auto phase = operation.speculative ? GraphPhase::Accept : GraphPhase::Sample;
         // A decision bucket pads its batch through the zeroed host row state and the batch-sized
         // readback; an uncovered batch decides through the eager path below.
-        if (slot().graphs && slot().graphs->captured_batch(phase, operation.batch)) {
+        if (!forward_row_count(operation) && slot().graphs &&
+            slot().graphs->captured_batch(phase, operation.batch)) {
             (void)slot().graphs->start(phase, operation.batch, operation.rows.front().main_frontier,
                                 device.execution_view());
         } else {
-            decide_decode(operation.batch, operation.width);
+            decide_decode(decode_rows, operation.width);
+            if (const auto forwards = forward_row_count(operation)) {
+                sample_forward_rows(operation, decode_rows);
+                operation.batch = decode_rows + forwards;
+            }
             readback_decode(operation.batch, operation.speculative);
         }
         slot().gpu_timer.record_result();
@@ -161,6 +227,16 @@ void RankProgramImpl::launch_decision(ComputeOperation& operation) {
         const auto* forward = std::get_if<ForwardWork>(&operation.request.work.operation);
         Tensor hidden;
         std::int32_t purpose = ops::kSamplePurposeDecode;
+        if (forward && operation.packed) {
+            // The producing segments of a packed prefill gather their own decision rows.
+            sample_forward_rows(operation, 0);
+            operation.batch = static_cast<std::uint32_t>(operation.sample_members.size());
+            readback_decode(operation.batch, false);
+            slot().gpu_timer.record_result();
+            slot().result_ready.record(device.stream());
+            operation.stage = ComputeStage::Readback;
+            return;
+        }
         if (forward) {
             if (operation.batch != 1)
                 throw std::logic_error("sampled prefill must contain one input window");

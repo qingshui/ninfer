@@ -23,6 +23,8 @@ std::uint32_t Session::prefill_pack_tokens() const noexcept { return impl_->shap
 
 std::uint32_t Session::mixed_decode_limit() const noexcept { return 0; }
 
+std::uint32_t Session::sample_fork_limit() const noexcept { return 0; }
+
 bool Session::prefill_mixable(SequenceHandle) const { return false; }
 
 std::optional<MixedStart> Session::start_mixed(std::span<const SequenceHandle>,

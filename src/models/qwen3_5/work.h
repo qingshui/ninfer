@@ -39,6 +39,9 @@ struct ExecutionRow {
 struct SamplingInput {
     ResolvedSamplingParameters parameters;
     bool constrained = false;
+    // A final window: its last hidden column carries one decision row of the execution's pending
+    // batch. Non-final windows leave the batch to the decode rows.
+    bool produces_token = false;
 };
 
 struct InputWindow {

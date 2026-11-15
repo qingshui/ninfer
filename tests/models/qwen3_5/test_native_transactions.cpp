@@ -217,10 +217,20 @@ public:
                                     : resume->has_snapshot() ? GenerationRecoveryRoute::Snapshot
                                                              : GenerationRecoveryRoute::Direct;
         const auto target         = resume ? resume->frontier() : 0;
-        require(static_cast<bool>(program_.start_binding(
-                    base, {lane}, source_for(base, resume), resume, resume_kind,
-                    resume_kind == q35::ExecutionUnitKind::Prefill ? 0 : 1)),
-                "request binding could not reserve its first unit");
+        // A penalty-free root completes synchronously: the lane is schedulable when start_binding
+        // returns and no ContextProgress follows (the T05 root-binding contract).
+        const auto reservation    = program_.start_binding(
+            base, {lane}, source_for(base, resume), resume, resume_kind,
+            resume_kind == q35::ExecutionUnitKind::Prefill ? 0 : 1);
+        require(static_cast<bool>(reservation), "request binding could not reserve its first unit");
+        if (reservation.synchronous) {
+            require(!resume, "synchronous binding carried a recovery state");
+            driver_.idle();
+            require(!driver_.poll_context().has_value(),
+                    "synchronous binding published a context operation");
+            last_binding_ = program_.sequences[lane].residency;
+            return program_.sequences[lane].id;
+        }
         auto progress = settle();
         require(progress.published && progress.sequence.has_value() && progress.residency,
                 "binding did not publish a lane");
@@ -1922,12 +1932,23 @@ void shared_capture_alignment(std::shared_ptr<const q35::ModelDefinition> defini
             auto base                       = program.plan_request(std::move(prepared), request);
             for (const bool cancel_capture : {true, false}) {
                 const auto root = program.inspect_source(base, std::nullopt);
-                require(root && static_cast<bool>(program.start_binding(
-                                    base, {0}, *root, nullptr, q35::ExecutionUnitKind::Prefill, 0)),
+                // Penalty-free roots complete synchronously and publish no ContextProgress.
+                const auto reservation =
+                    program.start_binding(base, {0}, *root, nullptr,
+                                          q35::ExecutionUnitKind::Prefill, 0);
+                require(root && static_cast<bool>(reservation),
                         "aligned capture could not bind its source writer");
-                const auto bound = settle();
-                require(bound.sequence.has_value(), "aligned capture source did not publish");
-                const auto original = *bound.sequence;
+                std::optional<q35::SequenceHandle> bound;
+                if (reservation.synchronous) {
+                    driver.idle();
+                    bound = program.sequences[0].id;
+                } else {
+                    const auto published = settle();
+                    require(published.published && published.sequence,
+                            "aligned capture source did not publish");
+                    bound = published.sequence;
+                }
+                const auto original = *bound;
                 const auto step     = advance(original);
                 require(step.processed_prompt_tokens == frontier && step.capture_ready &&
                             step.complete == shared_input,
@@ -2133,6 +2154,192 @@ void replay_sampling_counts(std::shared_ptr<const q35::ModelDefinition> definiti
             "sampling-count fixture leaked Context resources");
 }
 
+// T05 contract: final windows pack with other segments and mix with decode rows, a synchronous
+// root binding publishes no context operation, and a sample fork installs children that share the
+// rested parent's whole-page KV and decode the last prompt token with their own sampling.
+void sample_fork_and_packed_finals(std::shared_ptr<const q35::ModelDefinition> definition,
+                                   std::shared_ptr<const q35::ModelShard> model,
+                                   std::shared_ptr<const q35::execution::ModelProfile> profile,
+                                   ninfer::models::qwen::Frontend& frontend, EngineOptions options) {
+    options.max_context                       = 256;
+    options.max_concurrency                   = 4;
+    options.context_cache.enabled             = false;
+    options.context_cache.host_capacity_bytes = 0;
+    native::NativeRankFixture rank(definition, model, profile, options);
+    q35::detail::SessionImpl program(definition, std::move(rank.session_plan));
+    program.bind_executor(rank.executor());
+    native::EventDriver driver(program, rank);
+    const auto empty = program.physical_usage();
+    const auto stage = [](const char* label) { std::cerr << "T05 stage: " << label << '\n'; };
+
+    const auto plan = [&](std::uint32_t tokens, float penalty) {
+        std::vector<TokenId> ids(tokens, 198);
+        ids.front()                              = 1000;
+        runtime::ResolvedExecutionOptions request;
+        request.requested_output_tokens          = 8;
+        request.sampling.presence_penalty        = penalty;
+        request.sampling.frequency_penalty       = penalty;
+        return program.plan_request(
+            ninfer::models::qwen::PreparedPromptAccess::take(
+                frontend.prepare_tokens(std::move(ids), true)),
+            request);
+    };
+    const auto bind_root = [&](const q35::RequestBasePlan& base, std::uint32_t lane,
+                               bool synchronous_expected) {
+        auto source = program.inspect_source(base, std::nullopt);
+        require(source.has_value(), "fork fixture has no root source");
+        auto reservation = program.start_binding(base, runtime::LaneId{lane}, *source, nullptr,
+                                                 q35::ExecutionUnitKind::Prefill, 0);
+        require(static_cast<bool>(reservation), "root binding did not reserve its lane");
+        require(reservation.synchronous == synchronous_expected,
+                synchronous_expected ? "penalty-free root binding was asynchronous"
+                                     : "penalized root binding completed synchronously");
+        driver.idle();
+        require(!driver.poll_context().has_value(),
+                "synchronous root binding published a context operation");
+        return program.sequences[lane].id;
+    };
+    const auto reserve = [&](std::span<const q35::ExecutionUnit> units) {
+        require(static_cast<bool>(program.reserve_units(units)),
+                "fork fixture could not reserve its execution units");
+    };
+    const auto prefill_window = [&](q35::SequenceHandle sequence, std::uint32_t tokens) {
+        const std::array<q35::ExecutionUnit, 1> units{{{sequence, q35::ExecutionUnitKind::Prefill}}};
+        reserve(units);
+        auto step = driver.prefill(sequence);
+        require(!step.complete && !step.pending && step.processed_prompt_tokens == tokens,
+                "partial prefill did not cover exactly its requested window");
+        driver.idle();
+    };
+
+    // A penalty-free prompt rests its parent at the fork frontier instead of sampling.
+    stage("penalty-free parent");
+    const std::uint32_t prompt = 64;
+    const auto parent_base    = plan(prompt, 0.0F);
+    require(parent_base.fork_frontier() == prompt - 1,
+            "penalty-free request lost its sample fork frontier");
+    require(program.sample_fork_limit() == 4, "sample fork limit does not cover every free lane");
+    const auto parent = bind_root(parent_base, 0, true);
+    prefill_window(parent, prompt - 1);
+    require(!program.start_prefill({&parent, 1}, {}).has_value(),
+            "fork parent admitted a window past its resting frontier");
+    // Forking a parent that has not rested is rejected before any child lane changes.
+    const auto early_base = plan(prompt, 0.0F);
+    const auto early      = bind_root(early_base, 1, true);
+    bool rejected         = false;
+    try {
+        const std::array<runtime::LaneId, 2> early_children{runtime::LaneId{2},
+                                                            runtime::LaneId{3}};
+        (void)program.fork(early, early_children);
+    } catch (const std::logic_error&) { rejected = true; }
+    require(rejected, "fork accepted a parent that did not rest at its frontier");
+    require(driver.abort(early).status == runtime::ConsumeStatus::Consumed,
+            "rejected fork fixture retained its lane");
+
+    // Children share the whole-page prefix and decode the last prompt token each.
+    stage("fork children");
+    const std::array<runtime::LaneId, 2> child_lanes{runtime::LaneId{2}, runtime::LaneId{3}};
+    const auto forked = program.fork(parent, child_lanes);
+    require(forked.reserved && forked.children.size() == 2,
+            "fork did not reserve the requested children");
+    driver.idle();
+    require(!driver.poll_context().has_value(), "fork published a context operation");
+    const std::array<q35::ExecutionUnit, 2> decode_units{
+        {{forked.children[0], q35::ExecutionUnitKind::Decode, 1},
+         {forked.children[1], q35::ExecutionUnitKind::Decode, 1}}};
+    reserve(decode_units);
+    const std::array<q35::SequenceHandle, 2> members{forked.children[0], forked.children[1]};
+    const std::array<runtime::RoundBudget, 2> budgets{
+        {{.generated_tokens_remaining = 1}, {.generated_tokens_remaining = 1}}};
+    auto pending = driver.decode(members, budgets);
+    require(pending.row_count() == 2 && pending.tokens().size() == 2,
+            "fork children did not decode one token each");
+    const std::array<runtime::CommitDecision, 2> terminal{
+        {{.accepted_tokens = 1, .terminal = true}, {.accepted_tokens = 1, .terminal = true}}};
+    const auto committed = driver.commit(std::move(pending), terminal);
+    require(committed.row_count == 2 &&
+                std::all_of(committed.rows.begin(), committed.rows.end(),
+                            [](const auto& row) {
+                                return row.disposition == runtime::CommitDisposition::Finishable;
+                            }),
+            "fork children did not reach a finishable phase");
+    for (const auto child : forked.children) {
+        const auto finished = driver.finish(child);
+        require(finished.status == runtime::ConsumeStatus::Consumed,
+                "fork child did not release its execution resources");
+    }
+    require(driver.abort(parent).status == runtime::ConsumeStatus::Consumed,
+            "fork parent kept its lane after every child finished");
+    require(same_ownership(program.physical_usage(), empty),
+            "sample fork leaked Context resources");
+
+    // Two final windows pack into one prefill; each final segment carries one decision line.
+    stage("packed finals");
+    const std::uint32_t long_prompt = 200, short_prompt = 64;
+    const auto long_base             = plan(long_prompt, 0.5F);
+    const auto short_base            = plan(short_prompt, 0.5F);
+    const auto pack_long             = bind_root(long_base, 0, false);
+    const auto pack_short            = bind_root(short_base, 1, false);
+    prefill_window(pack_long, 128);
+    const std::array<q35::SequenceHandle, 2> pack{pack_long, pack_short};
+    const std::array<q35::ExecutionUnit, 2> pack_units{
+        {{pack_long, q35::ExecutionUnitKind::Prefill},
+         {pack_short, q35::ExecutionUnitKind::Prefill}}};
+    reserve(pack_units);
+    const auto packed = program.start_prefill(pack, {});
+    require(packed.has_value() && packed->segments.size() == 2 &&
+                packed->segments[0].produces_token && packed->segments[1].produces_token,
+            "two final windows did not pack with one decision line each");
+    auto packed_progress = driver.wait<q35::PrefillProgress>(packed->ticket);
+    require(packed_progress.rows.size() == 2 && packed_progress.rows[0].complete &&
+                packed_progress.rows[1].complete,
+            "packed final windows did not complete together");
+    require(packed_progress.rows[0].pending &&
+                packed_progress.rows[0].pending->row_count() == 2 &&
+                !packed_progress.rows[1].pending.has_value(),
+            "packed prefill did not carry one decision line per final segment");
+    const std::array<runtime::CommitDecision, 2> accepted{{{.accepted_tokens = 1},
+                                                            {.accepted_tokens = 1}}};
+    const auto packed_commit = driver.commit(std::move(*packed_progress.rows[0].pending), accepted);
+    require(packed_commit.row_count == 2, "packed prefill commit lost a decision row");
+
+    // A final window mixes with decode rows; the batch carries the decode row first, then the
+    // producing segment.
+    stage("mixed final window");
+    const auto mixed_base = plan(long_prompt, 0.5F);
+    const auto mixed_seq  = bind_root(mixed_base, 2, false);
+    prefill_window(mixed_seq, 128);
+    const std::array<q35::ExecutionUnit, 2> mixed_units{
+        {{mixed_seq, q35::ExecutionUnitKind::Prefill},
+         {pack_short, q35::ExecutionUnitKind::Decode, 1}}};
+    reserve(mixed_units);
+    const std::array<q35::SequenceHandle, 1> mixed_prefill{mixed_seq};
+    const std::array<q35::SequenceHandle, 1> mixed_decode{pack_short};
+    const std::array<runtime::RoundBudget, 1> mixed_budgets{{{.generated_tokens_remaining = 1}}};
+    const auto mixed =
+        program.start_mixed(mixed_prefill, {}, mixed_decode, mixed_budgets, {});
+    require(mixed.has_value() && mixed->segments.size() == 1 &&
+                mixed->segments[0].produces_token && mixed->decode_rows == 1,
+            "final window did not mix with decode rows");
+    auto mixed_progress = driver.wait<q35::MixedProgress>(mixed->ticket);
+    require(mixed_progress.prefill.rows.size() == 1 && mixed_progress.prefill.rows[0].complete,
+            "mixed prefill segment did not complete");
+    require(mixed_progress.decode.row_count() == 2,
+            "mixed batch lost the producing segment or the decode row");
+    const auto mixed_commit =
+        driver.commit(std::move(mixed_progress.decode),
+                      std::span<const runtime::CommitDecision>{terminal});
+    require(mixed_commit.row_count == 2, "mixed commit lost a decision row");
+    for (const auto sequence : {mixed_seq, pack_short}) {
+        require(driver.finish(sequence).status == runtime::ConsumeStatus::Consumed,
+                "mixed execution did not finish its sequences");
+    }
+    require(driver.abort(pack_long).status == runtime::ConsumeStatus::Consumed,
+            "packed fixture retained an idle lane");
+    require(same_ownership(program.physical_usage(), empty),
+            "packed finals or mixed execution leaked Context resources");
+}
+
 void fresh_scoring(const char* artifact) {
     EngineOptions options;
     options.purpose        = EnginePurpose::CausalScoring;
@@ -2243,30 +2450,39 @@ int main(int argc, char** argv) {
         options.context_cache.host_capacity_bytes =
             4 * describe_context_pool(capacity_plan.capacity_plan().records).block_bytes;
         {
+            const auto stage = [](const char* label) {
+                std::cerr << "fixture stage: " << label << '\n';
+            };
+            stage("open");
             SessionFixture instance(definition, model, profile, options, {.retained_states = 4});
             Fixture fixture(instance.rank, instance.session, frontend);
-            fixture.capture_without_metadata();
-            fixture.capture_opportunities();
-            fixture.input_replay_lifecycle();
-            fixture.active_input_zero_growth_binding();
-            fixture.consecutive_decode_terminal();
-            fixture.rewrite_segments_share_prefill_unit();
-            fixture.replay_carries_independent_input();
-            fixture.retained_input_host_suffix();
-            fixture.retired_host_image_preserves_input();
-            fixture.raw_identity_opt_out();
-            fixture.cancel_gpu_binding();
-            fixture.cancel_host_restore();
-            fixture.replay_pause_and_resume();
-            fixture.pause_before_first_prefill_chunk();
-            fixture.independent_physical_demotions();
-            fixture.demotion_holder_changes();
-            fixture.release_set_union();
-            fixture.physical_facts();
-            fixture.grammar_row_failure();
-            fixture.cancel_and_destroy_paused_prefill();
+            auto run = [&](const char* label, void (Fixture::*case_)()) {
+                stage(label);
+                (fixture.*case_)();
+            };
+            run("capture_without_metadata", &Fixture::capture_without_metadata);
+            run("capture_opportunities", &Fixture::capture_opportunities);
+            run("input_replay_lifecycle", &Fixture::input_replay_lifecycle);
+            run("active_input_zero_growth_binding", &Fixture::active_input_zero_growth_binding);
+            run("consecutive_decode_terminal", &Fixture::consecutive_decode_terminal);
+            run("rewrite_segments_share_prefill_unit", &Fixture::rewrite_segments_share_prefill_unit);
+            run("replay_carries_independent_input", &Fixture::replay_carries_independent_input);
+            run("retained_input_host_suffix", &Fixture::retained_input_host_suffix);
+            run("retired_host_image_preserves_input", &Fixture::retired_host_image_preserves_input);
+            run("raw_identity_opt_out", &Fixture::raw_identity_opt_out);
+            run("cancel_gpu_binding", &Fixture::cancel_gpu_binding);
+            run("cancel_host_restore", &Fixture::cancel_host_restore);
+            run("replay_pause_and_resume", &Fixture::replay_pause_and_resume);
+            run("pause_before_first_prefill_chunk", &Fixture::pause_before_first_prefill_chunk);
+            run("independent_physical_demotions", &Fixture::independent_physical_demotions);
+            run("demotion_holder_changes", &Fixture::demotion_holder_changes);
+            run("release_set_union", &Fixture::release_set_union);
+            run("physical_facts", &Fixture::physical_facts);
+            run("grammar_row_failure", &Fixture::grammar_row_failure);
+            run("cancel_and_destroy_paused_prefill", &Fixture::cancel_and_destroy_paused_prefill);
         }
         {
+            std::cerr << "fixture stage: rewind block\n";
             SessionFixture instance(definition, model, profile, options, {.retained_states = 2});
             Fixture fixture(instance.rank, instance.session, frontend);
             fixture.rewind_binding_retirement();
@@ -2278,15 +2494,19 @@ int main(int argc, char** argv) {
             fixture.capture_retry_after_reclaim();
         }
         {
+            std::cerr << "fixture stage: bf16 geometry\n";
             auto geometry     = options;
             geometry.kv_cache = KvCacheStorage::BFloat16;
             SessionFixture instance(definition, model, profile, geometry);
             Fixture fixture(instance.rank, instance.session, frontend);
             fixture.capped_prefill_matches_uncapped(instance.rank);
         }
+        std::cerr << "fixture stage: shared_capture_alignment\n";
         shared_capture_alignment(definition, model, profile, frontend, options);
+        std::cerr << "fixture stage: replay_sampling_counts\n";
         replay_sampling_counts(definition, model, profile, frontend, options);
         if (backend == SpeculativeBackend::None) {
+            sample_fork_and_packed_finals(definition, model, profile, frontend, options);
             model.reset();
             fresh_scoring(artifact);
         }

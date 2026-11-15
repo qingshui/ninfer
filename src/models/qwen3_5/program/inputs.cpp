@@ -82,10 +82,20 @@ void RankProgramImpl::upload_positions(std::uint32_t width, std::uint32_t batch)
 void RankProgramImpl::initialize_forward(ComputeOperation& operation, const ForwardWork& work) {
     if (operation.rows.empty()) {
         operation.rows     = work.rows;
-        operation.sampling = work.sampling;
         operation.batch    = static_cast<std::uint32_t>(work.rows.size());
         operation.result   = Result{ForwardResult{}};
         operation.packed   = work.purpose == ForwardPurpose::Prefill && work.rows.size() > 1;
+        if (operation.packed) {
+            // The decision rows of a packed prefill are its producing segments, in segment order.
+            for (std::size_t i = 0; i < work.rows.size(); ++i)
+                if (work.sampling[i].produces_token) {
+                    operation.sampling.push_back(work.sampling[i]);
+                    operation.sample_members.push_back(static_cast<std::uint32_t>(i));
+                }
+        } else {
+            operation.sampling = work.sampling;
+            if (work.sample != SamplePurpose::None) operation.sample_members.assign(1, 0);
+        }
     }
     if (operation.packed) return initialize_packed_forward(operation, work);
     const auto index   = operation.forward_row;
@@ -184,7 +194,9 @@ void RankProgramImpl::initialize_forward(ComputeOperation& operation, const Forw
 }
 
 // Rows of a packed prefill are independent B=1 windows laid out back to back on one token axis.
-// Compact row i of the ingress arrays describes segment i; execution reads them by segment.
+// Compact row i of the ingress arrays describes segment i; execution reads them by segment. A
+// producing segment also carries one decision row: its sampling config and sampled position sit at
+// the compact rows [0, produced) in segment order.
 void RankProgramImpl::initialize_packed_forward(ComputeOperation& operation,
                                                 const ForwardWork& work) {
     auto& frame         = resources.frame();
@@ -192,7 +204,8 @@ void RankProgramImpl::initialize_packed_forward(ComputeOperation& operation,
     frame.clear_host_ingress();
     operation.segments.clear();
     operation.segments.reserve(count);
-    std::uint32_t total = 0;
+    std::uint32_t total     = 0;
+    std::uint32_t producing = 0;
     for (std::uint32_t i = 0; i < count; ++i) {
         const auto& row    = work.rows[i];
         const auto columns = static_cast<std::uint32_t>(work.inputs[i].tokens.size());
@@ -202,6 +215,13 @@ void RankProgramImpl::initialize_packed_forward(ComputeOperation& operation,
             frame.host_ingress->previous_rope[axis * count + i] = row.tail_rope_position[axis];
         operation.segments.push_back(
             {i, total, columns, row.state_offsets.source, row.state_offsets.destination});
+        if (work.sample != SamplePurpose::None && work.sampling[i].produces_token) {
+            frame.host_ingress->sampling[producing] =
+                sampling_config(row, work.sampling[i], producing);
+            frame.host_ingress->sampling_positions[producing] =
+                static_cast<std::int32_t>(row.main_frontier + columns);
+            ++producing;
+        }
         total += columns;
     }
     upload_ingress();
@@ -226,26 +246,38 @@ void RankProgramImpl::initialize_packed_forward(ComputeOperation& operation,
 }
 
 // The supported extent of packed prefill is owned here: one flat token axis of bounded total
-// length, whole windows only, no sampling, vision or draft feature state.
+// length, whole windows only, no vision or draft feature state. Sampling admits final windows
+// only: every decision row names a producing segment and the sampled rows stay inside the batch
+// capacity.
 void RankProgramImpl::validate_packed_forward(const ForwardWork& work) const {
     const auto& spec = resources.frame().spec;
-    if (work.sample != SamplePurpose::None || resources.dflash ||
-        work.rows.size() > spec.pack_segments)
+    if ((work.sample != SamplePurpose::None &&
+         work.sample != SamplePurpose::FirstToken) ||
+        resources.dflash || work.rows.size() > spec.pack_segments)
         throw std::invalid_argument("Qwen3.5 packed prefill has unsupported membership");
     std::uint64_t total = 0;
-    for (const auto& input : work.inputs) {
+    std::uint32_t producing = 0;
+    for (std::size_t i = 0; i < work.inputs.size(); ++i) {
+        const auto& input = work.inputs[i];
         if (input.tokens.empty() || input.visual || !input.execution_splits.empty())
             throw std::invalid_argument("Qwen3.5 packed prefill window cannot share an execution");
+        if (work.sampling[i].produces_token) ++producing;
         total += input.tokens.size();
     }
     if (total > spec.pack_tokens)
         throw std::invalid_argument("Qwen3.5 packed prefill exceeds its token capacity");
+    if (work.sample != SamplePurpose::None &&
+        (producing == 0 || producing > spec.batch_capacity))
+        throw std::invalid_argument("Qwen3.5 sampled prefill has unsupported membership");
 }
 
 void RankProgramImpl::initialize_decode(ComputeOperation& operation, const DecodeWork& work) {
     auto& frame         = resources.frame();
     frame.clear_host_ingress();
     operation.batch     = static_cast<std::uint32_t>(work.rows.size());
+    // Every decode row carries one decision row of its own.
+    operation.sample_members.resize(operation.batch);
+    for (std::uint32_t i = 0; i < operation.batch; ++i) operation.sample_members[i] = i;
     for (std::size_t i = 0; i < work.rows.size(); ++i) {
         const auto& row = work.rows[i];
         operation.rows.push_back(row.binding);
@@ -331,7 +363,8 @@ void RankProgramImpl::initialize_mixed(ComputeOperation& operation, const MixedW
     };
     operation.segments.clear();
     operation.segments.reserve(count);
-    std::uint32_t total = 0;
+    std::uint32_t total     = 0;
+    std::uint32_t producing = 0;
     for (std::uint32_t i = 0; i < count; ++i) {
         const auto& row    = work.prefill.rows[i];
         const auto columns = static_cast<std::uint32_t>(work.prefill.inputs[i].tokens.size());
@@ -341,8 +374,22 @@ void RankProgramImpl::initialize_mixed(ComputeOperation& operation, const MixedW
         for (int axis = 0; axis < 3; ++axis) previous_rope(i, axis) = row.tail_rope_position[axis];
         operation.segments.push_back(
             {rows + i, total, columns, row.state_offsets.source, row.state_offsets.destination});
+        // A final segment carries one decision row behind the decode rows: its sampling config and
+        // sampled position sit at the compact rows [rows + produced, rows + count of finals).
+        if (work.prefill.sampling[i].produces_token) {
+            frame.host_ingress->sampling[rows + producing] =
+                sampling_config(row, work.prefill.sampling[i], rows + producing);
+            frame.host_ingress->sampling_positions[rows + producing] =
+                static_cast<std::int32_t>(row.main_frontier + columns);
+            operation.sampling.push_back(work.prefill.sampling[i]);
+            operation.sample_members.push_back(rows + i);
+            ++producing;
+        }
         total += columns;
     }
+    // The decision rows are the decode rows followed by the producing segments, in row order.
+    operation.sample_members.insert(operation.sample_members.begin(), rows, 0);
+    for (std::uint32_t row = 0; row < rows; ++row) operation.sample_members[row] = row;
     operation.prefill_tokens = total;
     operation.axis_tokens    = total + operation.width * rows;
     operation.input_embeddings.reset();
@@ -390,8 +437,10 @@ void RankProgramImpl::initialize_mixed(ComputeOperation& operation, const MixedW
     upload_input(operation.axis_tokens, 1);
 }
 
-// The supported extent of a mixed execution is owned here: non-final text-only windows packed as
-// in a packed prefill, followed by unconstrained decode rows, within the planned token axis.
+// The supported extent of a mixed execution is owned here: text-only windows packed as in a
+// packed prefill, followed by unconstrained decode rows, within the planned token axis. A final
+// window carries one decision row behind the decode rows, but only without speculative drafts:
+// their verify block keeps the batch's wider row stride.
 void RankProgramImpl::validate_mixed(const MixedWork& work) const {
     const auto& spec = resources.frame().spec;
     if (spec.mixed_tokens == 0 || resources.dflash ||
@@ -399,20 +448,32 @@ void RankProgramImpl::validate_mixed(const MixedWork& work) const {
         throw std::invalid_argument("Qwen3.5 mixed execution is not prepared");
     const auto& prefill = work.prefill;
     const auto& decode  = work.decode;
-    if (prefill.purpose != ForwardPurpose::Prefill || prefill.sample != SamplePurpose::None ||
+    if (prefill.purpose != ForwardPurpose::Prefill ||
+        (prefill.sample != SamplePurpose::None &&
+         prefill.sample != SamplePurpose::FirstToken) ||
         !prefill.control_last_tokens.empty() || prefill.rows.empty() ||
         prefill.rows.size() > spec.pack_segments || prefill.inputs.size() != prefill.rows.size() ||
         decode.rows.empty() || decode.rows.size() > spec.mixed_decode_rows)
         throw std::invalid_argument("Qwen3.5 mixed execution has unsupported membership");
     std::uint64_t total = 0;
+    std::uint32_t producing = 0;
     for (std::size_t i = 0; i < prefill.rows.size(); ++i) {
         const auto& input = prefill.inputs[i];
         if (input.tokens.empty() || input.visual || !input.execution_splits.empty() ||
             input.tokens.size() > prefill_chunk ||
             prefill.rows[i].main_frontier + input.tokens.size() > capacity)
             throw std::invalid_argument("Qwen3.5 mixed prefill window cannot share an execution");
+        if (prefill.sampling[i].produces_token) {
+            if (backend != SpeculativeBackend::None)
+                throw std::invalid_argument(
+                    "Qwen3.5 speculative mixed execution cannot sample a prefill segment");
+            ++producing;
+        }
         total += input.tokens.size();
     }
+    if (prefill.sample != SamplePurpose::None &&
+        (producing == 0 || producing > spec.batch_capacity))
+        throw std::invalid_argument("Qwen3.5 sampled mixed execution has unsupported membership");
     for (const auto& row : decode.rows)
         if (row.sampling.constrained)
             throw std::invalid_argument("Qwen3.5 mixed decode rows cannot be constrained");

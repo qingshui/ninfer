@@ -117,6 +117,15 @@ RequestBasePlan SessionImpl::plan_request(qwen::PreparedPromptData&& prompt,
         }
         previous = frontier;
     }
+    // A sample fork splits a text-only prompt with penalty-free sampling and no masked draft
+    // state: the parent prefills through prompt_tokens - 1, each child decodes the last prompt
+    // token with its own sampling, and the parent's whole-page KV is shared. Vision, penalty
+    // counts and masked draft windows keep the ordinary single-sequence path.
+    if (!base->vision && !prompt.identity.rewrite_checkpoint && base->summary.prompt_tokens >= 2 &&
+        base->sampling.presence_penalty == 0.0F && base->sampling.frequency_penalty == 0.0F &&
+        !is_masked_draft_backend(speculative_backend) && !causal_scoring) {
+        base->fork_frontier = base->summary.prompt_tokens - 1;
+    }
     base->prompt = std::make_shared<const qwen::PreparedPromptData>(std::move(prompt));
     if (base->summary.publish_continuation) {
         const auto& prepared = *base->prompt;
@@ -168,6 +177,13 @@ std::uint32_t bounded_end(std::uint32_t begin, std::uint32_t end, std::uint32_t 
 bool is_window_unit(ExecutionUnitKind kind) noexcept {
     return kind == ExecutionUnitKind::Prefill || kind == ExecutionUnitKind::Replay;
 }
+// The prompt frontier a forking request's prefill stops at: the fork point when the request
+// still has prompt work left to share, otherwise the whole prompt.
+std::uint32_t prefill_target(const RequestControl& request,
+                             const runtime::RequestPlanSummary& summary) {
+    const auto fork = request.base->fork_frontier;
+    return fork && request.prefill->base < fork ? fork : summary.prompt_tokens;
+}
 } // namespace
 
 UnitDemand SessionImpl::prefill_unit(std::uint32_t prompt, std::uint32_t cursor) const {
@@ -190,7 +206,8 @@ UnitDemand SessionImpl::next_unit(const SequenceState& state, const RequestContr
             throw std::logic_error("prefill demand requires a prefill cursor");
         out.main_frontier =
             window_end(state, request, request.prefill->cursor,
-                       bounded_end(request.prefill->cursor, request.prefill->prompt_tokens, tokens),
+                       bounded_end(request.prefill->cursor,
+                                   prefill_target(request, request.base->summary), tokens),
                        vision::Window{});
         break;
     case ExecutionUnitKind::Replay:

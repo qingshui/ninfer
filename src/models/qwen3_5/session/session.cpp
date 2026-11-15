@@ -62,6 +62,10 @@ RequestBasePlan::prefix_shortlist_key(std::uint32_t frontier) const noexcept {
     };
 }
 
+std::uint32_t RequestBasePlan::fork_frontier() const noexcept {
+    return impl_ != nullptr ? impl_->fork_frontier : 0;
+}
+
 ResumeState::ResumeState(std::unique_ptr<detail::ResumeStateImpl> impl) noexcept
     : impl_(std::move(impl)) {}
 
@@ -380,6 +384,13 @@ std::uint32_t Session::prefill_pack_limit() const noexcept { return impl_->prefi
 
 std::uint32_t Session::prefill_pack_tokens() const noexcept { return impl_->prefill_pack_tokens(); }
 
+std::uint32_t Session::sample_fork_limit() const noexcept { return impl_->sample_fork_limit(); }
+
+ForkResult Session::fork(SequenceHandle parent, std::span<const runtime::LaneId> children) {
+    impl_->note_context_change();
+    return impl_->fork(parent, children);
+}
+
 std::optional<PrefillStart> Session::start_prefill(std::span<const SequenceHandle> sequences,
                                                    std::span<const bool> constrained) {
     const OperationWatch watch(*impl_);
@@ -510,6 +521,7 @@ SessionImpl::SessionImpl(std::shared_ptr<const ModelDefinition> definition_in, S
         plan.pack_tokens < plan.prefill_chunk || plan.pack_segments == 0 ||
         plan.pack_segments > kPrefillPackSegmentLimit)
         throw std::invalid_argument("Session preparation is incomplete");
+    deferred_bindings.resize(plan.max_concurrency);
     checkpoints.configure(Checkpoints::capacity_for_metadata(directory.metadata_budget().limit()),
                           directory.metadata_budget(), &recovery_index);
     if (!causal_scoring) {

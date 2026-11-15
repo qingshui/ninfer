@@ -42,7 +42,7 @@ inline constexpr std::uint32_t kPrefillPackSegmentLimit = 64;
                                                                    : kResidentPrefillChunk;
     const auto room = options.max_context / kPrefillChunkAlignment * kPrefillChunkAlignment;
     const auto chunk = std::min(base, room);
-    if (chunk == 0)
+    if (chunk == 0 || chunk % kPrefillChunkAlignment != 0)
         throw std::invalid_argument("prefill_chunk must be a nonzero multiple of " +
                                     std::to_string(kPrefillChunkAlignment));
     return chunk;

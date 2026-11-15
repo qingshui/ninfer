@@ -75,6 +75,10 @@ struct ComputeOperation {
     // Dead-position bitmap of constrained decode rows; one entry per lane of the resolved
     // concurrency.
     std::vector<std::uint32_t> dead_positions;
+    // Operation row of every decision row of the pending batch, in row order: the identity of a
+    // decode flight, the decode rows of a mixed one followed by its final segments, and the
+    // producing segments of a packed prefill. Empty until sampling begins.
+    std::vector<std::uint32_t> sample_members;
     std::optional<runtime::DecisionInput> decision;
     std::optional<Commit> commit;
     std::optional<Result> result;
@@ -172,6 +176,11 @@ public:
     // the summed prefill length for a mixed one.
     void project_decode(std::uint32_t batch, std::uint32_t width, std::uint32_t column = 0);
     void decide_decode(std::uint32_t batch, std::uint32_t width);
+    // Samples the producing segments of a packed prefill or a mixed execution: gathers their
+    // last hidden columns, projects them and samples one decision row each into the egress rows
+    // [first_row, first_row + count).
+    void sample_forward_rows(ComputeOperation&, std::uint32_t first_row);
+    [[nodiscard]] std::uint32_t forward_row_count(const ComputeOperation&) const noexcept;
     void readback_decode(std::uint32_t batch, bool speculative);
     GraphPreparationSample initialize_graphs(GraphPreparationMode = GraphPreparationMode::Complete);
     void prepare_frame_graphs(GraphPreparation&);

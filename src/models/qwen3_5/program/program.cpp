@@ -269,15 +269,20 @@ void RankProgramImpl::validate_decision(runtime::ExecutionTicket ticket,
         throw std::logic_error("Qwen3.5 decision input does not match the pending stage");
     std::vector<std::uint8_t> seen(max_concurrency, 0);
     const auto words = (parameters.profile->public_tokens + 31) / 32;
+    // One decision row per member of the pending batch; producing prefill segments decide behind
+    // the decode rows without drafts.
+    const auto rows = op.sample_members.empty()
+                          ? op.batch
+                          : static_cast<std::uint32_t>(op.sample_members.size());
     for (const auto& row : input.rows) {
-        if (row.member >= op.batch || seen[row.member] || !op.sampling[row.member].constrained ||
+        if (row.member >= rows || seen[row.member] || !op.sampling[row.member].constrained ||
             row.positions !=
                 static_cast<std::uint32_t>(frame.host_ingress->extents[row.member] + 1) ||
             row.words.size() != words * row.positions || (row.dead_positions >> row.positions) != 0)
             throw std::invalid_argument("Qwen3.5 decision mask has invalid shape or membership");
         seen[row.member] = true;
     }
-    for (std::uint32_t row = 0; row < op.batch; ++row) {
+    for (std::uint32_t row = 0; row < rows && row < op.sampling.size(); ++row) {
         if (seen[row] != op.sampling[row].constrained)
             throw std::invalid_argument("Qwen3.5 decision omitted a constrained row");
     }

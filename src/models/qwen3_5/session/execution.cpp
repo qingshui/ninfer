@@ -14,7 +14,7 @@ SessionImpl::submit_execution(Execution&& pending, runtime::ExecutionReservation
     auto& current = *slot;
     try {
         current.preparation->prepare_actions();
-        work.context      = current.preparation->actions();
+        adopt_deferred_bindings(current, work);
         const auto ticket = executor().submit(std::move(reservation), std::move(work));
         current.ticket    = ticket;
         if (current.vision_id) vision_window.submitted(current.vision_id, ticket);
@@ -24,6 +24,50 @@ SessionImpl::submit_execution(Execution&& pending, runtime::ExecutionReservation
         executor().fail(error.what());
         throw;
     }
+}
+
+// A lane installed without a context operation defers its device work to the stream order of its
+// first execution: the deferred actions run ahead of the flight's own context actions on the
+// same compute stream, so the flight's kernels observe the installed lane. The deferred
+// transactions complete and publish with the flight's retirement.
+void SessionImpl::adopt_deferred_bindings(Execution& current, Work& work) {
+    std::vector<context::ContextAction> merged;
+    for (const auto handle : current.members) {
+        auto& deferred = deferred_bindings[lane(handle)];
+        if (!deferred) continue;
+        merged.insert(merged.end(), deferred->actions.operations.begin(),
+                      deferred->actions.operations.end());
+        deferred->transaction.mark_submitted();
+    }
+    const auto& actions = current.preparation->actions();
+    if (merged.empty()) {
+        work.context = actions;
+        return;
+    }
+    merged.insert(merged.end(), actions.operations.begin(), actions.operations.end());
+    work.context.operations = std::move(merged);
+}
+
+void SessionImpl::publish_deferred_binding(DeferredBinding& deferred) noexcept {
+    try {
+        deferred.transaction.mark_completed();
+        deferred.transaction.publish();
+    } catch (...) { std::terminate(); }
+}
+
+void SessionImpl::discard_deferred_binding(std::uint32_t lane) noexcept {
+    auto& deferred = deferred_bindings[lane];
+    if (!deferred) return;
+    try {
+        if (!deferred->transaction.in_flight()) deferred->transaction.discard();
+    } catch (...) { std::terminate(); }
+    deferred.reset();
+}
+
+std::uint32_t SessionImpl::sample_fork_limit() const noexcept {
+    // Fork children occupy one lane each; their KV tails, State records and lane slots are
+    // assessed per child when fork runs.
+    return max_concurrency;
 }
 
 std::uint32_t SessionImpl::prefill_pack_limit() const noexcept { return plan.pack_segments; }
@@ -51,7 +95,8 @@ std::optional<PrefillStart> SessionImpl::start_prefill(std::span<const SequenceH
         if ((first.base && first.base->vision) || is_masked_draft_backend(speculative_backend))
             return {};
     }
-    const auto considered = std::min<std::size_t>(candidates.size(), prefill_pack_limit());
+    const auto considered =
+        std::min<std::size_t>({candidates.size(), prefill_pack_limit(), max_concurrency});
     for (std::size_t i = 0; i < considered; ++i) {
         if (std::find(candidates.begin(), candidates.begin() + i, candidates[i]) !=
             candidates.begin() + i)
@@ -71,6 +116,7 @@ std::optional<PrefillStart> SessionImpl::start_prefill(std::span<const SequenceH
         std::uint32_t begin = 0;
         std::uint32_t end   = 0;
         bool constrained    = false;
+        bool produces       = false;
     };
 
     std::vector<Segment> segments;
@@ -87,32 +133,39 @@ std::optional<PrefillStart> SessionImpl::start_prefill(std::span<const SequenceH
                 state, request, begin,
                 std::min(request.permit->main_frontier, request.base->summary.prompt_tokens),
                 vision_window);
-            // A window that reaches the prompt end produces the first token. Vision and DFlash
-            // windows carry state that only a single-row execution owns, and so does a window
-            // that crosses a prefix execution boundary. The summed window length of a pack stays
-            // within the planned token axis.
+            // A window that reaches the prompt end produces the first token and packs with any
+            // other segment. Vision and DFlash windows carry state that only a single-row
+            // execution owns, and so does a window that crosses a prefix execution boundary. The
+            // summed window length of a pack stays within the planned token axis.
             const bool final_window = end == request.base->summary.prompt_tokens;
-            const bool alone        = final_window || request.base->vision ||
+            const bool alone        = request.base->vision ||
                                is_masked_draft_backend(speculative_backend) ||
                                crosses_execution_boundary(state, begin, end);
-            if (i && (alone || end == begin || packed_tokens + (end - begin) > plan.pack_tokens))
-                break;
-            segments.push_back({l, begin, end, !constrained.empty() && constrained[i]});
+            // A window that reached its unit bound (a fork parent rests at its fork frontier)
+            // carries nothing; admission stops there and leaves the lane's unit to the caller.
+            if (end == begin) break;
+            if (i && (alone || packed_tokens + (end - begin) > plan.pack_tokens)) break;
+            segments.push_back({l, begin, end, !constrained.empty() && constrained[i],
+                                final_window});
             packed_tokens += end - begin;
-            final_segment = final_window;
+            final_segment = final_segment || final_window;
             if (alone) break;
         }
+        if (segments.empty()) return {};
         Execution pending{.kind = OperationKind::Prefill};
         pending.preparation = std::make_unique<context::ContextTransaction>(directory);
         ForwardWork forward;
         forward.purpose = ForwardPurpose::Prefill;
         for (std::size_t i = 0; i < segments.size(); ++i)
             append_prefill_row(pending, forward, candidates[i], segments[i].begin, segments[i].end,
-                               segments[i].constrained);
+                               segments[i].constrained, segments[i].produces);
         forward.sample    = final_segment ? SamplePurpose::FirstToken : SamplePurpose::None;
         const auto ticket = submit_execution(std::move(pending), std::move(*reservation),
                                              Work{.operation = std::move(forward)});
-        return PrefillStart{*ticket, static_cast<std::uint32_t>(segments.size())};
+        PrefillStart start;
+        start.ticket = *ticket;
+        for (const auto& segment : segments) start.segments.push_back({segment.produces});
+        return start;
     } catch (const std::exception& error) {
         executor().fail(error.what());
         throw;
@@ -121,10 +174,11 @@ std::optional<PrefillStart> SessionImpl::start_prefill(std::span<const SequenceH
 
 void SessionImpl::append_prefill_row(Execution& pending, ForwardWork& forward,
                                      SequenceHandle handle, std::uint32_t begin, std::uint32_t end,
-                                     bool constrained) {
+                                     bool constrained, bool produces_token) {
     auto& state   = sequences[lane(handle)];
     auto& request = requests[state.lane];
     pending.members.push_back(handle);
+    pending.producing.push_back(produces_token);
     pending.bases.push_back(state.continuation);
     pending.columns.push_back(end - begin);
     ensure_sequence_kv_mapped(state, end,
@@ -136,7 +190,7 @@ void SessionImpl::append_prefill_row(Execution& pending, ForwardWork& forward,
     forward.inputs.push_back(input_window(state, begin, end));
     forward.inputs.back().visual = prepare_visual(state, begin, end);
     if (forward.inputs.back().visual) pending.vision_id = forward.inputs.back().visual->window.id;
-    forward.sampling.push_back({request.sampling_host, constrained});
+    forward.sampling.push_back({request.sampling_host, constrained, produces_token});
 }
 
 void SessionImpl::append_decode_row(Execution& pending, DecodeWork& decode, SequenceHandle handle,
@@ -154,6 +208,7 @@ void SessionImpl::append_decode_row(Execution& pending, DecodeWork& decode, Sequ
                        : std::min({draft_window, budget.generated_tokens_remaining - 1,
                                    capacity - f - 1});
     pending.members.push_back(handle);
+    pending.producing.push_back(true);
     pending.bases.push_back(state.continuation);
     pending.columns.push_back(k + 1);
     ensure_sequence_kv_mapped(state, f + k + 1,
@@ -170,10 +225,12 @@ void SessionImpl::append_decode_row(Execution& pending, DecodeWork& decode, Sequ
 
 std::uint32_t SessionImpl::mixed_decode_limit() const noexcept { return plan.mixed_decode_rows; }
 
-// A window shares an execution with decode rows when it is a non-final, text-only slice of one
-// prefix execution segment. The permit bounds the window when the sequence holds one; otherwise
-// the window is the one the next permit would grant. Capture boundaries only shorten a window, so
-// a window judged mixable here stays mixable once start_mixed has prepared them.
+// A window shares an execution with decode rows when it is a text-only slice of one prefix
+// execution segment. A window that reaches the prompt end produces the sequence's first token;
+// its row joins the decode batch only without speculative drafts, which keep the batch's wider
+// row stride. The permit bounds the window when the sequence holds one; otherwise the window is
+// the one the next permit would grant. Capture boundaries only shorten a window, so a window
+// judged mixable here stays mixable once start_mixed has prepared them.
 std::optional<std::uint32_t> SessionImpl::mixable_end(const SequenceState& state,
                                                       const RequestControl& request) const {
     if (!plan.mixed_decode_rows || request.lifecycle != Lifecycle::Prefilling || !request.prefill ||
@@ -185,7 +242,8 @@ std::optional<std::uint32_t> SessionImpl::mixable_end(const SequenceState& state
                                    request.permit ? std::min(request.permit->main_frontier, prompt)
                                                   : prompt,
                                    vision_window);
-    if (end <= begin || end == prompt || crosses_execution_boundary(state, begin, end)) return {};
+    if (end <= begin || crosses_execution_boundary(state, begin, end)) return {};
+    if (end == prompt && speculative_backend != SpeculativeBackend::None) return {};
     return end;
 }
 
@@ -212,8 +270,14 @@ SessionImpl::start_mixed(std::span<const SequenceHandle> prefill,
     if (!rows) {
         const auto start = start_prefill(prefill, prefill_constrained);
         if (!start) return {};
-        return MixedStart{start->ticket, start->segments, 0};
+        MixedStart mixed;
+        mixed.ticket    = start->ticket;
+        mixed.segments = std::move(start->segments);
+        return mixed;
     }
+    if (decode.size() > max_concurrency ||
+        prefill.size() > max_concurrency)
+        throw std::invalid_argument("mixed membership is invalid");
     const auto considered = std::min<std::size_t>(prefill.size(), prefill_pack_limit());
     for (std::size_t i = 0; i < considered; ++i) {
         if (std::find(prefill.begin(), prefill.begin() + i, prefill[i]) != prefill.begin() + i)
@@ -242,39 +306,52 @@ SessionImpl::start_mixed(std::span<const SequenceHandle> prefill,
     struct Segment {
         std::uint32_t begin = 0;
         std::uint32_t end   = 0;
+        bool produces       = false;
     };
 
     try {
         std::vector<Segment> segments;
         std::uint32_t packed_tokens = 0;
+        bool final_segment          = false;
         for (std::size_t i = 0; i < considered; ++i) {
             const auto l = lane(prefill[i]);
             prepare_capture_boundary(l);
-            const auto end = mixable_end(sequences[l], requests[l]);
+            const auto& request = requests[l];
+            const auto end      = mixable_end(sequences[l], requests[l]);
             if (!end) break;
             const auto begin = sequences[l].continuation.metadata.execution_frontier;
             if (i && packed_tokens + (*end - begin) > plan.pack_tokens) break;
-            segments.push_back({begin, *end});
+            const bool produces = *end == request.base->summary.prompt_tokens;
+            segments.push_back({begin, *end, produces});
             packed_tokens += *end - begin;
+            final_segment = final_segment || produces;
         }
         if (segments.empty())
             throw std::logic_error("mixed execution admitted no prefill segment");
+        // Segments and decode rows bind one ingress row each; the membership stays inside the
+        // lane tables.
+        if (rows + segments.size() > max_concurrency)
+            throw std::logic_error("mixed execution exceeds its lane capacity");
         Execution pending{.kind = OperationKind::Mixed};
         pending.preparation = std::make_unique<context::ContextTransaction>(directory);
         MixedWork work;
         work.prefill.purpose = ForwardPurpose::Prefill;
-        work.prefill.sample  = SamplePurpose::None;
+        work.prefill.sample  = final_segment ? SamplePurpose::FirstToken : SamplePurpose::None;
         for (std::size_t i = 0; i < segments.size(); ++i)
             append_prefill_row(pending, work.prefill, prefill[i], segments[i].begin, segments[i].end,
-                               !prefill_constrained.empty() && prefill_constrained[i]);
+                               !prefill_constrained.empty() && prefill_constrained[i],
+                               segments[i].produces);
         pending.decode_begin = segments.size();
         for (std::size_t b = 0; b < rows; ++b)
             append_decode_row(pending, work.decode, decode[b], budgets[b],
                               !decode_constrained.empty() && decode_constrained[b]);
         const auto ticket = submit_execution(std::move(pending), std::move(*reservation),
                                              Work{.operation = std::move(work)});
-        return MixedStart{*ticket, static_cast<std::uint32_t>(segments.size()),
-                          static_cast<std::uint32_t>(rows)};
+        MixedStart start;
+        start.ticket      = *ticket;
+        start.decode_rows = static_cast<std::uint32_t>(rows);
+        for (const auto& segment : segments) start.segments.push_back({segment.produces});
+        return start;
     } catch (const std::exception& error) {
         executor().fail(error.what());
         throw;

@@ -71,9 +71,16 @@ BindingPlan SessionImpl::plan_binding(const RequestBasePlan& base, runtime::Lane
                       *source) == transaction.carried_points.end();
     }
     UnitDemand first;
-    if (!resume)
-        first = prefill_unit(base.summary().prompt_tokens, transaction.reuse_frontier);
-    else if (!transaction.resume_without_replay) {
+    if (!resume) {
+        const auto& summary = base.summary();
+        // A forking parent stops before the prompt end: its last prompt token is decoded once by
+        // each child, so the parent itself never samples.
+        const auto target = base.impl_->fork_frontier && transaction.reuse_frontier <
+                                                        base.impl_->fork_frontier
+                                ? base.impl_->fork_frontier
+                                : summary.prompt_tokens;
+        first = prefill_unit(target, transaction.reuse_frontier);
+    } else if (!transaction.resume_without_replay) {
         first                  = {.kind = ExecutionUnitKind::Replay,
                                   .main_frontier =
                                       std::min(transaction.reuse_frontier + prefill_chunk, resume->frontier())};
@@ -217,7 +224,6 @@ BindingReservation SessionImpl::start_binding(const RequestBasePlan& base, runti
     auto& destinations = *reserved.reservation;
     auto state_records = destinations.take(planned.state);
     if (source) transaction.source_lease = checkpoints.lease(*source);
-    context_operation_   = std::make_unique<PendingContext>(directory, std::move(transaction));
     request              = std::move(prepared);
     sequences[lane]      = std::move(prepared_state);
     sequences[lane].lane = lane;
@@ -225,6 +231,67 @@ BindingReservation SessionImpl::start_binding(const RequestBasePlan& base, runti
                                   : SequenceHandle{next_sequence++, executor().epoch().value};
     if (++lane_epochs[lane] == 0) ++lane_epochs[lane];
     sequences[lane].residency = {{lane}, lane_epochs[lane]};
+    // A root source without penalty counts installs synchronously: the lane is adopted on the
+    // host before start_binding returns, the residency install runs silently, and the device
+    // actions (the cleared State record and the empty history mappings) ride the lane's first
+    // execution in its stream order. Every other source keeps the asynchronous completion
+    // contract.
+    const bool synchronous =
+        !resume && !source && transaction.state_action == StateBindingAction::Root &&
+        transaction.carried_points.empty() &&
+        base.impl_->sampling.presence_penalty == 0.0F &&
+        base.impl_->sampling.frequency_penalty == 0.0F;
+    if (synchronous) {
+        try {
+            context::ContextTransaction migration(directory);
+            migration.add_binding(
+                kTextKvPool.index,
+                text_kv_histories->prepare_binding(nullptr, transaction.reuse_frontier,
+                                                   transaction.reservation_demand.main_frontier,
+                                                   lane, destinations.take(planned.main), false));
+            if (backend_kv_histories)
+                migration.add_binding(
+                    kBackendKvPool.index,
+                    backend_kv_histories->prepare_binding(
+                        nullptr, transaction.backend_frontier,
+                        transaction.reservation_demand.backend_frontier, lane,
+                        destinations.take(planned.backend), false));
+            const auto image = state_store->reserve_destination(std::move(state_records));
+            migration.own_state(*image);
+            migration.clear_state();
+            migration.prepare_actions();
+            install_binding(transaction);
+            state_store->complete_initialization(*image);
+            auto& state   = sequences[lane];
+            auto& binding = *migration.binding(kTextKvPool.index);
+            binding.publish_restores();
+            SequenceKVBundle kv{.text = binding.commit()};
+            if (auto* backend = migration.binding(kBackendKvPool.index)) {
+                backend->publish_restores();
+                kv.backend.emplace(backend->commit());
+            }
+            state.continuation.image = *image;
+            state.kv.emplace(std::move(kv));
+            (void)migration.state_destination().release();
+            deferred_bindings[lane].emplace(std::move(migration));
+            deferred_bindings[lane]->actions = deferred_bindings[lane]->transaction.actions();
+            context_operation_ = std::make_unique<PendingContext>(directory, ResidencyOperation{});
+            context_operation_->silent = true;
+            context_operation_->reservation.emplace(std::move(*execution_reservation));
+            ContextWork work;
+            work.bindings.push_back({{sequences[lane].id, sequences[lane].residency},
+                                     base.impl_->sampling});
+            (void)submit_context(*context_operation_, std::move(work));
+        } catch (...) {
+            abort_context();
+            if (deferred_bindings[lane]) discard_deferred_binding(lane);
+            clear_lane(sequences[lane], requests[lane]);
+            throw;
+        }
+        result.synchronous = true;
+        return result;
+    }
+    context_operation_   = std::make_unique<PendingContext>(directory, std::move(transaction));
     context_operation_->reservation.emplace(std::move(*execution_reservation));
     auto& tx        = std::get<BindOperation>(context_operation_->action);
     auto& migration = context_operation_->transaction;
