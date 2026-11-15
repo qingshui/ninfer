@@ -5,7 +5,10 @@
 NInfer runs text and image/video generation through a local CLI or OpenAI- and
 Anthropic-compatible HTTP APIs. It supports single-device execution and model-parallel execution
 across two DGX Sparks, with CUDA Graph decode, speculative decoding, and shared-prefix caching.
-One Engine serves one model with up to eight active requests.
+One Engine serves one model over a configurable number of execution lanes: serving defaults to
+eight active requests, and `--max-concurrency 0` auto-fits up to 1024 lanes from the model's
+context capacity (model-dependent ceilings apply; see the
+[serving guide](docs/serving.md#execution-behavior)).
 
 ## Supported models and deployments
 

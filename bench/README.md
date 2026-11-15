@@ -92,6 +92,11 @@ GDN 的 stage/crossover 诊断保留其明确例外，prepare、recurrence 或�
 | 路由分布、expert TP/EP、完整 MoE | [MoE](ops/moe/) |
 | 模型组件与资源成本 | [Model benches](models/)、[Context cost](context_cost/) |
 
+模型级 decode 步时用 `ninfer_qwen3_5_decode_step_bench`：在真实 artifact 上按固定 batch
+测完整单步 decode，对比 captured-graph 回放与 eager 派发两模式，并通过 opt-in 执行阶段时钟
+给出 attention/GDN/MoE 等阶段分解；每个 (batch, mode) 输出一个 JSON 对象，batch 与模式集合
+见其 `--help`。口径为单步 decode（含 graph 回放或 eager 派发开销，不含 host 排队与 prefill）。
+
 ## Hardware references
 
 [roofline.h](common/roofline.h)维护编译目标的硬件参照，新增来源或校准只在该处及必要依据中记录。
