@@ -1,7 +1,8 @@
 // T8 / F1: the concurrency range accepted by ninfer-serve is 0..1024, where 0 selects
 // automatic lane fitting.
 //   0 and 1024 are accepted and reach EngineOptions; 1025 is rejected with an error naming
-//   the range; the serve default is a fixed eight lanes and explicit values override it.
+//   the range; the serve default selects automatic lane fitting (0) and explicit values
+//   override it.
 #include "ninfer/types.h"
 #include "product/config/options.h"
 
@@ -24,12 +25,12 @@ void require(bool condition, const char* message) {
     if (!condition) throw std::runtime_error(message);
 }
 
-void test_default_is_fixed_lanes() {
+void test_default_is_automatic_lane_fitting() {
     const auto options = parse({"ninfer-serve", "model.ninfer"});
-    require(options.launch.engine.max_concurrency == 8,
-            "serving default concurrency is not eight lanes");
-    require(ninfer::product::kDefaultServeMaxConcurrency == 8,
-            "serving default concurrency constant is not eight");
+    require(options.launch.engine.max_concurrency == 0,
+            "serving default concurrency is not automatic lane fitting");
+    require(ninfer::product::kDefaultServeMaxConcurrency == 0,
+            "serving default concurrency constant is not zero");
     require(parse({"ninfer-serve", "model.ninfer", "--max-concurrency", "0"})
                     .launch.engine.max_concurrency == 0,
             "--max-concurrency 0 was not accepted as automatic lane fitting");
@@ -61,7 +62,7 @@ void test_above_ceiling_rejected_with_new_range() {
 
 int main() {
     try {
-        test_default_is_fixed_lanes();
+        test_default_is_automatic_lane_fitting();
         test_explicit_values_reach_engine_options();
         test_above_ceiling_rejected_with_new_range();
     } catch (const std::exception& error) {

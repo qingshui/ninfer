@@ -590,12 +590,11 @@ LaunchOptions default_launch_options(EntryPoint entry) {
         options.generation.sampling.seed                 = 0;
     } else {
         options.generation.max_tokens = kDefaultServeMaxTokens;
-        // A server admits a fixed eight-lane default and queues arriving bursts instead of
-        // rejecting them: clients send whole concurrency waves at once, and a request rejected
-        // while a lane frees up moments later is a service failure, not backpressure. The
-        // large-batch regime an automatic fit selects is not calibrated for latency, so lane
-        // fitting stays explicit: `--max-concurrency 0` delegates it to the Engine (resolved
-        // from its context token capacity); explicit TOML/CLI values still override these.
+        // A server queues arriving bursts instead of rejecting them: clients send whole
+        // concurrency waves at once, and a request rejected while a lane frees up moments
+        // later is a service failure, not backpressure. The serving default selects
+        // automatic lane fitting: the Engine resolves the lane count from its context
+        // token capacity; explicit TOML/CLI values still override it.
         options.engine.max_concurrency      = kDefaultServeMaxConcurrency;
         options.engine.max_pending_requests = kDefaultServeMaxPendingRequests;
         options.engine.pending_timeout_ms   = kDefaultServePendingTimeoutMs;

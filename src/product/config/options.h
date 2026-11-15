@@ -87,11 +87,10 @@ inline constexpr std::size_t kDefaultResponseStoreBytes   = 256ULL << 20;
 // arriving request bursts in the pending queue (a client disconnect still cancels) rather
 // than answering 429 while lanes free up moments later. Pending slots count sequences, so
 // the pool covers a full n>1 concurrency wave (for example 130 clients x n=4 = 520).
-// The serving default is a fixed eight-lane admission: the large-batch regime an automatic fit
-// selects (hundreds of lanes) is not calibrated for latency, so it stays an explicit choice.
-// Concurrency zero still selects automatic lane fitting — the Engine resolves the lane count
-// from its context token capacity — and explicit TOML/CLI values still override the default.
-inline constexpr std::uint32_t kDefaultServeMaxConcurrency      = 8;
+// The serving default selects automatic lane fitting: zero delegates the lane count to the
+// Engine, which resolves it from its context token capacity and reports the fitted value
+// through its options and description. Explicit TOML/CLI values still override the default.
+inline constexpr std::uint32_t kDefaultServeMaxConcurrency      = 0;
 inline constexpr std::uint32_t kDefaultServeMaxPendingRequests  = 1024;
 inline constexpr std::uint32_t kDefaultServePendingTimeoutMs    = 300000;
 
