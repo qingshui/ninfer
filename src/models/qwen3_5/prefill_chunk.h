@@ -18,10 +18,10 @@ inline constexpr std::uint32_t kResidentPrefillChunk    = 2048;
 inline constexpr std::uint32_t kHostExpertsPrefillChunk = 4096;
 
 // One packed prefill execution carries at most this many chunks of tokens in total, summed over
-// its sequence segments. With the resident chunk (2048) one flight carries up to 8192 tokens.
+// its sequence segments. With the resident chunk (2048) one flight carries up to 16384 tokens.
 // The Session reports the resulting capacity through Session::prefill_pack_tokens(); the Engine
 // derives its Throughput allowance from that and holds no copy of this value.
-inline constexpr std::uint32_t kPrefillPackChunks = 4;
+inline constexpr std::uint32_t kPrefillPackChunks = 8;
 
 // Upper bound on the number of sequence segments one packed prefill execution carries. It is the
 // only authority for that bound and is decoupled from the lane count: a flight merges whichever
@@ -49,19 +49,19 @@ inline constexpr std::uint32_t kPrefillPackSegmentLimit = 64;
 
 // Upper bound of the summed segment length of one packed prefill execution. It is the only
 // authority for that bound: planning sizes the token-axis workspace and the execution frame from
-// it, and the Session admits segments against it. The result is a multiple of
-// kPrefillChunkAlignment and at least `prefill_chunk`, so a single window always fits. A pack
-// never needs to exceed the largest context a request can occupy.
+// it, and the Session admits segments against it. `token_capacity` is the token-axis capacity of
+// the KV/GDN state pool, derived by the sequence planning from the pool backing; the result is a
+// multiple of kPrefillChunkAlignment, at least `prefill_chunk` (so a single window always fits)
+// and never above the aligned capacity.
 [[nodiscard]] inline std::uint32_t resolve_prefill_pack_tokens(std::uint32_t prefill_chunk,
-                                                               std::uint32_t max_context) {
+                                                               std::uint32_t token_capacity) {
     if (prefill_chunk == 0 || prefill_chunk % kPrefillChunkAlignment != 0)
         throw std::invalid_argument("prefill_chunk must be a nonzero multiple of " +
                                     std::to_string(kPrefillChunkAlignment));
-    const std::uint64_t aligned_context =
-        (std::uint64_t{max_context} + kPrefillChunkAlignment - 1) / kPrefillChunkAlignment *
-        kPrefillChunkAlignment;
+    const std::uint64_t aligned_capacity =
+        std::uint64_t{token_capacity} / kPrefillChunkAlignment * kPrefillChunkAlignment;
     const std::uint64_t packed = std::uint64_t{prefill_chunk} * kPrefillPackChunks;
-    return std::max(prefill_chunk, static_cast<std::uint32_t>(std::min(packed, aligned_context)));
+    return std::max(prefill_chunk, static_cast<std::uint32_t>(std::min(packed, aligned_capacity)));
 }
 
 // Upper bound of the token axis of one mixed execution: a packed prefill (at most `pack_tokens`)

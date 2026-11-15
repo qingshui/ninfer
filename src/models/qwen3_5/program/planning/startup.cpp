@@ -61,6 +61,42 @@ std::uint32_t page_count(std::uint32_t capacity) {
     return 1U + (capacity - 1U) / static_cast<std::uint32_t>(kPagedKVPageSize);
 }
 
+// One sequence's demand on the KV/GDN state pool: `states` state-image records plus `main`
+// main-model and `backend` backend KV pages. The class order is the context record order:
+// state image, main KV, backend KV.
+[[nodiscard]] auto pool_state_demand(const ContextPoolGeometry& geometry) {
+    return [&geometry](std::uint32_t states, std::uint32_t main, std::uint32_t backend) {
+        std::vector<RecordRequest> demand{{geometry.spec_classes[0], states}};
+        demand.push_back({geometry.spec_classes[1], main});
+        if (geometry.spec_classes.size() > 2)
+            demand.push_back({geometry.spec_classes[2], backend});
+        return geometry.required_bytes(demand);
+    };
+}
+
+// The token-axis capacity of the KV/GDN state pool: how many tokens of pool state its backing
+// holds, scaled from the maximum-context reference (one sequence at the full context) the same
+// way the Engine estimates its context token capacity from a resolved pool. The backing is the
+// budget offered beside the fixed session reservation; without an offered budget the plan itself
+// anchors only the reference working set, so the capacity is that of a pool holding one maximum
+// context. resolve_prefill_pack_tokens clamps one packed flight to this capacity.
+[[nodiscard]] std::uint32_t
+pool_token_axis_capacity(const SequencePlanningInputs& inputs,
+                         const ContextPoolGeometry& geometry, std::size_t fixed_bytes,
+                         const std::optional<std::size_t>& context_budget) {
+    const auto demand     = pool_state_demand(geometry);
+    const auto transition = inputs.speculative_backend == SpeculativeBackend::None ? 0U : 1U;
+    const auto pages      = page_count(inputs.capacity) + transition;
+    const auto reference  = demand(1 + transition, pages, pages);
+    std::size_t backing   = reference;
+    if (context_budget)
+        backing = *context_budget > fixed_bytes ? *context_budget - fixed_bytes : 0;
+    const auto tokens = static_cast<unsigned __int128>(backing) * inputs.capacity / reference;
+    if (tokens > std::numeric_limits<std::uint32_t>::max())
+        return std::numeric_limits<std::uint32_t>::max();
+    return static_cast<std::uint32_t>(tokens);
+}
+
 // Largest session lane count whose lane-scaled working sets hold in `budget` beside the fixed
 // session reservation. The reservation is measured at the provisional ceiling, which bounds
 // the fitted count's own fixed share from above. Returns `inputs.max_concurrency` when the
@@ -69,13 +105,7 @@ std::uint32_t page_count(std::uint32_t capacity) {
 std::uint32_t fitted_session_lanes(const SequencePlanningInputs& inputs,
                                    const ContextPoolGeometry& geometry, std::size_t fixed_bytes,
                                    std::size_t budget) {
-    const auto demand_bytes = [&](std::uint32_t states, std::uint32_t main, std::uint32_t backend) {
-        std::vector<RecordRequest> demand{{geometry.spec_classes[0], states}};
-        demand.push_back({geometry.spec_classes[1], main});
-        if (geometry.spec_classes.size() > 2)
-            demand.push_back({geometry.spec_classes[2], backend});
-        return geometry.required_bytes(demand);
-    };
+    const auto demand_bytes = pool_state_demand(geometry);
     const auto transition    = inputs.speculative_backend == SpeculativeBackend::None ? 0U : 1U;
     const auto maximum_pages = page_count(inputs.capacity);
     const auto short_pages   = page_count(static_cast<std::uint32_t>(std::min<std::uint64_t>(
@@ -757,12 +787,6 @@ make_sequence_planner_impl(std::shared_ptr<const execution::ModelProfile> profil
     const bool scoring  = options.purpose == EnginePurpose::CausalScoring;
     const bool offload  = moe != nullptr;
     const bool masked   = is_masked_draft_backend(options.speculative.backend);
-    // Offloaded experts size their bridge resources for one chunk, so their pack stays within a
-    // chunk. Masked draft windows carry per-row draft state and scoring has a single row; both
-    // execute one segment at a time.
-    const auto pack_tokens   = offload || scoring ? chunk
-                                                  : resolve_prefill_pack_tokens(chunk,
-                                                                                options.max_context);
     // The segment bound is the pack segment budget, decoupled from the lane count: a flight
     // merges as many waiting segments as the token budget holds. Masked draft windows and
     // scoring still execute one segment at a time.
@@ -773,18 +797,21 @@ make_sequence_planner_impl(std::shared_ptr<const execution::ModelProfile> profil
     // Offloaded experts, masked draft windows and scoring never mix.
     static_assert(kPrefillPackSegmentLimit >= 2, "the pack segment budget must fit a mixed flight");
     const auto mixed_rows = offload || masked || scoring ? 0U : kPrefillPackSegmentLimit - 1;
-    const auto mixed_tokens =
-        resolve_mixed_tokens(pack_tokens, mixed_rows, options.speculative.draft_tokens);
+    // The pool records (state image, KV pages) do not depend on the pack, so a provisional
+    // candidate at the unclamped chunk budget exposes the pool geometry and the fixed session
+    // reservation — workspace included — that the token-axis capacity is derived from. The
+    // resolved pack never exceeds that budget, so the derived capacity stays conservative.
     SequencePlanningInputs inputs{
         .profile                    = std::move(profile),
         .moe                        = std::move(moe),
         .capacity                   = options.max_context,
         .max_concurrency            = options.max_concurrency,
         .prefill_chunk              = chunk,
-        .pack_tokens                = pack_tokens,
+        .pack_tokens                = chunk * kPrefillPackChunks,
         .pack_segments              = pack_segments,
         .mixed_decode_rows          = mixed_rows,
-        .mixed_tokens               = mixed_tokens,
+        .mixed_tokens               = resolve_mixed_tokens(chunk * kPrefillPackChunks, mixed_rows,
+                                                           options.speculative.draft_tokens),
         .draft_window               = options.speculative.draft_tokens,
         .speculative_backend        = options.speculative.backend,
         .kv_storage                 = resolve_kv_cache(options),
@@ -797,12 +824,26 @@ make_sequence_planner_impl(std::shared_ptr<const execution::ModelProfile> profil
         .context_cache              = options.context_cache,
         .vision_memory_budget_bytes = options.vision_memory_budget_bytes,
     };
-    auto planner           = std::make_unique<SequencePlannerImpl>();
-    planner->inputs        = inputs;
-    auto base              = build_sequence_candidate(inputs, 0);
-    auto& capacity         = planner->capacity_plan;
-    capacity.records       = base->persistent.context_records();
-    const auto geometry    = describe_context_pool(capacity.records);
+    const auto ceiling  = build_sequence_candidate(inputs, 0);
+    const auto geometry = describe_context_pool(ceiling->persistent.context_records());
+    // Offloaded experts size their bridge resources for one chunk, so their pack stays within a
+    // chunk. Masked draft windows carry per-row draft state and scoring has a single row; both
+    // execute one segment at a time. Every other flight packs up to the token-axis capacity of
+    // the KV/GDN state pool.
+    const auto pack_tokens =
+        offload || scoring
+            ? chunk
+            : resolve_prefill_pack_tokens(
+                  chunk, pool_token_axis_capacity(inputs, geometry,
+                                                  ceiling->device_reservation_bytes,
+                                                  context_budget));
+    inputs.pack_tokens  = pack_tokens;
+    inputs.mixed_tokens = resolve_mixed_tokens(pack_tokens, mixed_rows, inputs.draft_window);
+    auto planner        = std::make_unique<SequencePlannerImpl>();
+    planner->inputs     = inputs;
+    auto base           = build_sequence_candidate(inputs, 0);
+    auto& capacity      = planner->capacity_plan;
+    capacity.records    = base->persistent.context_records();
     // Automatic lane fitting plans the session at the provisional shared ceiling, which a
     // state-dense target cannot hold: one GDN State image rides every resident lane, so the
     // ceiling's lane-scaled working sets exceed any single-device budget. Fit the session's

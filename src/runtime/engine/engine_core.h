@@ -168,10 +168,10 @@ public:
     //    at 100 ms).
     //  - Large batch (C >= kLargeBatchLanes; direction values, not tuned results): the pack
     //    budget merges many request segments into single flights of up to kPrefillPackChunks
-    //    chunks (2048-8192 tokens at the resident chunk), and such an engine holds 130+ resident
+    //    chunks (2048-16384 tokens at the resident chunk), and such an engine holds 130+ resident
     //    decode lanes. The large-batch interleave_chunks follows the pack budget so one
     //    Interleave cycle can carry one whole merged flight, and interleave_ns rises with it:
-    //    fragmenting an 8192-token flight at the 100 ms budget re-pays the fixed submission cost
+    //    fragmenting a 16384-token flight at the 100 ms budget re-pays the fixed submission cost
     //    on every fragment. Cold lanes start with a full chunk for the same reason. The debt
     //    pair adapts the decode yield to a large resident batch: with 130+ lanes decoding, one
     //    decode round serves the whole resident batch, so each cycle repays twice the debt while
@@ -194,9 +194,10 @@ public:
     static constexpr std::uint64_t kSmallInterleaveDebtCapNs  = 300'000'000;
     static constexpr std::uint64_t kSmallInterleaveRepayNs    = 4'000'000;
     // Large-batch calibration: direction values for engines configured with a large resident
-    // batch (the explicit --max-concurrency regime).
+    // batch (the explicit --max-concurrency regime). interleave_chunks tracks the pack budget
+    // (kPrefillPackChunks) so one Interleave cycle carries one whole merged flight.
     static constexpr std::uint64_t kLargeInterleaveNs         = 200'000'000;
-    static constexpr std::uint32_t kLargeInterleaveChunks     = 4;
+    static constexpr std::uint32_t kLargeInterleaveChunks     = 8;
     static constexpr std::uint32_t kLargeInterleaveColdTokens = 2048;
     static constexpr std::uint64_t kLargeInterleaveDebtCapNs  = 400'000'000;
     static constexpr std::uint64_t kLargeInterleaveRepayNs    = 8'000'000;

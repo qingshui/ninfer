@@ -33,7 +33,7 @@
   - 小 batch（`C < 64`，默认 serving 的少量 lane 工况）：100 ms / 2 chunk / 冷启动 1024 token，
     debt cap 300 ms / repay 4 ms。该档为实测校准（mini load 40 ms 与 100 ms 的端到端对比）。
   - 大 batch（`C >= 64`，显式 `--max-concurrency` 工况，方向值）：按大 batch 场景（多请求段合并的
-    2048–8192 token 单 flight、130+ 驻留 decode lane）重标定——`kInterleaveChunks` 与打包预算一致
+    2048–16384 token 单 flight、130+ 驻留 decode lane）重标定——`kInterleaveChunks` 与打包预算一致
     使一个 Interleave 周期可承载一次完整合并 flight；`kInterleaveNs`（200 ms）随之放大避免大 flight
     被切碎重复支付固定提交成本；`kInterleaveColdTokens`（2048）让冷启动 lane 从一个整 chunk 开始；
     debt 对（cap 400 ms / repay 8 ms）适配大驻留 batch 的 decode 让步比例。
@@ -75,8 +75,13 @@
   - 段数上界 `kPrefillPackSegmentLimit`（64）：`pack_segments` 的唯一上界（masked draft 与
     causal scoring 保留单段约束）；`Session::prefill_pack_limit()` 与
     `EngineCore::prefill_pack_limit()` 只受该预算约束，不再与 `max_concurrency` 取 min。
-  - 单 flight token 上界 `resolve_prefill_pack_tokens`：`prefill_chunk × kPrefillPackChunks`
-    （4，resident 2048 chunk 下单 flight 8192 token），上限为对齐后的 max_context。
+  - 单 flight token 上界 `resolve_prefill_pack_tokens(prefill_chunk, token_capacity)`：
+    `prefill_chunk × kPrefillPackChunks`（8，resident 2048 chunk 下单 flight 16384 token），上限为
+    128 对齐后的 token 轴容量。token 轴容量由 sequence planning（`make_sequence_planner_impl`）从
+    KV/GDN state 池容量推导：以单序列满 context 工作集为参考（1 个 state record + 每池页类
+    `page_count(max_context)` 页），有预算时按「预算 − 固定会话预留」线性缩放（与 Engine 的
+    `estimate_context_token_capacity` 同口径），无预算时退化为单序列 max_context 参考。
+    token 维 workspace、frame 与 mixed_tokens 均由 `plan.pack_tokens` 推导自动跟随。
   - mixed 行数上界 `mixed_decode_rows = kPrefillPackSegmentLimit - 1`：为 mixed flight 保留至少
     一个 prefill 段的预算推导值，不再引用 `max_concurrency`；运行期准入仍受驻留 lane 数约束。
 - `Session::prefill_pack_limit()`（段数上限，来源是 Program 规划的 `pack_segments`）与

@@ -127,27 +127,30 @@ void test_charging_and_regimes() {
 }
 
 
-// Pack capacity is >= one window, 128-aligned, and never beyond the context. The pack budget is
-// decoupled from the lane count: the segment bound comes from kPrefillPackSegmentLimit alone, and
-// the token bound makes one merged flight of the resident chunk reach 2048-8192 tokens.
+// Pack capacity is >= one window, 128-aligned, and never beyond the token-axis capacity. The
+// pack budget is decoupled from the lane count: the segment bound comes from
+// kPrefillPackSegmentLimit alone, and the token bound makes one merged flight of the resident
+// chunk reach 8192-16384 tokens.
 void test_pack_capacity_bounds() {
     namespace q = ninfer::models::qwen3_5;
     require(q::kPrefillPackSegmentLimit >= 2, "segment budget fits a mixed flight");
     const auto flight = q::kResidentPrefillChunk * q::kPrefillPackChunks;
-    require(flight >= 2048 && flight <= 8192, "one flight carries 2048-8192 resident tokens");
+    require(flight >= 8192 && flight <= 16384, "one flight carries 8192-16384 resident tokens");
     for (const std::uint32_t chunk : {128u, 512u, 2048u, 4096u}) {
-        for (const std::uint32_t ctx : {chunk, 262144u}) {
-            const auto p = q::resolve_prefill_pack_tokens(chunk, ctx);
+        for (const std::uint32_t capacity : {chunk, 262144u}) {
+            const auto p = q::resolve_prefill_pack_tokens(chunk, capacity);
             require(p % 128 == 0, "pack tokens is a multiple of 128");
             require(p >= chunk, "pack tokens holds at least one chunk");
-            if (ctx >= chunk)
-                require(p <= (ctx + 127) / 128 * 128, "pack tokens bounded by the context");
+            if (capacity >= chunk)
+                require(p <= capacity / 128 * 128,
+                        "pack tokens bounded by the token-axis capacity");
         }
     }
-    require(q::resolve_prefill_pack_tokens(128, 128) == 128, "pack == chunk when context == chunk");
+    require(q::resolve_prefill_pack_tokens(128, 128) == 128,
+            "pack == chunk when capacity == chunk");
     require(q::resolve_prefill_pack_tokens(2048, 262144) ==
                 q::kPrefillPackChunks * 2048,
-            "an unbounded context takes the full chunk budget");
+            "an unbounded capacity takes the full chunk budget");
 }
 
 } // namespace

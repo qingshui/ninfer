@@ -24,9 +24,9 @@ void expect(bool ok, std::string_view msg) {
     std::cerr << "FAIL: " << msg << '\n';
 }
 
-bool throws_invalid(std::uint32_t chunk, std::uint32_t ctx) {
+bool throws_invalid(std::uint32_t chunk, std::uint32_t capacity) {
     try {
-        (void)q::resolve_prefill_pack_tokens(chunk, ctx);
+        (void)q::resolve_prefill_pack_tokens(chunk, capacity);
     } catch (const std::invalid_argument&) { return true; } catch (...) { return false; }
     return false;
 }
@@ -40,19 +40,22 @@ static_assert(std::is_constructible_v<x::TextStateUpdate, x::PackedSequenceUpdat
 int main() {
     expect(q::kPrefillPackChunks >= 1, "kPrefillPackChunks is positive");
 
-    // Pack capacity: multiple of 128, at least one chunk, never above the aligned context.
+    // Pack capacity: multiple of 128, at least one chunk, never above the aligned token-axis
+    // capacity.
     for (std::uint32_t chunk : {128u, 512u, 2048u, 4096u}) {
-        for (std::uint32_t ctx : {chunk, 262144u}) {
-            const auto p = q::resolve_prefill_pack_tokens(chunk, ctx);
+        for (std::uint32_t capacity : {chunk, 262144u}) {
+            const auto p = q::resolve_prefill_pack_tokens(chunk, capacity);
             expect(p % 128 == 0, "pack tokens is a multiple of 128");
             expect(p >= chunk, "pack tokens holds at least one chunk");
-            if (ctx >= chunk) expect(p <= (ctx + 127) / 128 * 128, "pack tokens bounded by context");
+            if (capacity >= chunk)
+                expect(p <= capacity / 128 * 128, "pack tokens bounded by the token capacity");
         }
     }
-    // A pack holds more than one chunk when the context allows it (amortisation is possible).
+    // A pack holds more than one chunk when the capacity allows it (amortisation is possible).
     expect(q::resolve_prefill_pack_tokens(2048, 262144) > 2048, "pack exceeds one chunk at 262144");
-    // A context of exactly one chunk gives a single-chunk pack.
-    expect(q::resolve_prefill_pack_tokens(128, 128) == 128, "pack == chunk when context == chunk");
+    // A capacity of exactly one chunk gives a single-chunk pack.
+    expect(q::resolve_prefill_pack_tokens(128, 128) == 128,
+           "pack == chunk when capacity == chunk");
 
     expect(throws_invalid(0, 262144), "chunk 0 rejected");
     expect(throws_invalid(1000, 262144), "chunk 1000 rejected");
