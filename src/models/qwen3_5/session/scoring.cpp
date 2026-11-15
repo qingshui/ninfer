@@ -29,6 +29,11 @@ std::optional<runtime::ExecutionTicket> SessionImpl::start_score(qwen::PreparedP
         if (!context_operation_ || !context_operation_->ticket)
             throw std::logic_error("scoring context was not submitted");
         scoring->public_ticket = *context_operation_->ticket;
+        // A penalty-free root binding installs synchronously and publishes no ContextProgress:
+        // the installed sequence is recorded here, and the residency operation's silent
+        // retirement reports it to poll() so the score advances like it does at an
+        // asynchronous binding's completion.
+        if (binding.synchronous) scoring->sequence = *binding.sequence;
         return scoring->public_ticket;
     } catch (...) {
         if (context_operation_ && context_operation_->ticket)

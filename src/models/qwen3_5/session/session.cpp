@@ -256,6 +256,13 @@ bool Session::reclaim_capture_reservation(const ContextAssessment& assessment) {
     return impl_->reclaim_capture_reservation(assessment);
 }
 
+std::optional<std::uint32_t> Session::capture_reservation_frontier(SequenceHandle sequence) const {
+    if (!impl_->valid_sequence(sequence)) return std::nullopt;
+    const auto& request = impl_->requests[impl_->lane(sequence)];
+    if (!request.capture_reservation) return std::nullopt;
+    return request.capture_reservation->frontier;
+}
+
 void Session::release_units(std::span<const SequenceHandle> units) noexcept {
     impl_->note_context_change();
     impl_->release_units(units);

@@ -486,6 +486,8 @@ public:
                   std::uint32_t resume_tokens   = 1);
     [[nodiscard]] bool start_capture(SequenceHandle sequence);
     [[nodiscard]] bool capture_is_input(SequenceHandle sequence) const;
+    [[nodiscard]] std::optional<std::uint32_t>
+        capture_reservation_frontier(SequenceHandle sequence) const;
     [[nodiscard]] bool capture_is_shared(SequenceHandle) const;
     [[nodiscard]] std::vector<std::uint32_t> capture_frontiers(SequenceHandle) const;
     [[nodiscard]] std::optional<CapturePreparation>

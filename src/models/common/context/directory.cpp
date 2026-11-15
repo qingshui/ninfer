@@ -1,6 +1,7 @@
 #include "models/common/context/directory.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <array>
 #include <cassert>
 #include <stdexcept>
@@ -509,6 +510,13 @@ ContextAssessment ContextDirectory::assess(const ContextDemand& demand,
         return result;
     }
     if (maintenance_active_ || maintenance_requested_) {
+        static thread_local std::chrono::steady_clock::time_point next_report{};
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= next_report) {
+            next_report = now + std::chrono::seconds(2);
+            std::fprintf(stderr, "ASSESSWAIT active=%d requested=%d\n",
+                         maintenance_active_ ? 1 : 0, maintenance_requested_ ? 1 : 0);
+        }
         result.status = ContextAvailability::Waiting;
         return result;
     }

@@ -51,6 +51,10 @@ void RankProgramImpl::request_decision(ComputeOperation& operation) {
 }
 
 std::uint32_t RankProgramImpl::forward_row_count(const ComputeOperation& operation) const noexcept {
+    // A pure decode's decision rows are all decode rows: no forward rows follow them. A mixed
+    // execution's decision rows are its decode rows followed by its producing segments; a packed
+    // or single-window prefill's decision rows are all forward rows.
+    if (has_decode(operation) && !operation.mixed) return 0U;
     const auto decode_rows =
         operation.mixed ? operation.rows.size() - operation.segments.size() : 0U;
     return operation.sample_members.size() > decode_rows

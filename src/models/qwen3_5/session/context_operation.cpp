@@ -1,6 +1,7 @@
 #include "models/qwen3_5/session/internal.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <stdexcept>
 #include <type_traits>
 
@@ -57,17 +58,24 @@ runtime::ContextStart SessionImpl::start_maintenance(const ContextAssessment& as
     if (has_context_operation() || executing() || !events.empty()) {
         pending_maintenance_ = assessment;
         directory.request_maintenance();
+        std::fprintf(stderr, "MAINT defer busy ctx=%d exec=%d events=%zu\n",
+                     has_context_operation() ? 1 : 0, executing() ? 1 : 0, events.size());
         return runtime::ContextStart::Deferred;
     }
     auto frame = executor().try_reserve(runtime::FrameKind::Context);
     if (!frame) {
         pending_maintenance_ = assessment;
         directory.request_maintenance();
+        std::fprintf(stderr, "MAINT defer noframe\n");
         return runtime::ContextStart::Deferred;
     }
     pending_maintenance_.reset();
     auto prepared = directory.prepare_maintenance(assessment);
-    if (!prepared) return runtime::ContextStart::Stale;
+    if (!prepared) {
+        std::fprintf(stderr, "MAINT stale\n");
+        return runtime::ContextStart::Stale;
+    }
+    std::fprintf(stderr, "MAINT started\n");
     context_operation_ =
         std::make_unique<PendingContext>(std::move(*prepared), MaintenanceOperation{});
     context_operation_->reservation.emplace(std::move(*frame));
@@ -182,6 +190,18 @@ void SessionImpl::retire_context(runtime::DeviceRetired retired) {
         // waits on it and no ContextProgress follows.
         if (operation.silent) {
             context_operation_.reset();
+            // A pending score adopted its sequence when the synchronous installation
+            // returned; its residency retirement reports the sequence through the same
+            // ContextProgress an asynchronous binding publishes, so poll() starts the
+            // score's first execution here instead of waiting for a progress that never
+            // arrives.
+            if (scoring) {
+                ContextProgress progress{.kind = ContextOperationKind::Bind};
+                progress.complete  = true;
+                progress.published = true;
+                progress.sequence  = scoring->sequence;
+                events.push_back({.ticket = retired.ticket, .result = std::move(progress)});
+            }
             return;
         }
         if (auto* maintenance = std::get_if<MaintenanceOperation>(&operation.action);

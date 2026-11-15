@@ -168,8 +168,13 @@ void SessionImpl::receive_result(runtime::ResultReady<ExecutionTypes>&& event) {
             progress.rows.reserve(current.members.size());
             for (std::size_t b = 0; b < current.members.size(); ++b) {
                 progress.rows.push_back(prefill_row(*this, current, b));
-                progress.rows.back().capture_ready =
-                    progress.rows.back().capture_ready && !forward->generated;
+                // A member that carries a decision row re-derives its capture readiness when the
+                // commit adopts its settlement; a resting member settles in the same commit but
+                // reports no decision row, so its row offers the capture here exactly as a mixed
+                // execution's segment does.
+                const bool produces = b < current.producing.size() && current.producing[b];
+                if (forward->generated && produces)
+                    progress.rows.back().capture_ready = false;
             }
             if (forward->generated) {
                 // The batch carries one decision row per final segment, in segment order.
@@ -270,6 +275,8 @@ void SessionImpl::commit_completed_unit(Execution& current) {
         const auto end = current.completed[b].execution_frontier;
         request.capture_pending =
             request.capture_reservation && request.capture_reservation->frontier == end;
+        if (request.capture_pending)
+            std::fprintf(stderr, "CAPSET site=completed lane=%u end=%u\n", l, end);
         if (current.kind == OperationKind::Prefill) request.prefill->cursor = end;
         if (current.kind == OperationKind::Replay) request.replay_cursor = end;
         if (current.kind == OperationKind::Control)
@@ -309,6 +316,8 @@ CommitResult SessionImpl::commit(PendingBatch&& pending,
     const auto segment_recovery = std::make_unique<bool[]>(max_concurrency);
     const auto recovery_span        = std::span<bool>(recovery.get(), max_concurrency);
     const auto segment_recovery_span = std::span<bool>(segment_recovery.get(), max_concurrency);
+    const bool resting_members       = current.kind == OperationKind::Prefill &&
+                                 current.pending_members.size() < current.members.size();
     try {
         current.decisions.assign(decisions.begin(), decisions.end());
         current.settlement = std::make_unique<context::ContextTransaction>(directory);
@@ -335,6 +344,20 @@ CommitResult SessionImpl::commit(PendingBatch&& pending,
         Commit physical;
         physical.rows.reserve(decisions.size());
         if (current.kind == OperationKind::Mixed) prepare_segments(current, segment_recovery_span);
+        // The members of a batch-carrying packed prefill that produced no decision row settled
+        // no window yet: their rows ride this commit exactly as a mixed execution's segments
+        // do, or their lane would keep its pre-flight frontier and re-process the window.
+        if (resting_members) {
+            for (std::size_t b = 0; b < current.members.size(); ++b) {
+                if (std::find(current.pending_members.begin(), current.pending_members.end(),
+                              static_cast<std::uint32_t>(b)) != current.pending_members.end())
+                    continue;
+                const auto l = lane(current.members[b]);
+                segment_recovery[b] =
+                    prepare_settlement(l, current.completed[b], requests[l].lifecycle,
+                                       sequences[l].ledger.size(), *current.settlement);
+            }
+        }
         for (std::size_t b = 0; b < decisions.size(); ++b) {
             const auto& d = decisions[b];
             const auto m  = current.pending_members[b];
@@ -363,6 +386,22 @@ CommitResult SessionImpl::commit(PendingBatch&& pending,
         throw;
     }
     if (current.kind == OperationKind::Mixed) adopt_segments(current, segment_recovery_span);
+    if (resting_members) {
+        for (std::size_t b = 0; b < current.members.size(); ++b) {
+            if (std::find(current.pending_members.begin(), current.pending_members.end(),
+                          static_cast<std::uint32_t>(b)) != current.pending_members.end())
+                continue;
+            const auto l  = lane(current.members[b]);
+            auto& request = requests[l];
+            const auto end = current.completed[b].execution_frontier;
+            adopt_unit(l, current.completed[b], current.columns[b] != 0, segment_recovery[b]);
+            request.capture_pending =
+                request.capture_reservation && request.capture_reservation->frontier == end;
+            if (request.capture_pending)
+                std::fprintf(stderr, "CAPSET site=resting lane=%u end=%u\n", l, end);
+            request.prefill->cursor = end;
+        }
+    }
     for (std::size_t b = 0; b < decisions.size(); ++b) {
         const auto& d = decisions[b];
         const auto m  = current.pending_members[b];
@@ -384,6 +423,9 @@ CommitResult SessionImpl::commit(PendingBatch&& pending,
                 request.capture_reservation &&
                 request.capture_reservation->frontier ==
                     current.completed[m].execution_frontier;
+            if (request.capture_pending)
+                std::fprintf(stderr, "CAPSET site=decision lane=%u end=%u\n", l,
+                             current.completed[m].execution_frontier);
         }
         if (d.terminal) {
             request.capture_pending = false;
@@ -469,6 +511,8 @@ void SessionImpl::adopt_segments(Execution& current,
         adopt_unit(l, current.completed[b], current.columns[b] != 0, recovery[b]);
         request.capture_pending =
             request.capture_reservation && request.capture_reservation->frontier == end;
+        if (request.capture_pending)
+            std::fprintf(stderr, "CAPSET site=segments lane=%u end=%u\n", l, end);
         request.prefill->cursor = end;
     }
 }
