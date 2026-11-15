@@ -342,18 +342,13 @@ def _text_prefix(base: SafetensorsSource) -> str:
     for prefix, name in candidates:
         if base.has(name):
             return prefix
-    if not base.weight_map:
-        # A custom recipe may supply every logical value from another source.
-        return "model.language_model." if "text_config" in base.config else "model."
     raise ValueError(
         f"{base.path}: no text tensor prefix found; probed "
         + ", ".join(name for _, name in candidates)
     )
 
 
-def _text_source_name(
-    selected: SafetensorsSource, source_name: str, store: SafetensorsSource
-) -> str:
+def _text_source_name(selected: SafetensorsSource, source_name: str) -> str:
     """Resolve a text tensor name against an additional source's probed prefix."""
     if source_name.startswith("model.language_model."):
         nested = source_name
@@ -364,13 +359,11 @@ def _text_source_name(
     else:
         return source_name
     has_nested, has_flat = selected.has(nested), selected.has(flat)
-    if has_nested != has_flat:
-        return nested if has_nested else flat
-    # Probing cannot distinguish the prefixes; keep the config-derived conventions.
-    if "text_config" not in selected.config:
-        return flat
-    if "text_config" not in store.config:
+    if has_nested and not has_flat:
         return nested
+    if has_flat and not has_nested:
+        return flat
+    # Probing cannot distinguish the prefixes; keep the base's probed prefix.
     return source_name
 
 
@@ -495,7 +488,7 @@ class _Builder:
             self.validate_source(selected, store, name)
             selected_name = source_name
             if name.startswith("text/") and _has_model_config(selected):
-                selected_name = _text_source_name(selected, selected_name, store)
+                selected_name = _text_source_name(selected, selected_name)
             if transpose is not None:
                 if format is not None:
                     raise ValueError(f"{name}: transpose source requires value access")

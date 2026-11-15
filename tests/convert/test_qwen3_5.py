@@ -62,7 +62,8 @@ def _config(*, moe=False):
 def _checkpoint(path, config, tensors):
     path.mkdir()
     (path / "config.json").write_text(json.dumps(config))
-    save_file(tensors, path / "model.safetensors")
+    if tensors is not None:
+        save_file(tensors, path / "model.safetensors")
     for role, value in {
         "tokenizer.json": {"model": {"vocab": {str(i): i for i in range(6)}}},
         "tokenizer_config.json": {},
@@ -202,6 +203,16 @@ def test_nested_config_with_flat_prefix_resolves_flat_source_names(tmp_path):
 def test_missing_text_prefix_reports_every_probed_candidate(tmp_path):
     tensors = {"unused": torch.ones(1)}
     with _checkpoint(tmp_path / "prefixless", _config(), tensors) as source:
+        with pytest.raises(ValueError) as error:
+            build_model(source)
+        message = str(error.value)
+        assert "model.language_model.embed_tokens.weight" in message
+        assert "model.embed_tokens.weight" in message
+
+
+def test_tensorless_base_never_falls_back_to_a_config_derived_prefix(tmp_path):
+    with _checkpoint(tmp_path / "recipe-source", _config(), None) as source:
+        assert not source.weight_map
         with pytest.raises(ValueError) as error:
             build_model(source)
         message = str(error.value)

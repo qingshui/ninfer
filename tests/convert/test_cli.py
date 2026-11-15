@@ -6,6 +6,9 @@ from pathlib import Path
 import subprocess
 import sys
 
+from safetensors.torch import save_file
+import torch
+
 from tools.artifact.reader import Artifact
 from tools.artifact.schema import binding_parts
 
@@ -27,6 +30,12 @@ def test_cli_custom_sources_method_template_and_shards(tmp_path):
         "rope_parameters": {"partial_rotary_factor": 0.5, "mrope_section": [1, 1, 0]},
     }
     (source / "config.json").write_text(json.dumps(config))
+    # The text prefix is probed from real model tensors; the recipe below
+    # replaces every value, so a single anchor tensor is enough.
+    save_file(
+        {"model.embed_tokens.weight": torch.zeros(8, 128, dtype=torch.bfloat16)},
+        source / "model.safetensors",
+    )
     for name, value in {
         "tokenizer.json": {"model": {"vocab": {str(i): i for i in range(6)}}},
         "tokenizer_config.json": {},
