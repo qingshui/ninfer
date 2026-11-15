@@ -32,5 +32,10 @@ target_sources(ninfer_ops_non_rdc PRIVATE
   "${CMAKE_CURRENT_LIST_DIR}/dense/causal_cache/nvfp4/tiled_launch.cu"
 )
 
+# tcgen05 FMHA: only the B200 target (sm_100a) compiles it.
+if(NINFER_TARGET STREQUAL "b200")
+  include("${CMAKE_CURRENT_LIST_DIR}/dense/causal_cache/b200/sources.cmake")
+endif()
+
 include("${CMAKE_CURRENT_LIST_DIR}/qsa/sources.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/kpool_mla/sources.cmake")
