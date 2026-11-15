@@ -8,7 +8,7 @@
 namespace ninfer::models::qwen3_5::detail {
 
 void RankProgramImpl::launch_commit(ComputeOperation& operation) {
-    auto& frame          = resources.frame;
+    auto& frame          = resources.frame();
     const auto& value    = *operation.commit;
     const bool decode    = has_decode(operation);
     const auto* forward  = std::get_if<ForwardWork>(&operation.request.work.operation);
@@ -47,8 +47,8 @@ void RankProgramImpl::launch_commit(ComputeOperation& operation) {
         if (mtp) {
             // The commit graphs read the verify block at the head of the token axis; a mixed
             // execution keeps it behind its prefill segments and commits eagerly.
-            if (graphs && !operation.mixed)
-                graphs->commit_mtp(operation.batch, mtp_history, count_tokens,
+            if (slot().graphs && !operation.mixed)
+                slot().graphs->commit_mtp(operation.batch, mtp_history, count_tokens,
                                    device.execution_view());
             else
                 execute_mtp_commit(operation.batch, mtp_history, count_tokens, nullptr, nullptr,
@@ -101,17 +101,17 @@ void RankProgramImpl::launch_commit(ComputeOperation& operation) {
             device_work = true;
         }
     }
-    if (compute_actions->occupied()) compute_actions->finish();
+    if (slot().compute_actions->occupied()) slot().compute_actions->finish();
     if (!value.context.operations.empty()) {
-        compute_actions->submit(value.context);
+        slot().compute_actions->submit(value.context);
         device_work = true;
     }
     if (!device_work) {
         retire_compute();
         return;
     }
-    gpu_timer.record_retirement();
-    compute_retired.record(device.stream());
+    slot().gpu_timer.record_retirement();
+    slot().compute_retired.record(device.stream());
     operation.stage = ComputeStage::Retiring;
 }
 
@@ -119,7 +119,7 @@ void RankProgramImpl::execute_mtp_commit(std::uint32_t batch, bool repair, bool 
                                          DecodeGraphSection* repair_section,
                                          DecodeGraphSection* counts_section,
                                          std::uint32_t column) {
-    auto& frame     = resources.frame;
+    auto& frame     = resources.frame();
     const auto cuda = device.execution_view();
     resources.replay_fold->execute(frame.state_source_offsets.slice(0, 0, batch),
                                    frame.commit_destination_offsets.slice(0, 0, batch),
@@ -153,40 +153,41 @@ void RankProgramImpl::execute_mtp_commit(std::uint32_t batch, bool repair, bool 
 }
 
 void RankProgramImpl::retire_compute() {
-    auto ticket  = compute->request.ticket;
-    auto command = compute->last_command;
-    if (compute_actions->occupied()) compute_actions->finish();
+    auto& flight = *slot().compute;
+    auto ticket  = flight.request.ticket;
+    auto command = flight.last_command;
+    if (slot().compute_actions->occupied()) slot().compute_actions->finish();
     if (resources.vision) {
         const auto* active = resources.vision->current();
         if (active) {
             const bool reads_window =
-                std::any_of(compute->rows.begin(), compute->rows.end(), [&](const auto& row) {
+                std::any_of(flight.rows.begin(), flight.rows.end(), [&](const auto& row) {
                     return row.member.residency == active->owner.residency;
                 });
-            bool release = compute->cancelled && reads_window;
-            if (const auto* forward = std::get_if<ForwardWork>(&compute->request.work.operation))
+            bool release = flight.cancelled && reads_window;
+            if (const auto* forward = std::get_if<ForwardWork>(&flight.request.work.operation))
                 for (const auto& input : forward->inputs)
                     if (input.visual && input.visual->window.id == active->id)
                         release |=
                             input.prompt_begin + input.tokens.size() >= active->plan->consume_end;
-            if (compute->commit)
-                for (std::size_t i = 0; i < compute->commit->rows.size(); ++i)
-                    if (compute->rows[i].member.residency == active->owner.residency)
-                        release |=
-                            compute->commit->rows[i].terminal || compute->commit->rows[i].discarded;
+            if (flight.commit)
+                for (std::size_t i = 0; i < flight.commit->rows.size(); ++i)
+                    if (flight.rows[i].member.residency == active->owner.residency)
+                        release |= flight.commit->rows[i].terminal ||
+                                   flight.commit->rows[i].discarded;
             if (release) resources.vision->release(active->id);
         }
     }
     auto observation = retirement_observation();
-    gpu_timer.observe_retirement(compute->gpu);
-    observation.gpu = compute->gpu;
-    const auto work = ExecutionTypes::describe_work(compute->request.work);
-    if (compute->attention.forwards) observation.attention = {work.kind, compute->attention};
-    observation.path = compute->graph_started
+    slot().gpu_timer.observe_retirement(flight.gpu);
+    observation.gpu = flight.gpu;
+    const auto work = ExecutionTypes::describe_work(flight.request.work);
+    if (flight.attention.forwards) observation.attention = {work.kind, flight.attention};
+    observation.path = flight.graph_started
                            ? (resources.moe ? ExecutionPath::Mixed : ExecutionPath::Graph)
                            : ExecutionPath::Eager;
-    compute.reset();
-    resources.work.reset();
+    slot().compute.reset();
+    resources.work().reset();
     events.emplace_back(runtime::DeviceRetired{ticket, command, observation});
 }
 

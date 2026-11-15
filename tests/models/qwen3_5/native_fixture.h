@@ -30,7 +30,9 @@ public:
         implementation.initialize_graphs();
     }
 
-    [[nodiscard]] runtime::ExecutionCapacity capacity() const noexcept { return {1, 1}; }
+    [[nodiscard]] runtime::ExecutionCapacity capacity() const noexcept {
+        return {implementation.compute_frames, 1};
+    }
 
     void validate_work(const q35::Work& work, runtime::FrameKind kind) const {
         implementation.validate_work(work, kind);

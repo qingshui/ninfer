@@ -358,7 +358,7 @@ runtime::ContextStart SessionImpl::start_demote(const ContextDemotion& quote,
     const auto write     = demotion_host_requirements(quote);
     const auto placement = directory.plan_host(write, *released);
     if (!placement.feasible()) return runtime::ContextStart::Stale;
-    if (placement.requires_maintenance() && (execution || !events.empty()))
+    if (placement.requires_maintenance() && (executing() || !events.empty()))
         return runtime::ContextStart::Deferred;
     auto frame = executor().try_reserve(runtime::FrameKind::Context);
     if (!frame) return runtime::ContextStart::Deferred;

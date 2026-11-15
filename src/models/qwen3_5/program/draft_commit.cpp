@@ -16,7 +16,7 @@ void RankProgramImpl::commit_draft_history(ComputeOperation& operation) {
         if (row.terminal && !row.discarded) maximum = std::max(maximum, row.accepted_tokens);
     if (maximum == 0) return;
 
-    auto& frame       = resources.frame;
+    auto& frame       = resources.frame();
     auto& draft       = *frame.dflash;
     auto& state       = *resources.dflash;
     const auto width  = static_cast<std::int32_t>(draft_window + 1);
@@ -25,16 +25,16 @@ void RankProgramImpl::commit_draft_history(ComputeOperation& operation) {
     const auto prefix = [](const Tensor& storage, std::initializer_list<std::int32_t> shape) {
         return Tensor({storage.data, storage.bytes(), storage.device}, storage.dtype, shape);
     };
-    auto scope = resources.work.scope();
+    auto scope = resources.work().scope();
     Tensor features =
-        resources.work.alloc(DType::BF16, {state.pending_features.ne[0], width, batch});
+        resources.work().alloc(DType::BF16, {state.pending_features.ne[0], width, batch});
     auto positions = prefix(draft.append_positions, {width, batch});
     auto counts    = draft.append_counts.slice(0, 0, batch);
     ops::prepare_ragged_prefix(state.pending_features, frame.residency_slots.slice(0, 0, batch),
                                frame.draft_append_starts.slice(0, 0, batch),
                                frame.draft_append_ends.slice(0, 0, batch), features, positions,
                                counts, cuda);
-    execution::draft_append_context({parameters, resources.work, cuda, state.local,
+    execution::draft_append_context({parameters, resources.work(), cuda, state.local,
                                      state.full ? &*state.full : nullptr, proposal_head},
                                     features, positions, counts,
                                     frame.commit_destination_offsets.slice(0, 0, batch),

@@ -16,21 +16,23 @@ RankProgramImpl::RankProgramImpl(const execution::Parameters& values, const Sequ
       draft_window(plan.draft_window), backend(plan.speculative_backend),
       proposal_head(plan.proposal_head), use_cuda_graph(plan.use_cuda_graph),
       kv_storage(plan.kv_storage), workspace_plan(plan.workspace),
+      compute_frames(plan.compute_frames),
       resources(context, plan.persistent, plan.workspace, observer),
       context_counts(plan.causal_scoring ? 0
                                          : std::size_t(values.profile->public_tokens) *
                                                plan.max_concurrency * sizeof(std::int32_t)),
       residencies(plan.max_concurrency),
-      result_ready(context), drafts_ready(context), compute_retired(context),
-      context_ready(context), prefill_timer(context), gpu_timer(context, plan.gpu_timing) {
+      context_ready(context) {
     if (parameters.profile != plan.profile || parameters.profile->options != plan.features)
         throw std::invalid_argument("Qwen3.5 rank parameters differ from the prepared plan");
+    if (compute_frames == 0 || resources.frame_count() != compute_frames)
+        throw std::invalid_argument("Qwen3.5 compute frames differ from the prepared resources");
     std::vector<context::ContextTableStorage> tables{{0, &resources.decoder.text_kv.tables()}};
     if (auto* cache = resources.backend_kv()) tables.push_back({1, &cache->tables()});
     storage = std::make_unique<context::ContextStorage>(resources.context.span(),
                                                         resources.host_context.span(), tables);
-    compute_actions =
-        std::make_unique<context::ContextMigration>(device, *storage, device.execution_view());
+    for (std::uint32_t frame = 0; frame < compute_frames; ++frame)
+        slots.push_back(std::make_unique<ComputeSlot>(device, *storage, plan.gpu_timing));
     context_actions = std::make_unique<context::ContextMigration>(device, *storage);
     if (plan.moe) {
         std::vector<const moe::Parameters*> layers;
@@ -51,6 +53,22 @@ RankProgramImpl::~RankProgramImpl() {
         (void)cudaStreamSynchronize(device.stream());
         (void)cudaStreamSynchronize(device.transfer_stream());
     }
+}
+
+ComputeSlot::ComputeSlot(DeviceContext& device, context::ContextStorage& storage,
+                         bool gpu_timing)
+    : compute_actions(std::make_unique<context::ContextMigration>(device, storage,
+                                                                  device.execution_view())),
+      result_ready(device), drafts_ready(device), compute_retired(device), prefill_timer(device),
+      gpu_timer(device, gpu_timing) {}
+
+void RankProgramImpl::select_frame(std::uint32_t frame) {
+    resources.select(frame);
+}
+
+bool RankProgramImpl::computing() const noexcept {
+    return std::any_of(slots.begin(), slots.end(),
+                       [](const auto& entry) { return entry->compute != nullptr; });
 }
 
 void RankProgramImpl::install_residencies(const ContextWork& work) {
@@ -104,11 +122,14 @@ void RankProgramImpl::start(runtime::ExecutionRequest<ExecutionTypes>&& request)
         install_residencies(std::get<ContextWork>(context_operation->request.work.operation));
         context_ready.record(device.transfer_stream());
     } else {
-        if (compute) throw std::logic_error("Qwen3.5 compute frame is occupied");
-        gpu_timer.begin();
-        compute = std::make_unique<ComputeOperation>(std::move(request), max_concurrency);
-        compute_actions->submit(compute->request.work.context);
-        initialize_inputs(*compute);
+        const auto frame = request.ticket.frame.index;
+        if (frame >= compute_frames) throw std::logic_error("Qwen3.5 compute frame is unknown");
+        select_frame(frame);
+        if (slot().compute) throw std::logic_error("Qwen3.5 compute frame is occupied");
+        slot().gpu_timer.begin();
+        slot().compute = std::make_unique<ComputeOperation>(std::move(request), max_concurrency);
+        slot().compute_actions->submit(slot().compute->request.work.context);
+        initialize_inputs(*slot().compute);
     }
     progress();
 }
@@ -125,7 +146,7 @@ void RankProgramImpl::supply(runtime::ExecutionTicket ticket, runtime::CommandSe
 void RankProgramImpl::commit(runtime::ExecutionTicket ticket, runtime::CommandSequence command,
                              Commit&& value) {
     auto& operation = require_compute(ticket);
-    gpu_timer.resolve();
+    slot().gpu_timer.resolve();
     operation.last_command = command;
     operation.commit       = std::move(value);
     operation.stage        = ComputeStage::Commit;
@@ -134,7 +155,7 @@ void RankProgramImpl::commit(runtime::ExecutionTicket ticket, runtime::CommandSe
 
 void RankProgramImpl::discard(runtime::ExecutionTicket ticket, runtime::CommandSequence command) {
     auto& operation = require_compute(ticket);
-    gpu_timer.resolve();
+    slot().gpu_timer.resolve();
     operation.last_command = command;
     operation.cancelled    = true;
     progress();
@@ -158,13 +179,16 @@ void RankProgramImpl::drain() {
         }
     };
     attempt([&] { device.bind_to_current_thread(); });
-    if (compute && compute->text) attempt([&] { compute->text->cancel(); });
-    if (graphs) attempt([&] { graphs->cancel(); });
+    for (auto& entry : slots) {
+        if (entry->compute && entry->compute->text)
+            attempt([&] { entry->compute->text->cancel(); });
+        if (entry->graphs) attempt([&] { entry->graphs->cancel(); });
+    }
     if (resources.moe) {
         attempt([&] { resources.moe->cancel(); });
         attempt([&] { resources.moe->synchronize(); });
     }
-    attempt([&] { compute_actions->drain(); });
+    for (auto& entry : slots) attempt([&] { entry->compute_actions->drain(); });
     attempt([&] { context_actions->drain(); });
     const auto wait_stream = [](cudaStream_t stream) {
         const auto status = cudaStreamSynchronize(stream);
@@ -174,7 +198,7 @@ void RankProgramImpl::drain() {
     };
     attempt([&] { wait_stream(device.transfer_stream()); });
     attempt([&] { wait_stream(device.stream()); });
-    compute.reset();
+    for (auto& entry : slots) entry->compute.reset();
     context_operation.reset();
     events.clear();
     if (resources.vision)

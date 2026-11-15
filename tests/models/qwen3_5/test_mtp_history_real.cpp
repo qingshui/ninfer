@@ -101,7 +101,7 @@ public:
         auto p = upload(device, input.positions), r = upload(device, input.rope);
         auto c = upload(device, input.counts), lanes = upload(device, input.lanes);
         auto e = input.embeddings.empty() ? DeviceBuffer{} : upload(device, input.embeddings);
-        const auto hidden = fixture_.rank().resources.frame.spec.hidden;
+        const auto hidden = fixture_.rank().resources.frame().spec.hidden;
         Tensor embeddings;
         if (e.size())
             embeddings = Tensor(e.span(), DType::BF16, {hidden, input.width, input.batch});
@@ -133,8 +133,8 @@ public:
     }
 
     void compare_inputs(const HistoryInput& expected) {
-        const auto& frame = *fixture_.rank().resources.frame.mtp;
-        const auto hidden = fixture_.rank().resources.frame.spec.hidden;
+        const auto& frame = *fixture_.rank().resources.frame().mtp;
+        const auto hidden = fixture_.rank().resources.frame().spec.hidden;
         require(read<std::uint16_t>(
                     packed(frame.history_conditioning, {hidden, expected.width, expected.batch})) ==
                     expected.conditioning,
@@ -257,7 +257,7 @@ public:
             work.control_last_tokens = {input.tokens.back()};
             work.sampling            = {{{}, false}};
         }
-        const auto hidden = native_.rank().resources.frame.spec.hidden;
+        const auto hidden = native_.rank().resources.frame().spec.hidden;
         std::optional<runtime::ExecutionTicket> ticket;
         std::unique_ptr<q35::detail::ComputeOperation> manual;
         std::vector<std::uint16_t> embeddings;
@@ -272,7 +272,7 @@ public:
             visual_storage =
                 DeviceBuffer(native_.device().device(), std::size_t(hidden) * count * 2);
             Tensor visual_input(visual_storage.span(), DType::BF16, {hidden, count});
-            auto ids = native_.rank().resources.frame.input_view(count, 1).ids.view({count});
+            auto ids = native_.rank().resources.frame().input_view(count, 1).ids.view({count});
             ops::embedding(ids, native_.rank().parameters.text.token_embedding, visual_input,
                            native_.device().execution_view());
             native_.device().synchronize();
@@ -292,7 +292,7 @@ public:
             (void)result(*ticket);
         }
         const auto produced =
-            read<std::uint16_t>(native_.rank().resources.frame.input_view(count, 1).hidden);
+            read<std::uint16_t>(native_.rank().resources.frame().input_view(count, 1).hidden);
         const int skip = base == 0 ? 1 : 0;
         if (count > skip) {
             HistoryInput expected;
@@ -331,7 +331,7 @@ public:
             auto destination = native_.rank().resources.state_images.continuation_hidden(
                 rows_[lane].state_offsets.destination);
             auto source =
-                native_.rank().resources.frame.input_view(count, 1).hidden.slice(1, count - 1, 1);
+                native_.rank().resources.frame().input_view(count, 1).hidden.slice(1, count - 1, 1);
             copy_bytes_async({destination.data, destination.bytes(), destination.device},
                              {source.data, source.bytes(), source.device},
                              native_.device().execution_view());
@@ -407,8 +407,8 @@ public:
         auto ticket          = submit({.operation = work}, runtime::FrameKind::Compute);
         const auto output    = std::get<q35::GeneratedResult>(result(ticket).output);
         auto& native         = native_.rank();
-        auto& operation      = *native.compute;
-        auto& frame          = native.resources.frame;
+        auto& operation      = *native.slots[ticket.frame.index]->compute;
+        auto& frame          = native.resources.compute_frame(ticket.frame.index).frame;
         const int width      = operation.width;
         const int hidden     = frame.spec.hidden;
         const auto main      = frame.decode_view(width, kBatch);

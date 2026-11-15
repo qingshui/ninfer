@@ -6,6 +6,7 @@
 #include <limits>
 #include <stdexcept>
 #include <type_traits>
+#include <utility>
 
 namespace ninfer::models::qwen3_5 {
 
@@ -13,7 +14,9 @@ RankProgram::RankProgram(std::unique_ptr<detail::RankProgramImpl> impl) : impl_(
 
 RankProgram::~RankProgram() = default;
 
-runtime::ExecutionCapacity RankProgram::capacity() const noexcept { return {1, 1}; }
+runtime::ExecutionCapacity RankProgram::capacity() const noexcept {
+    return {impl_->compute_frames, 1};
+}
 
 void RankProgram::validate_work(const Work& work, runtime::FrameKind required) const {
     impl_->validate_work(work, required);
@@ -121,7 +124,8 @@ void RankProgramImpl::validate_work(const Work& work, runtime::FrameKind kind) c
     if (kind != (context ? runtime::FrameKind::Context : runtime::FrameKind::Compute)) {
         throw std::invalid_argument("Qwen3.5 work is reserved in the wrong execution frame");
     }
-    (context ? context_actions : compute_actions)->validate(work.context);
+    // Every compute frame has the same action limits, so any slot validates a compute work.
+    (context ? context_actions : slots.front()->compute_actions)->validate(work.context);
     auto validate_input = [&](const InputWindow& input, std::uint32_t limit) {
         if (input.tokens.size() > limit || input.rope_positions.size() != input.tokens.size() * 3) {
             throw std::invalid_argument("Qwen3.5 input window has invalid positions or extent");
@@ -234,7 +238,7 @@ void RankProgramImpl::validate_work(const Work& work, runtime::FrameKind kind) c
             } else if constexpr (std::is_same_v<T, ScoreWork>) {
                 validate_row(op.row);
                 validate_input(op.input, prefill_chunk);
-                if (!resources.frame.spec.causal_scoring || op.input.tokens.empty() ||
+                if (!resources.frame().spec.causal_scoring || op.input.tokens.empty() ||
                     op.first_column > op.input.tokens.size() ||
                     op.targets.size() > op.input.tokens.size() - op.first_column)
                     throw std::invalid_argument("Qwen3.5 scoring span is invalid");
@@ -244,20 +248,23 @@ void RankProgramImpl::validate_work(const Work& work, runtime::FrameKind kind) c
 }
 
 ComputeOperation& RankProgramImpl::require_compute(runtime::ExecutionTicket ticket) {
-    if (!compute || compute->request.ticket != ticket)
-        throw std::logic_error("Qwen3.5 execution ticket is no longer active");
-    return *compute;
+    (void)std::as_const(*this).require_compute(ticket);
+    select_frame(ticket.frame.index);
+    return *slot().compute;
 }
 
 const ComputeOperation& RankProgramImpl::require_compute(runtime::ExecutionTicket ticket) const {
-    if (!compute || compute->request.ticket != ticket)
+    if (ticket.frame.kind != runtime::FrameKind::Compute || ticket.frame.index >= slots.size() ||
+        !slots[ticket.frame.index]->compute ||
+        slots[ticket.frame.index]->compute->request.ticket != ticket)
         throw std::logic_error("Qwen3.5 execution ticket is no longer active");
-    return *compute;
+    return *slots[ticket.frame.index]->compute;
 }
 
 void RankProgramImpl::validate_decision(runtime::ExecutionTicket ticket,
                                         const runtime::DecisionInput& input) const {
-    const auto& op = require_compute(ticket);
+    const auto& op    = require_compute(ticket);
+    const auto& frame = resources.compute_frame(ticket.frame.index).frame;
     if (!op.decision_requested || op.decision_supplied || input.stage != op.decision_stage)
         throw std::logic_error("Qwen3.5 decision input does not match the pending stage");
     std::vector<std::uint8_t> seen(max_concurrency, 0);
@@ -265,7 +272,7 @@ void RankProgramImpl::validate_decision(runtime::ExecutionTicket ticket,
     for (const auto& row : input.rows) {
         if (row.member >= op.batch || seen[row.member] || !op.sampling[row.member].constrained ||
             row.positions !=
-                static_cast<std::uint32_t>(resources.frame.host_ingress->extents[row.member] + 1) ||
+                static_cast<std::uint32_t>(frame.host_ingress->extents[row.member] + 1) ||
             row.words.size() != words * row.positions || (row.dead_positions >> row.positions) != 0)
             throw std::invalid_argument("Qwen3.5 decision mask has invalid shape or membership");
         seen[row.member] = true;
@@ -277,7 +284,9 @@ void RankProgramImpl::validate_decision(runtime::ExecutionTicket ticket,
 }
 
 void RankProgramImpl::prepare_commit(runtime::ExecutionTicket ticket, Commit& value) const {
-    const auto& op = require_compute(ticket);
+    const auto& op    = require_compute(ticket);
+    const auto& frame = resources.compute_frame(ticket.frame.index).frame;
+    auto& actions     = *slots[ticket.frame.index]->compute_actions;
     if (op.stage != ComputeStage::AwaitCommit || !op.result_published)
         throw std::logic_error("Qwen3.5 commit does not match the pending result");
     const auto* forward  = std::get_if<ForwardWork>(&op.request.work.operation);
@@ -285,13 +294,13 @@ void RankProgramImpl::prepare_commit(runtime::ExecutionTicket ticket, Commit& va
     if (!generated) {
         if (!value.rows.empty() && value.rows.size() != op.batch)
             throw std::invalid_argument("Qwen3.5 non-generating commit has invalid membership");
-        compute_actions->validate(value.context);
+        actions.validate(value.context);
         return;
     }
-    const auto& output = *resources.frame.host_egress;
+    const auto& output = *frame.host_egress;
     if (value.rows.size() != op.batch)
         throw std::invalid_argument("Qwen3.5 generating commit has invalid membership");
-    compute_actions->validate(value.context);
+    actions.validate(value.context);
     for (std::uint32_t i = 0; i < op.batch; ++i) {
         const auto& row = value.rows[i];
         if (row.accepted_tokens > static_cast<std::uint32_t>(output.counts[i]) ||

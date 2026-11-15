@@ -210,7 +210,7 @@ bool SessionImpl::capture_is_input(SequenceHandle handle) const {
 }
 
 bool SessionImpl::start_capture(SequenceHandle handle) {
-    if (has_context_operation() || execution) { return false; }
+    if (has_context_operation() || executing()) { return false; }
     if (!valid_sequence(handle)) { throw std::logic_error("capture has a stale lane"); }
     const auto lane = this->lane(handle);
     auto& request   = requests[lane];

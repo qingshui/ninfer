@@ -51,7 +51,7 @@ bool SessionImpl::context_pins(CheckpointHandle handle) const noexcept {
 }
 
 runtime::ContextStart SessionImpl::start_maintenance(const ContextAssessment& assessment) {
-    if (has_context_operation() || execution || !events.empty()) {
+    if (has_context_operation() || executing() || !events.empty()) {
         pending_maintenance_ = assessment;
         directory.request_maintenance();
         return runtime::ContextStart::Deferred;

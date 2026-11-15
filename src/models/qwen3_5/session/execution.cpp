@@ -8,15 +8,17 @@ namespace ninfer::models::qwen3_5::detail {
 std::optional<runtime::ExecutionTicket>
 SessionImpl::submit_execution(Execution&& pending, runtime::ExecutionReservation reservation,
                               Work&& work) {
-    if (execution) throw std::logic_error("compute execution is already pending");
-    execution.emplace(std::move(pending));
+    auto& slot = execution_slot(reservation.frame());
+    if (slot) throw std::logic_error("compute execution is already pending on its frame");
+    slot.emplace(std::move(pending));
+    auto& current = *slot;
     try {
-        execution->preparation->prepare_actions();
-        work.context      = execution->preparation->actions();
+        current.preparation->prepare_actions();
+        work.context      = current.preparation->actions();
         const auto ticket = executor().submit(std::move(reservation), std::move(work));
-        execution->ticket = ticket;
-        if (execution->vision_id) vision_window.submitted(execution->vision_id, ticket);
-        execution->preparation->mark_submitted();
+        current.ticket    = ticket;
+        if (current.vision_id) vision_window.submitted(current.vision_id, ticket);
+        current.preparation->mark_submitted();
         return ticket;
     } catch (const std::exception& error) {
         executor().fail(error.what());
@@ -39,9 +41,16 @@ bool SessionImpl::crosses_execution_boundary(const SequenceState& state, std::ui
 
 std::optional<PrefillStart> SessionImpl::start_prefill(std::span<const SequenceHandle> candidates,
                                                        std::span<const bool> constrained) {
-    if (execution) return {};
+    if (exclusive_execution()) return {};
     if (candidates.empty() || (!constrained.empty() && constrained.size() != candidates.size()))
         throw std::invalid_argument("prefill membership is invalid");
+    // A vision window and draft feature state belong to one execution: they start with nothing
+    // else in flight.
+    if (executing()) {
+        const auto& first = requests[lane(candidates.front())];
+        if ((first.base && first.base->vision) || is_masked_draft_backend(speculative_backend))
+            return {};
+    }
     const auto considered = std::min<std::size_t>(candidates.size(), prefill_pack_limit());
     for (std::size_t i = 0; i < considered; ++i) {
         if (std::find(candidates.begin(), candidates.begin() + i, candidates[i]) !=
@@ -191,7 +200,7 @@ SessionImpl::start_mixed(std::span<const SequenceHandle> prefill,
                          std::span<const SequenceHandle> decode,
                          std::span<const runtime::RoundBudget> budgets,
                          std::span<const bool> decode_constrained) {
-    if (execution) return {};
+    if (exclusive_execution()) return {};
     if (prefill.empty() || decode.empty() || budgets.size() != decode.size() ||
         (!prefill_constrained.empty() && prefill_constrained.size() != prefill.size()) ||
         (!decode_constrained.empty() && decode_constrained.size() != decode.size()))
@@ -273,10 +282,13 @@ SessionImpl::start_mixed(std::span<const SequenceHandle> prefill,
 }
 
 std::optional<runtime::ExecutionTicket> SessionImpl::start_replay(SequenceHandle handle) {
-    if (execution) return {};
+    if (exclusive_execution()) return {};
     const auto l  = lane(handle);
     auto& state   = sequences[l];
     auto& request = requests[l];
+    if (executing() &&
+        ((request.base && request.base->vision) || is_masked_draft_backend(speculative_backend)))
+        return {};
     if (request.lifecycle != Lifecycle::Replaying || request.capture_pending)
         throw std::logic_error("sequence has no executable Replay window");
     require_unit(l, ExecutionUnitKind::Replay);
@@ -318,7 +330,7 @@ std::optional<runtime::ExecutionTicket>
 SessionImpl::start_decode(std::span<const SequenceHandle> members,
                           std::span<const runtime::RoundBudget> budgets,
                           std::span<const bool> constrained) {
-    if (execution) return {};
+    if (exclusive_execution()) return {};
     if (members.empty() || members.size() > max_concurrency || budgets.size() != members.size() ||
         (!constrained.empty() && constrained.size() != members.size()))
         throw std::invalid_argument("decode membership is invalid");
@@ -346,7 +358,7 @@ std::optional<runtime::ExecutionTicket>
 SessionImpl::start_control(std::span<const SequenceHandle> members, std::span<const TokenId> tokens,
                            std::uint32_t stride,
                            std::span<const std::optional<std::uint32_t>> splits) {
-    if (execution) return {};
+    if (exclusive_execution()) return {};
     if (members.empty() || members.size() > max_concurrency || !stride ||
         stride > plan.profile->control_token_limit || tokens.size() != members.size() * stride ||
         splits.size() != members.size())
@@ -405,7 +417,7 @@ SessionImpl::start_control(std::span<const SequenceHandle> members, std::span<co
 
 std::optional<runtime::ExecutionTicket>
 SessionImpl::start_normalize(SequenceHandle handle, runtime::ExecutionReservation reservation) {
-    if (execution) return {};
+    if (executing()) return {};
     const auto l = lane(handle);
     auto& state  = sequences[l];
     require_unit(l, ExecutionUnitKind::Normalize);
@@ -429,9 +441,43 @@ SessionImpl::start_normalize(SequenceHandle handle, runtime::ExecutionReservatio
 }
 
 void SessionImpl::supply(runtime::ExecutionTicket ticket, runtime::DecisionInput&& input) {
-    if (!execution || execution->ticket != ticket || execution->result_ready)
+    const auto* owner = find_execution(ticket);
+    if (!owner || owner->result_ready)
         throw std::logic_error("decision input does not match a pending execution");
     executor().supply(ticket, std::move(input));
+}
+
+std::optional<SessionImpl::Execution>& SessionImpl::execution_slot(runtime::FrameId frame) {
+    if (frame.kind != runtime::FrameKind::Compute || frame.index >= executions.size())
+        throw std::logic_error("execution ticket names no compute frame");
+    return executions[frame.index];
+}
+
+SessionImpl::Execution* SessionImpl::find_execution(runtime::ExecutionTicket ticket) noexcept {
+    if (ticket.frame.kind != runtime::FrameKind::Compute || ticket.frame.index >= executions.size())
+        return nullptr;
+    auto& slot = executions[ticket.frame.index];
+    return slot && slot->ticket == ticket ? &*slot : nullptr;
+}
+
+const SessionImpl::Execution*
+SessionImpl::find_execution(runtime::ExecutionTicket ticket) const noexcept {
+    return const_cast<SessionImpl*>(this)->find_execution(ticket);
+}
+
+bool SessionImpl::executing() const noexcept {
+    return std::any_of(executions.begin(), executions.end(),
+                       [](const auto& slot) { return slot.has_value(); });
+}
+
+bool SessionImpl::exclusive(const Execution& execution) noexcept {
+    return execution.vision_id != 0 || execution.kind == OperationKind::Normalize ||
+           execution.kind == OperationKind::Score;
+}
+
+bool SessionImpl::exclusive_execution() const noexcept {
+    return std::any_of(executions.begin(), executions.end(),
+                       [](const auto& slot) { return slot && exclusive(*slot); });
 }
 
 std::optional<SessionEvent> SessionImpl::poll() {
@@ -451,7 +497,7 @@ std::optional<SessionEvent> SessionImpl::poll() {
                 }
                 return event;
             }
-            if (pending_maintenance_ && !execution && !has_context_operation()) {
+            if (pending_maintenance_ && !executing() && !has_context_operation()) {
                 auto assessment = std::move(*pending_maintenance_);
                 pending_maintenance_.reset();
                 (void)start_maintenance(assessment);
@@ -468,14 +514,15 @@ std::optional<SessionEvent> SessionImpl::poll() {
                     } else if constexpr (std::is_same_v<T, runtime::DeviceRetired>) {
                         retire(value);
                     } else if constexpr (std::is_same_v<T, runtime::DecisionNeeded>) {
-                        if (!execution || execution->ticket != value.ticket)
+                        const auto* owner = find_execution(value.ticket);
+                        if (!owner)
                             throw std::logic_error("decision request has no owning execution");
-                        events.push_back(
-                            {value.ticket, execution->members, std::move(value.request)});
+                        events.push_back({value.ticket, owner->members, std::move(value.request)});
                     } else if constexpr (std::is_same_v<T, runtime::DecisionConsumed>) {
-                        if (!execution || execution->ticket != value.ticket)
+                        const auto* owner = find_execution(value.ticket);
+                        if (!owner)
                             throw std::logic_error("decision consumption has no owning execution");
-                        events.push_back({value.ticket, execution->members, std::move(value)});
+                        events.push_back({value.ticket, owner->members, std::move(value)});
                     }
                 },
                 std::move(*event));

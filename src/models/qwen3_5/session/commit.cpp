@@ -7,8 +7,8 @@ namespace ninfer::models::qwen3_5::detail {
 
 // The pending batch covers the decode rows of the execution: all of them for a decode or a
 // first-token prefill, the members behind the segments for a mixed execution.
-PendingBatch SessionImpl::generated_pending(const GeneratedResult& generated) {
-    auto& current     = *execution;
+PendingBatch SessionImpl::generated_pending(const Execution& current,
+                                            const GeneratedResult& generated) {
     const auto first  = current.decode_begin;
     const auto batch  = current.members.size() - first;
     if (!generated.row_stride || generated.tokens.size() != batch * generated.row_stride ||
@@ -36,11 +36,17 @@ PendingBatch SessionImpl::generated_pending(const GeneratedResult& generated) {
     return out;
 }
 
-bool SessionImpl::matches_pending(const PendingBatch& pending) const noexcept {
-    return execution && execution->members.size() - execution->decode_begin ==
-                            pending.members_.size() &&
-           std::equal(execution->members.begin() + execution->decode_begin,
-                      execution->members.end(), pending.members_.begin());
+// The execution a pending batch belongs to, by its ticket, when the batch still names the decode
+// rows of that execution.
+const SessionImpl::Execution*
+SessionImpl::matching_execution(const PendingBatch& pending) const noexcept {
+    const auto* current = find_execution(pending.ticket_);
+    if (!current ||
+        current->members.size() - current->decode_begin != pending.members_.size() ||
+        !std::equal(current->members.begin() + current->decode_begin, current->members.end(),
+                    pending.members_.begin()))
+        return nullptr;
+    return current;
 }
 
 namespace {
@@ -100,9 +106,10 @@ void SessionImpl::receive_result(runtime::ResultReady<ExecutionTypes>&& event) {
         receive_context_result(event.ticket, std::move(*context));
         return;
     }
-    if (!execution || execution->ticket != event.ticket || execution->result_ready)
+    auto* owner = find_execution(event.ticket);
+    if (!owner || owner->result_ready)
         throw std::logic_error("execution result does not match its transaction");
-    auto& current           = *execution;
+    auto& current           = *owner;
     current.result_ready    = true;
     current.observed_result = event.execution;
 
@@ -110,7 +117,7 @@ void SessionImpl::receive_result(runtime::ResultReady<ExecutionTypes>&& event) {
         if (current.kind != OperationKind::Decode)
             throw std::logic_error("decode result has the wrong execution kind");
         current.generated.emplace(std::move(*generated));
-        auto pending = generated_pending(*current.generated);
+        auto pending = generated_pending(current, *current.generated);
         events.push_back({current.ticket, current.members, std::move(pending)});
         return;
     }
@@ -133,7 +140,7 @@ void SessionImpl::receive_result(runtime::ResultReady<ExecutionTypes>&& event) {
                 throw std::logic_error("completed prefill omitted its first token");
         }
         current.generated.emplace(std::move(mixed->decode));
-        progress.decode = generated_pending(*current.generated);
+        progress.decode = generated_pending(current, *current.generated);
         events.push_back({current.ticket, current.members, std::move(progress)});
         return;
     }
@@ -159,7 +166,7 @@ void SessionImpl::receive_result(runtime::ResultReady<ExecutionTypes>&& event) {
                 if (!progress.rows[0].complete)
                     throw std::logic_error("incomplete prefill produced a token");
                 current.generated.emplace(std::move(*forward->generated));
-                progress.rows[0].pending.emplace(generated_pending(*current.generated));
+                progress.rows[0].pending.emplace(generated_pending(current, *current.generated));
                 events.push_back({current.ticket, current.members, std::move(progress)});
                 return;
             }
@@ -182,7 +189,7 @@ void SessionImpl::receive_result(runtime::ResultReady<ExecutionTypes>&& event) {
                 SessionEvent{current.ticket, current.members, ControlComplete{}});
         } else
             throw std::logic_error("unexpected forward result");
-        commit_completed_unit();
+        commit_completed_unit(current);
         return;
     }
     if (std::holds_alternative<NormalizeResult>(event.result.output)) {
@@ -192,7 +199,7 @@ void SessionImpl::receive_result(runtime::ResultReady<ExecutionTypes>&& event) {
         metadata.dflash_context_frontier = metadata.execution_frontier;
         metadata.backend_kv_valid        = has_backend_pool() ? metadata.execution_frontier : 0;
         current.completed.push_back(metadata);
-        commit_completed_unit();
+        commit_completed_unit(current);
         return;
     }
     if (auto* score = std::get_if<ScoreResult>(&event.result.output)) {
@@ -203,7 +210,7 @@ void SessionImpl::receive_result(runtime::ResultReady<ExecutionTypes>&& event) {
             current.bases[0].metadata, score->processed_tokens, SpeculativeBackend::None, false));
         if (score->logprobs.size() > scoring->logprobs.capacity() - scoring->logprobs.size())
             throw std::logic_error("score result exceeds its prepared target capacity");
-        commit_completed_unit();
+        commit_completed_unit(current);
         scoring->cursor += score->processed_tokens;
         scoring->logprobs.insert(scoring->logprobs.end(), score->logprobs.begin(),
                                  score->logprobs.end());
@@ -213,8 +220,7 @@ void SessionImpl::receive_result(runtime::ResultReady<ExecutionTypes>&& event) {
     throw std::logic_error("unknown native result");
 }
 
-void SessionImpl::commit_completed_unit() {
-    auto& current      = *execution;
+void SessionImpl::commit_completed_unit(Execution& current) {
     current.settlement = std::make_unique<context::ContextTransaction>(directory);
     const auto recovery = std::make_unique<bool[]>(max_concurrency);
     Commit physical;
@@ -253,10 +259,11 @@ void SessionImpl::commit_completed_unit() {
 
 CommitResult SessionImpl::commit(PendingBatch&& pending,
                                  std::span<const runtime::CommitDecision> decisions) {
-    if (!execution || execution->ticket != pending.ticket_ || !matches_pending(pending) ||
-        execution->committed || !execution->generated || decisions.size() != pending.row_count())
+    auto* owner = find_execution(pending.ticket_);
+    if (!owner || !matching_execution(pending) || owner->committed || !owner->generated ||
+        decisions.size() != pending.row_count())
         throw std::logic_error("generated commit has no matching transaction");
-    auto& current     = *execution;
+    auto& current     = *owner;
     const auto first  = current.decode_begin;
     for (std::size_t b = 0; b < decisions.size(); ++b) {
         const auto& d = decisions[b];
@@ -387,11 +394,10 @@ CommitResult SessionImpl::commit(PendingBatch&& pending,
 }
 
 DiscardResult SessionImpl::discard(PendingBatch&& pending) noexcept {
-    if (!execution || execution->ticket != pending.ticket_ || !matches_pending(pending) ||
-        execution->committed)
-        return {};
+    auto* owner = find_execution(pending.ticket_);
+    if (!owner || !matching_execution(pending) || owner->committed) return {};
     try {
-        auto& current    = *execution;
+        auto& current    = *owner;
         const auto first = current.decode_begin;
         if (current.kind == OperationKind::Mixed) {
             // The decode rows are dropped but their segments completed: commit every decode row
@@ -456,11 +462,12 @@ void SessionImpl::retire(runtime::DeviceRetired event) {
         retire_context(event);
         return;
     }
-    if (!execution || execution->ticket != event.ticket || !execution->committed)
+    auto* owner = find_execution(event.ticket);
+    if (!owner || !owner->committed)
         throw std::logic_error("execution retired before its resolution");
-    if (execution->vision_id) {
+    if (owner->vision_id) {
         const auto* window = vision_window.current();
-        bool complete      = execution->discarded;
+        bool complete      = owner->discarded;
         if (window && valid_sequence(window->owner.sequence)) {
             const auto& state = sequences[lane(window->owner.sequence)];
             complete |=
@@ -469,11 +476,11 @@ void SessionImpl::retire(runtime::DeviceRetired event) {
                  backend_kv_valid(state) >= window->plan->consume_end - 1);
         } else
             complete = true;
-        vision_window.consumed(execution->vision_id, complete);
+        vision_window.consumed(owner->vision_id, complete);
         vision_window.retired(event.ticket);
     }
-    auto current = std::move(*execution);
-    execution.reset();
+    auto current = std::move(*owner);
+    execution_slot(event.ticket.frame).reset();
     current.preparation->mark_completed();
     current.preparation->publish();
     if (current.settlement) {

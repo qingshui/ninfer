@@ -40,8 +40,10 @@ void SessionImpl::invalidate_lane(std::uint32_t lane) noexcept {
 }
 
 bool SessionImpl::execution_pending(SequenceHandle handle) const noexcept {
-    return execution && std::find(execution->members.begin(), execution->members.end(), handle) !=
-                            execution->members.end();
+    return std::any_of(executions.begin(), executions.end(), [&](const auto& slot) {
+        return slot && std::find(slot->members.begin(), slot->members.end(), handle) !=
+                           slot->members.end();
+    });
 }
 
 bool SessionImpl::recovery_pending(SequenceHandle handle) const noexcept {

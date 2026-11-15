@@ -16,7 +16,7 @@ namespace {
 execution::DraftExecutionView draft_view(RankProgramImpl& program) {
     auto& state = *program.resources.dflash;
     return {program.parameters,
-            program.resources.work,
+            program.resources.work(),
             program.device.execution_view(),
             state.local,
             state.full ? &*state.full : nullptr,
@@ -47,13 +47,14 @@ void RankProgramImpl::append_draft_history(ComputeOperation& operation) {
 
 void RankProgramImpl::append_draft_history(std::uint32_t batch_size,
                                            ops::KVCacheAppendPrefixExecutionEnvelope envelope) {
-    auto& frame      = resources.frame;
+    auto& frame      = resources.frame();
     auto& state      = *resources.dflash;
     auto& draft      = *frame.dflash;
     const auto batch = static_cast<std::int32_t>(batch_size);
     const auto width = static_cast<std::int32_t>(draft_window + 1);
-    auto scope       = resources.work.scope();
-    auto features = resources.work.alloc(DType::BF16, {state.pending_features.ne[0], width, batch});
+    auto scope       = resources.work().scope();
+    auto features =
+        resources.work().alloc(DType::BF16, {state.pending_features.ne[0], width, batch});
     auto positions = dense_prefix(draft.append_positions, {width, batch});
     auto counts    = draft.append_counts.slice(0, 0, batch);
     ops::prepare_ragged_prefix(state.pending_features, frame.residency_slots.slice(0, 0, batch),
@@ -67,7 +68,7 @@ void RankProgramImpl::append_draft_history(std::uint32_t batch_size,
 
 void RankProgramImpl::run_dflash_draft(std::uint32_t batch_value, std::uint32_t minimum,
                                        std::uint32_t maximum) {
-    auto& frame      = resources.frame;
+    auto& frame      = resources.frame();
     auto& draft      = *frame.dflash;
     const int batch  = static_cast<int>(batch_value);
     const int drafts = static_cast<int>(draft_window), width = drafts + 1;
@@ -95,7 +96,7 @@ void RankProgramImpl::run_dflash_draft(std::uint32_t batch_value, std::uint32_t 
 }
 
 void RankProgramImpl::begin_draft(ComputeOperation& operation) {
-    auto& frame           = resources.frame;
+    auto& frame           = resources.frame();
     const int batch       = static_cast<int>(operation.batch);
     const int drafts      = static_cast<int>(draft_window);
     const int width       = drafts + 1;
@@ -105,18 +106,20 @@ void RankProgramImpl::begin_draft(ComputeOperation& operation) {
         minimum = std::min(minimum, operation.rows[row].main_frontier);
         maximum = std::max(maximum, operation.rows[row].main_frontier);
     }
-    if (!graphs) gpu_timer.begin_draft();
+    if (!slot().graphs) slot().gpu_timer.begin_draft();
     // A draft bucket pads its batch through the zeroed host row state; an uncovered batch drafts
     // through the eager path below.
-    const bool draft_bucket = graphs && graphs->captured_batch(GraphPhase::Draft, operation.batch);
+    const bool draft_bucket =
+        slot().graphs && slot().graphs->captured_batch(GraphPhase::Draft, operation.batch);
     if (draft_bucket) {
-        (void)graphs->start(GraphPhase::Draft, operation.batch, maximum, device.execution_view());
+        (void)slot().graphs->start(GraphPhase::Draft, operation.batch, maximum,
+                                   device.execution_view());
     } else if (backend == SpeculativeBackend::Mtp) {
         begin_mtp_draft(operation);
     } else {
         run_dflash_draft(operation.batch, minimum, maximum);
     }
-    if (!graphs) gpu_timer.end_draft();
+    if (!slot().graphs) slot().gpu_timer.end_draft();
     Tensor proposals = backend == SpeculativeBackend::Mtp
                            ? frame.mtp->proposals(batch)
                            : dense_prefix(frame.dflash->drafts, {drafts, batch});
@@ -132,14 +135,14 @@ void RankProgramImpl::begin_draft(ComputeOperation& operation) {
                                    backend == SpeculativeBackend::Mtp ? frame.mtp->drafts.bytes()
                                                                       : proposals.bytes(),
                                    cudaMemcpyDeviceToHost, device.stream()));
-        drafts_ready.record(device.stream());
+        slot().drafts_ready.record(device.stream());
     }
 }
 
 // One traversal over [prefill segments | verify block]. Compact rows [0, D) are the decode rows and
 // [D, D + S) the segments; the traversal reads the row metadata of all of them.
 void RankProgramImpl::begin_mixed_target(ComputeOperation& operation) {
-    auto& frame      = resources.frame;
+    auto& frame      = resources.frame();
     const auto rows  = static_cast<int>(operation.batch);
     const auto count = static_cast<int>(operation.segments.size());
     const auto width = static_cast<int>(operation.width);
@@ -160,7 +163,7 @@ void RankProgramImpl::begin_mixed_target(ComputeOperation& operation) {
         return ops::CausalAttentionExecutionEnvelope{minimum, maximum};
     };
     // A mixed traversal always runs eagerly: its decode tail is outside every prefill plan.
-    if (graphs) {
+    if (slot().graphs) {
         ++prefill_plan.eager_fallbacks;
     }
     const auto steps_envelope   = envelope(0, rows);
@@ -179,7 +182,7 @@ void RankProgramImpl::begin_mixed_target(ComputeOperation& operation) {
         {operation.prefill_tokens, static_cast<std::uint32_t>(width),
          static_cast<std::uint32_t>(rows), 0, steps_envelope},
         operation.speculative ? &*resources.replay_records : nullptr};
-    resources.work.reset();
+    resources.work().reset();
     if (std::getenv("NINFER_DEBUG_MIXED")) { // TEMPDEBUG
         CUDA_CHECK(cudaStreamSynchronize(device.stream()));
         std::vector<std::int32_t> valid(4), table(4), pos(operation.axis_tokens), rope(3 * operation.axis_tokens);
@@ -192,9 +195,9 @@ void RankProgramImpl::begin_mixed_target(ComputeOperation& operation) {
         for (const auto& seg : operation.segments) std::fprintf(stderr, "  seg row=%u off=%u tokens=%u src=%ld dst=%ld\n", seg.row, seg.token_offset, seg.tokens, (long)seg.source_offset, (long)seg.destination_offset);
         std::fprintf(stderr, "  decode state src=%ld dst=%ld frontiers=%d,%d\n", (long)frame.host_ingress->state_source_offsets[0], (long)frame.host_ingress->state_destination_offsets[0], frame.host_ingress->frontiers[0], frame.host_ingress->frontiers[1]);
     }
-    gpu_timer.begin_target();
+    slot().gpu_timer.begin_target();
     operation.text = std::make_unique<execution::TextRun>(
-        execution::TextExecutionView{parameters, resources.work, device.execution_view(),
+        execution::TextExecutionView{parameters, resources.work(), device.execution_view(),
                                      resources.decoder.text_kv, resources.state_images.linear(),
                                      resources.moe.get()},
         std::move(inputs), update, prefill_envelope, input.hidden);
@@ -204,7 +207,7 @@ void RankProgramImpl::begin_mixed_target(ComputeOperation& operation) {
 void RankProgramImpl::begin_target(ComputeOperation& operation) {
     if (!operation.width) return;
     if (operation.mixed) return begin_mixed_target(operation);
-    auto& frame        = resources.frame;
+    auto& frame        = resources.frame();
     const bool forward = std::holds_alternative<ForwardWork>(operation.request.work.operation) ||
                          std::holds_alternative<ScoreWork>(operation.request.work.operation);
     const int batch = forward ? 1 : static_cast<int>(operation.batch);
@@ -220,22 +223,22 @@ void RankProgramImpl::begin_target(ComputeOperation& operation) {
         for (int row = 0; row < batch; ++row)
             operation.attention.valid_positions += frame.host_ingress->valid_columns[row];
     auto input = forward ? frame.input_view(width, batch) : frame.decode_view(width, batch);
-    if (std::holds_alternative<ForwardWork>(operation.request.work.operation) && graphs &&
+    if (std::holds_alternative<ForwardWork>(operation.request.work.operation) && slot().graphs &&
         replay_prefill_plan(operation))
         return;
-    if (!forward && graphs) {
+    if (!forward && slot().graphs) {
         const auto phase = operation.speculative ? GraphPhase::Verify : GraphPhase::Main;
         // The target bucket pads its batch through the zeroed host row state; a padding row's
         // GDN State destination points at the scratch State row, so the replay never writes a
         // pooled record. An uncovered batch runs the eager traversal below, which computes the
         // same rows without graph replay.
-        if (graphs->captured_batch(phase, operation.batch)) {
+        if (slot().graphs->captured_batch(phase, operation.batch)) {
             std::uint32_t frontier = 0;
             for (const auto& row : operation.rows) frontier = std::max(frontier, row.main_frontier);
             operation.graph_started = true;
             operation.projected     = true;
             operation.row_finished =
-                graphs->start(phase, operation.batch, frontier, device.execution_view());
+                slot().graphs->start(phase, operation.batch, frontier, device.execution_view());
             return;
         }
     }
@@ -276,11 +279,11 @@ void RankProgramImpl::begin_target(ComputeOperation& operation) {
             features->residency_slots = frame.residency_slots.slice(0, 0, batch);
         }
     }
-    resources.work.reset();
-    if (forward) prefill_timer.start();
-    if (!forward) gpu_timer.begin_target();
+    resources.work().reset();
+    if (forward) slot().prefill_timer.start();
+    if (!forward) slot().gpu_timer.begin_target();
     operation.text = std::make_unique<execution::TextRun>(
-        execution::TextExecutionView{parameters, resources.work, device.execution_view(),
+        execution::TextExecutionView{parameters, resources.work(), device.execution_view(),
                                      resources.decoder.text_kv, resources.state_images.linear(),
                                      resources.moe.get()},
         std::move(inputs), update, ops::CausalAttentionExecutionEnvelope{minimum, maximum},
@@ -289,7 +292,7 @@ void RankProgramImpl::begin_target(ComputeOperation& operation) {
 }
 
 bool RankProgramImpl::replay_prefill_plan(ComputeOperation& operation) {
-    auto& frame            = resources.frame;
+    auto& frame            = resources.frame();
     const bool packed      = operation.packed;
     const auto segments    = packed ? static_cast<std::uint32_t>(operation.segments.size()) : 1U;
     // The shape a plan is captured for: every segment is one complete chunk window of text
@@ -303,7 +306,7 @@ bool RankProgramImpl::replay_prefill_plan(ComputeOperation& operation) {
         bucket_shaped = bucket_shaped && operation.width == prefill_chunk;
     }
     const auto width = bucket_shaped ? segments * prefill_chunk : 0U;
-    if (!width || graphs->captured_prefill_width(width) != width) {
+    if (!width || slot().graphs->captured_prefill_width(width) != width) {
         if (bucket_shaped) ++prefill_plan.misses;
         ++prefill_plan.eager_fallbacks;
         return false;
@@ -325,10 +328,10 @@ bool RankProgramImpl::replay_prefill_plan(ComputeOperation& operation) {
         images.storage().copy(state(index).first, images.staging_row(index), cuda);
         frontier = std::max(frontier, frame.host_ingress->frontiers[index]);
     }
-    prefill_timer.start();
+    slot().prefill_timer.start();
     operation.graph_started = true;
     operation.row_finished =
-        graphs->start_prefill(width, static_cast<std::uint32_t>(frontier), cuda);
+        slot().graphs->start_prefill(width, static_cast<std::uint32_t>(frontier), cuda);
     if (!operation.row_finished) throw std::logic_error("resident prefill plan did not submit");
     for (std::uint32_t index = 0; index < segments; ++index)
         images.storage().copy(images.staging_row(index), state(index).second, cuda);
@@ -338,9 +341,9 @@ bool RankProgramImpl::replay_prefill_plan(ComputeOperation& operation) {
 bool RankProgramImpl::advance_target(ComputeOperation& operation) {
     if (!operation.width) return true;
     if (!operation.row_finished)
-        operation.row_finished = operation.text ? operation.text->poll() : graphs->poll();
+        operation.row_finished = operation.text ? operation.text->poll() : slot().graphs->poll();
     if (!operation.row_finished) return false;
-    workspace_peak = std::max(workspace_peak, resources.work.peak_used());
+    workspace_peak = std::max(workspace_peak, resources.work().peak_used());
     operation.text.reset();
     return true;
 }

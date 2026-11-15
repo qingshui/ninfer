@@ -19,17 +19,28 @@ void RankProgramImpl::progress() {
         events.emplace_back(runtime::DeviceRetired{ticket, command, retirement_observation()});
         context_operation.reset();
     }
-    if (!compute) return;
-    auto& operation = *compute;
+    for (std::uint32_t frame = 0; frame < compute_frames; ++frame) {
+        if (!slots[frame]->compute) continue;
+        select_frame(frame);
+        progress_compute(frame);
+    }
+}
+
+// The state machine of one flight. It runs with `frame` selected, so frame(), work() and slot()
+// are that flight's; each `return` leaves the flight waiting on the host or the device.
+void RankProgramImpl::progress_compute(std::uint32_t frame) {
+    if (resources.selected() != frame)
+        throw std::logic_error("Qwen3.5 compute frame is not selected");
+    auto& operation = *slot().compute;
     if (operation.cancelled && operation.stage != ComputeStage::Retiring) {
         if (operation.text) {
             operation.text->cancel();
             operation.text.reset();
         }
-        if (graphs) graphs->cancel();
+        if (slot().graphs) slot().graphs->cancel();
         if (resources.moe) resources.moe->cancel();
-        gpu_timer.record_retirement();
-        compute_retired.record(device.stream());
+        slot().gpu_timer.record_retirement();
+        slot().compute_retired.record(device.stream());
         operation.stage = ComputeStage::Retiring;
     }
     for (;;) {
@@ -37,8 +48,8 @@ void RankProgramImpl::progress() {
         case ComputeStage::Inputs:
             if (std::holds_alternative<NormalizeWork>(operation.request.work.operation)) {
                 append_draft_history(operation);
-                gpu_timer.record_result();
-                result_ready.record(device.stream());
+                slot().gpu_timer.record_result();
+                slot().result_ready.record(device.stream());
                 operation.stage = ComputeStage::Readback;
                 break;
             }
@@ -50,7 +61,7 @@ void RankProgramImpl::progress() {
                 break;
             }
             if (std::holds_alternative<DecodeWork>(operation.request.work.operation)) {
-                if (!operation.speculative || !graphs) append_draft_history(operation);
+                if (!operation.speculative || !slot().graphs) append_draft_history(operation);
                 if (operation.speculative) begin_draft(operation);
             }
             if (std::holds_alternative<ForwardWork>(operation.request.work.operation))
@@ -73,9 +84,9 @@ void RankProgramImpl::progress() {
                 if (backend == SpeculativeBackend::Mtp && !operation.speculative)
                     align_mtp_history(operation);
                 if (!operation.projected) {
-                    resources.work.reset();
+                    resources.work().reset();
                     project_decode(operation.batch, operation.width);
-                    gpu_timer.end_target();
+                    slot().gpu_timer.end_target();
                     operation.projected = true;
                 }
                 operation.stage = ComputeStage::AwaitDecision;
@@ -86,9 +97,9 @@ void RankProgramImpl::progress() {
                 if (resources.dflash) {
                     const int width = static_cast<int>(operation.width);
                     auto& draft     = *resources.dflash;
-                    auto& frame     = resources.frame;
+                    auto& frame     = resources.frame();
                     execution::draft_append_context(
-                        {parameters, resources.work, device.execution_view(), draft.local,
+                        {parameters, resources.work(), device.execution_view(), draft.local,
                          draft.full ? &*draft.full : nullptr, proposal_head},
                         draft.prefill_features.slice(1, 0, width)
                             .view({draft.prefill_features.ne[0], width, 1}),
@@ -100,16 +111,16 @@ void RankProgramImpl::progress() {
                 }
                 publish_continuation_hidden(operation);
             }
-            if (operation.width) prefill_timer.record_stop();
-            gpu_timer.record_result();
-            result_ready.record(device.stream());
+            if (operation.width) slot().prefill_timer.record_stop();
+            slot().gpu_timer.record_result();
+            slot().result_ready.record(device.stream());
             operation.stage = ComputeStage::History;
             break;
         case ComputeStage::History:
-            if (!result_ready.ready()) return;
+            if (!slot().result_ready.ready()) return;
             if (operation.width)
                 operation.gpu.add_prefill(
-                    static_cast<std::uint64_t>(prefill_timer.elapsed_ms() * 1.0e6));
+                    static_cast<std::uint64_t>(slot().prefill_timer.elapsed_ms() * 1.0e6));
             if (operation.packed) {
                 // Every segment completed in the one traversal; none samples.
                 auto& result = std::get<ForwardResult>(operation.result->output);
@@ -151,10 +162,10 @@ void RankProgramImpl::progress() {
             launch_decision(operation);
             break;
         case ComputeStage::Readback:
-            if (!result_ready.ready()) return;
+            if (!slot().result_ready.ready()) return;
             if (const auto* score = std::get_if<ScoreWork>(&operation.request.work.operation)) {
                 const auto* values =
-                    static_cast<const float*>(resources.frame.host_score_logprobs.data);
+                    static_cast<const float*>(resources.frame().host_score_logprobs.data);
                 std::copy_n(values, operation.score_count,
                             operation.scores.begin() + operation.score_cursor);
                 operation.score_cursor += operation.score_count;
@@ -169,10 +180,10 @@ void RankProgramImpl::progress() {
             return;
         case ComputeStage::Commit:
             launch_commit(operation);
-            if (!compute) return;
+            if (!slot().compute) return;
             break;
         case ComputeStage::Retiring:
-            if (!compute_retired.ready()) return;
+            if (!slot().compute_retired.ready()) return;
             retire_compute();
             return;
         }
@@ -184,9 +195,9 @@ void RankProgramImpl::progress() {
 void RankProgramImpl::finish_mixed_forward(ComputeOperation& operation) {
     if (backend == SpeculativeBackend::Mtp) align_packed_mtp_history(operation);
     publish_continuation_hidden(operation);
-    resources.work.reset();
+    resources.work().reset();
     project_decode(operation.batch, operation.width, operation.prefill_tokens);
-    gpu_timer.end_target();
+    slot().gpu_timer.end_target();
     operation.projected = true;
 }
 
@@ -195,7 +206,7 @@ void RankProgramImpl::finish_mixed_forward(ComputeOperation& operation) {
 void RankProgramImpl::publish_continuation_hidden(ComputeOperation& operation) {
     const auto total =
         static_cast<int>(operation.mixed ? operation.axis_tokens : operation.width);
-    const auto hidden  = resources.frame.input_view(total, 1).hidden;
+    const auto hidden  = resources.frame().input_view(total, 1).hidden;
     const auto publish = [&](std::uint32_t last_column, std::int64_t destination) {
         const auto source = hidden.slice(1, static_cast<int>(last_column), 1);
         const auto target = resources.state_images.continuation_hidden(destination);

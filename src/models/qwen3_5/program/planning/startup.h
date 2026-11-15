@@ -72,6 +72,10 @@ struct SequencePlanImpl {
     std::int32_t multiprocessor_count = 0;
     ContextCacheOptions context_cache;
     std::size_t vision_memory_budget_bytes = 0;
+    // Compute frames of the rank (see resolve_compute_frames): the execution frame region and the
+    // workspace of `workspace` are replicated once per frame in `persistent` and the rank's
+    // device reservation.
+    std::uint32_t compute_frames = 1;
     ResourceLayout persistent;
     WorkspaceSpec workspace;
     // Staging State rows of the prefill plans (zero without plans), see prefill_plan_rows().

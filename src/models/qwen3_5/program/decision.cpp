@@ -26,21 +26,21 @@ void RankProgramImpl::request_decision(ComputeOperation& operation) {
         operation.decision_supplied = true;
         return;
     }
-    if (operation.speculative && !drafts_ready.ready()) return;
+    if (operation.speculative && !slot().drafts_ready.ready()) return;
     runtime::DecisionRequest request;
     request.stage      = operation.decision_stage;
     request.vocabulary = parameters.profile->public_tokens;
-    const auto* drafts = static_cast<const TokenId*>(resources.frame.host_drafts.data);
+    const auto* drafts = static_cast<const TokenId*>(resources.frame().host_drafts.data);
     for (std::uint32_t row = 0; row < operation.batch; ++row) {
         if (!operation.sampling[row].constrained) continue;
         runtime::DecisionRequest::Row member;
         member.member = row;
         if (operation.speculative) {
-            const auto count = resources.frame.host_ingress->extents[row];
+            const auto count = resources.frame().host_ingress->extents[row];
             for (int step = 0; step < count; ++step)
                 member.drafts.push_back(
                     drafts[backend == SpeculativeBackend::Mtp
-                               ? step * resources.frame.spec.batch_capacity + row
+                               ? step * resources.frame().spec.batch_capacity + row
                                : row * draft_window + step]);
         }
         request.rows.push_back(std::move(member));
@@ -51,7 +51,7 @@ void RankProgramImpl::request_decision(ComputeOperation& operation) {
 
 void RankProgramImpl::project_decode(std::uint32_t batch_value, std::uint32_t width_value,
                                      std::uint32_t column) {
-    auto& frame     = resources.frame;
+    auto& frame     = resources.frame();
     const int batch = static_cast<int>(batch_value), width = static_cast<int>(width_value);
     const int rows       = frame.spec.output_rows;
     const int vocabulary = execution::dimension(parameters.profile->public_tokens);
@@ -60,7 +60,7 @@ void RankProgramImpl::project_decode(std::uint32_t batch_value, std::uint32_t wi
     Tensor logits        = prefix(frame.logits, {rows, width, batch});
     Tensor flat_logits   = logits.view({rows, width * batch});
     execution::project(hidden.view({hidden.ne[0], width * batch}), parameters.text.output_head,
-                       flat_logits, resources.work, device.execution_view());
+                       flat_logits, resources.work(), device.execution_view());
     if (width == 1) return;
     Tensor argmax      = prefix(frame.target_argmax, {width, batch});
     Tensor flat_argmax = argmax.view({width * batch});
@@ -68,7 +68,7 @@ void RankProgramImpl::project_decode(std::uint32_t batch_value, std::uint32_t wi
 }
 
 void RankProgramImpl::decide_decode(std::uint32_t batch_value, std::uint32_t width_value) {
-    auto& frame     = resources.frame;
+    auto& frame     = resources.frame();
     const int batch = static_cast<int>(batch_value), width = static_cast<int>(width_value);
     const int rows       = frame.spec.output_rows;
     const int vocabulary = execution::dimension(parameters.profile->public_tokens);
@@ -90,32 +90,33 @@ void RankProgramImpl::decide_decode(std::uint32_t batch_value, std::uint32_t wid
                 prefix(draft.proposal_q,
                        {draft.proposal_q.ne[0], static_cast<int>(draft_window), batch}),
                 frame.extents.slice(0, 0, batch), frontiers, tokens, counts, vocabulary,
-                frame.sampling, {false}, resources.work, device.execution_view());
+                frame.sampling, {false}, resources.work(), device.execution_view());
         } else {
             ops::speculative_accept_greedy_drafts(
                 argmax, logits, drafts, frame.extents.slice(0, 0, batch), frontiers, tokens, counts,
-                vocabulary, frame.sampling, resources.work, device.execution_view());
+                vocabulary, frame.sampling, resources.work(), device.execution_view());
         }
     } else {
         Tensor logits = prefix(frame.logits, {rows, batch});
         Tensor tokens = prefix(frame.output_tokens, {batch});
         ops::sample(logits, tokens, vocabulary, frame.sampling,
                     frame.sampling_positions.slice(0, 0, batch), ops::kSamplePurposeDecode,
-                    resources.work, device.execution_view());
+                    resources.work(), device.execution_view());
     }
 }
 
 void RankProgramImpl::readback_decode(std::uint32_t batch, bool speculative) {
     const auto bytes =
         speculative
-            ? resources.frame.egress_counts_offset() + batch * sizeof(std::int32_t)
+            ? resources.frame().egress_counts_offset() + batch * sizeof(std::int32_t)
             : batch * sizeof(TokenId);
-    CUDA_CHECK(cudaMemcpyAsync(resources.frame.host_egress_region.data, resources.frame.egress.data,
+    CUDA_CHECK(cudaMemcpyAsync(resources.frame().host_egress_region.data,
+                               resources.frame().egress.data,
                                bytes, cudaMemcpyDeviceToHost, device.stream()));
 }
 
 void RankProgramImpl::launch_decision(ComputeOperation& operation) {
-    auto& frame          = resources.frame;
+    auto& frame          = resources.frame();
     const int batch      = static_cast<int>(operation.batch);
     const int vocabulary = execution::dimension(parameters.profile->public_tokens);
     const int rows       = frame.spec.output_rows;
@@ -135,24 +136,24 @@ void RankProgramImpl::launch_decision(ComputeOperation& operation) {
         }
         events.emplace_back(std::move(consumed));
     }
-    resources.work.reset();
+    resources.work().reset();
     if (has_decode(operation)) {
         if (!operation.projected) {
             project_decode(operation.batch, operation.width);
-            gpu_timer.end_target();
+            slot().gpu_timer.end_target();
         }
         const auto phase = operation.speculative ? GraphPhase::Accept : GraphPhase::Sample;
         // A decision bucket pads its batch through the zeroed host row state and the batch-sized
         // readback; an uncovered batch decides through the eager path below.
-        if (graphs && graphs->captured_batch(phase, operation.batch)) {
-            (void)graphs->start(phase, operation.batch, operation.rows.front().main_frontier,
+        if (slot().graphs && slot().graphs->captured_batch(phase, operation.batch)) {
+            (void)slot().graphs->start(phase, operation.batch, operation.rows.front().main_frontier,
                                 device.execution_view());
         } else {
             decide_decode(operation.batch, operation.width);
             readback_decode(operation.batch, operation.speculative);
         }
-        gpu_timer.record_result();
-        result_ready.record(device.stream());
+        slot().gpu_timer.record_result();
+        slot().result_ready.record(device.stream());
         operation.stage = ComputeStage::Readback;
         return;
     }
@@ -177,28 +178,29 @@ void RankProgramImpl::launch_decision(ComputeOperation& operation) {
             hidden = frame.input_view(1, batch).hidden.view({frame.spec.hidden, batch});
         }
         Tensor logits = prefix(frame.logits, {rows, batch});
-        execution::project(hidden, parameters.text.output_head, logits, resources.work,
+        execution::project(hidden, parameters.text.output_head, logits, resources.work(),
                            device.execution_view());
         Tensor tokens = prefix(frame.output_tokens, {batch});
         ops::sample(logits, tokens, vocabulary, frame.sampling,
-                    frame.sampling_positions.slice(0, 0, batch), purpose, resources.work,
+                    frame.sampling_positions.slice(0, 0, batch), purpose, resources.work(),
                     device.execution_view());
     }
     readback_decode(operation.batch, false);
-    gpu_timer.record_result();
-    result_ready.record(device.stream());
+    slot().gpu_timer.record_result();
+    slot().result_ready.record(device.stream());
     operation.stage = ComputeStage::Readback;
 }
 
 void RankProgramImpl::publish_result(ComputeOperation& operation) {
-    gpu_timer.observe_result(operation.gpu);
-    if (has_decode(operation)) gpu_timer.observe_decode(operation.gpu, operation.speculative);
+    slot().gpu_timer.observe_result(operation.gpu);
+    if (has_decode(operation))
+        slot().gpu_timer.observe_decode(operation.gpu, operation.speculative);
     Result result;
     const auto* forward  = std::get_if<ForwardWork>(&operation.request.work.operation);
     const bool generated = has_decode(operation) ||
                            (forward && forward->sample != SamplePurpose::None);
     if (generated) {
-        auto& output = *resources.frame.host_egress;
+        auto& output = *resources.frame().host_egress;
         GeneratedResult value;
         value.row_stride = operation.speculative ? draft_window + 1 : 1;
         value.tokens.assign(output.tokens.begin(),
@@ -206,7 +208,7 @@ void RankProgramImpl::publish_result(ComputeOperation& operation) {
         for (std::uint32_t row = 0; row < operation.batch; ++row) {
             const auto count   = operation.speculative ? output.counts[row] : 1;
             output.counts[row] = count;
-            const auto extent  = resources.frame.host_ingress->extents[row];
+            const auto extent  = resources.frame().host_ingress->extents[row];
             if (count < 1 || count > extent + 1)
                 throw std::runtime_error("Qwen3.5 sampling returned an invalid prefix length");
             value.counts.push_back(static_cast<std::uint32_t>(count));

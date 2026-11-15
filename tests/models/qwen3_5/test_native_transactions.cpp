@@ -163,7 +163,7 @@ struct SessionFixture {
                    const EngineOptions& options, native::ContextBudget budget = {})
         : rank(std::move(definition), std::move(model), std::move(profile), options, budget),
           session(rank.definition, std::move(rank.session_plan)) {
-        session.executor_ = &rank.executor();
+        session.bind_executor(rank.executor());
     }
 };
 
@@ -1888,7 +1888,7 @@ void shared_capture_alignment(std::shared_ptr<const q35::ModelDefinition> defini
     options.context_cache.host_capacity_bytes = 0;
     native::NativeRankFixture rank(definition, model, profile, options, {.retained_states = 2});
     q35::detail::SessionImpl program(definition, std::move(rank.session_plan));
-    program.executor_ = &rank.executor();
+    program.bind_executor(rank.executor());
     native::EventDriver driver(program, rank);
     const auto empty   = program.physical_usage();
     const auto settle  = [&](bool cancelled = false) { return driver.settle(cancelled); };
@@ -2013,7 +2013,7 @@ void replay_sampling_counts(std::shared_ptr<const q35::ModelDefinition> definiti
     options.context_cache.host_capacity_bytes = 0;
     native::NativeRankFixture rank(definition, model, profile, options);
     q35::detail::SessionImpl program(definition, std::move(rank.session_plan));
-    program.executor_ = &rank.executor();
+    program.bind_executor(rank.executor());
     native::EventDriver driver(program, rank);
 
     // This exact oracle counts committed output events, independently of the execution route.
@@ -2177,7 +2177,8 @@ void fresh_scoring(const char* artifact) {
     rank.observer().observed = [&](const auto& event) {
         const auto* ready = std::get_if<runtime::ResultReady<q35::ExecutionTypes>>(&event);
         if (!ready || !std::holds_alternative<q35::ScoreResult>(ready->result.output)) return;
-        const auto& work = std::get<q35::ScoreWork>(rank.rank().compute->request.work.operation);
+        const auto& work =
+            std::get<q35::ScoreWork>(rank.rank().slots[0]->compute->request.work.operation);
         const auto image = read_image(work.row.state_offsets.destination);
         written          = std::any_of(image.begin(), image.end(),
                                        [](auto value) { return value != std::byte{}; });

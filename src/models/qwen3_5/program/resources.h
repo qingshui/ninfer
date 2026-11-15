@@ -15,6 +15,7 @@
 #include <cstddef>
 #include <memory>
 #include <optional>
+#include <vector>
 
 namespace ninfer::models::qwen3_5 {
 
@@ -31,6 +32,9 @@ struct ResourceSpec {
     std::optional<GdnReplayRecordSpec> replay_records;
     std::optional<DFlashPersistentSpec> dflash;
     FrameSpec frame;
+    // Compute frames the execution storage is replicated for: each owns an ExecutionFrame (lane
+    // tables, token axis planes, pinned mirrors) and a workspace arena (see Resources).
+    std::uint32_t compute_frames   = 1;
     std::size_t context_bytes      = 0;
     std::size_t host_context_bytes = 0;
     // Staging State rows behind the scratch row of the context arena: the fixed State targets of
@@ -50,7 +54,8 @@ struct ResourceLayout {
     StateImageDeviceLayout state_images;
     std::optional<GdnReplayRecordLayout> replay_records;
     std::optional<DFlashPersistentLayout> dflash;
-    FrameLayout frame;
+    // One frame layout per compute frame, all of the same spec.
+    std::vector<FrameLayout> frames;
     std::optional<TensorRegion> token_counts;
     std::size_t context_bytes      = 0;
     std::size_t host_context_bytes = 0;
@@ -90,7 +95,21 @@ struct DFlashPersistentState {
     [[nodiscard]] PagedKVBatchLayerView full_batch_layer(std::uint32_t layer) const;
 };
 
-// Rank-owned arenas and execution storage; the Directory assigns each Context record.
+// The storage one compute frame owns: its ExecutionFrame (lane tables and token-axis planes with
+// their pinned mirrors) and its workspace. A flight on the frame writes and reads only these, so
+// the host may fill the next frame while the device still reads the previous one.
+struct ComputeFrameResources {
+    DeviceBuffer workspace_storage;
+    MemoryArena work;
+    ExecutionFrame frame;
+
+    ComputeFrameResources(DeviceContext& device, MemorySpan backing, const FrameLayout& layout,
+                          const WorkspaceSpec& workspace, std::int64_t padding_state_offset);
+};
+
+// Rank-owned arenas and execution storage; the Directory assigns each Context record. Everything
+// except `frames` is shared by all compute frames; `select` names the frame that frame(), work()
+// and workspace_storage() address.
 class Resources {
 public:
     Resources(DeviceContext& device, const ResourceLayout& layout, const WorkspaceSpec& workspace,
@@ -101,12 +120,23 @@ public:
     [[nodiscard]] PagedKVCache* backend_kv() noexcept;
     [[nodiscard]] const PagedKVCache* backend_kv() const noexcept;
 
+    [[nodiscard]] std::uint32_t frame_count() const noexcept {
+        return static_cast<std::uint32_t>(frames.size());
+    }
+    [[nodiscard]] std::uint32_t selected() const noexcept { return selected_; }
+    void select(std::uint32_t index);
+    [[nodiscard]] ComputeFrameResources& compute_frame(std::uint32_t index);
+    [[nodiscard]] const ComputeFrameResources& compute_frame(std::uint32_t index) const;
+    [[nodiscard]] ExecutionFrame& frame() { return frames[selected_]->frame; }
+    [[nodiscard]] const ExecutionFrame& frame() const { return frames[selected_]->frame; }
+    [[nodiscard]] MemoryArena& work() { return frames[selected_]->work; }
+    [[nodiscard]] const MemoryArena& work() const { return frames[selected_]->work; }
+    [[nodiscard]] DeviceBuffer& workspace_storage() { return frames[selected_]->workspace_storage; }
+
     const std::vector<RecordSpec> context_records;
     DeviceBuffer context;
     DeviceBuffer persistent;
-    DeviceBuffer workspace_storage;
     PinnedHostBuffer host_context;
-    MemoryArena work;
     DecoderState decoder;
     StateImageViews state_images;
     std::optional<GdnReplayRecords> replay_records;
@@ -114,8 +144,11 @@ public:
     std::optional<DFlashPersistentState> dflash;
     Tensor token_counts;
     std::optional<vision::Storage> vision;
-    ExecutionFrame frame;
     std::unique_ptr<moe::Schedule> moe;
+    std::vector<std::unique_ptr<ComputeFrameResources>> frames;
+
+private:
+    std::uint32_t selected_ = 0;
 };
 
 } // namespace ninfer::models::qwen3_5

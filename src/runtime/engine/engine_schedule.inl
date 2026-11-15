@@ -8,8 +8,11 @@ void EngineCore<Instance>::reserve_active_capture(const std::shared_ptr<Request>
     request->model_state        = next;
     request->capture_pending    = true;
     request->post_capture_state = next;
+    // A capture is a context operation: it starts only without any execution in flight. While
+    // another flight runs the request keeps its pending capture and begin_cycle starts it at the
+    // next quiescent boundary.
     if (instance_.session->has_context_operation() ||
-        instance_.session->execution_pending(*request->sequence)) {
+        instance_.session->execution_pending(*request->sequence) || compute_flights() != 0) {
         return;
     }
     if (scheduler_.progress_owner()) {
@@ -1220,10 +1223,15 @@ bool EngineCore<Instance>::await_context_operation(HostPhaseMeasurement& boundar
 
 template <class Instance>
 [[nodiscard]] bool EngineCore<Instance>::advance_cycle() {
-    if (compute_pending()) return false;
     set_host_work_class(HostWorkClass::Control);
     bool submitted = false;
-    while (!compute_ && cycle_step_ != CycleStep::Boundary) {
+    // Each step starts its flight on a free compute frame and the cycle keeps stepping while one
+    // remains, so the host freezes and submits the next flight while the previous ones execute.
+    // With every frame occupied the cycle waits in its current step. begin_cycle still runs only
+    // at a quiescent boundary: nothing computes, so context operations, settlement and admission
+    // see no flight in flight.
+    while (cycle_step_ != CycleStep::Boundary) {
+        if (cycle_step_ != CycleStep::Complete && !compute_frame_available()) break;
         switch (cycle_step_) {
         case CycleStep::Control: {
             auto all = scheduler_.build_control_membership(slots_, max_concurrency_);
@@ -1267,7 +1275,14 @@ template <class Instance>
                 (void)poll_execution(boundary);
                 finish_engine_phase(boundary, EngineHostPhase::Boundary);
             }
-            reserve_resident_units(ReservationScope::Prefill);
+            // Units are reserved, and capacity reclaimed for them, only without a flight in
+            // flight: reclamation starts context operations, which need an idle Session. While
+            // an earlier step's flight still runs, this step starts from the permits the last
+            // reservation left (begin_cycle reserved the prefill lanes together with the decode
+            // lanes); once nothing computes the step reserves again before it decides whether
+            // the cycle allowance admits more prefill.
+            const bool overlapped = compute_flights() != 0;
+            if (!overlapped) reserve_resident_units(ReservationScope::Prefill);
             auto eligible = slots_;
             PrefillUnitTokens caps(max_concurrency_, 0);
             for (std::uint32_t lane = 0; lane < max_concurrency_; ++lane) {
@@ -1286,6 +1301,9 @@ template <class Instance>
                 // allowance decides whether another unit starts before the next begin_cycle.
                 break;
             }
+            // Without permits an overlapped step cannot tell an exhausted allowance from lanes
+            // it has not reserved yet; it waits for the flights to finish.
+            if (overlapped) return submitted;
             cycle_step_ = CycleStep::Complete;
             break;
         }
@@ -1362,12 +1380,12 @@ void EngineCore<Instance>::worker_loop() noexcept {
         bool progressed  = false;
         bool outstanding = false;
         try {
-            if (compute_) {
-                set_host_work_class(compute_->kind == UnitKind::Decode    ? HostWorkClass::Decode
-                                    : compute_->kind == UnitKind::Control ? HostWorkClass::Control
-                                                                          : HostWorkClass::Prefill,
-                                    compute_->kind == UnitKind::Decode
-                                        ? std::span<const std::uint32_t>(compute_->lanes)
+            if (const auto* oldest = oldest_compute()) {
+                set_host_work_class(oldest->kind == UnitKind::Decode    ? HostWorkClass::Decode
+                                    : oldest->kind == UnitKind::Control ? HostWorkClass::Control
+                                                                        : HostWorkClass::Prefill,
+                                    oldest->kind == UnitKind::Decode
+                                        ? std::span<const std::uint32_t>(oldest->lanes)
                                         : std::span<const std::uint32_t>{});
             }
             auto boundary = begin_host_phase();

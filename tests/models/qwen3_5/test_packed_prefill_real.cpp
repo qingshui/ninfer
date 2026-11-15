@@ -564,7 +564,8 @@ public:
         for (auto word : read<std::uint16_t>(hidden)) out.hidden.push_back(bf16(word));
         // The continuation hidden is the final-normalized last-token hidden. Project it through
         // the output head with the same Op the sampler uses.
-        const int H = rank.resources.frame.spec.hidden, V = rank.resources.frame.spec.output_rows;
+        const int H = rank.resources.frame().spec.hidden,
+                  V = rank.resources.frame().spec.output_rows;
         DeviceBuffer input(native_.device().device(), std::size_t(H) * 2);
         CUDA_CHECK(cudaMemcpy(input.data(), hidden.data, hidden.bytes(), cudaMemcpyDeviceToDevice));
         DeviceBuffer output(native_.device().device(), std::size_t(V) * 2);
@@ -826,7 +827,7 @@ int main() {
         options.context_cache.enabled             = false;
         options.context_cache.host_capacity_bytes = 0;
         Native fixture(definition, model, profile, options);
-        auto& spec = fixture.rank().resources.frame.spec;
+        auto& spec = fixture.rank().resources.frame().spec;
         require(spec.pack_tokens == q35::resolve_prefill_pack_tokens(kChunk, kContext) &&
                     spec.pack_tokens >= 2 * kChunk &&
                     spec.pack_segments == q35::kPrefillPackSegmentLimit,

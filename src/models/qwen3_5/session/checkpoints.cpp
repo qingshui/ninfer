@@ -77,7 +77,7 @@ std::size_t SessionImpl::host_bytes_released(std::span<const CheckpointHandle> h
 
 std::optional<context::HostWriteRequirements>
 SessionImpl::pause_host_requirements(SequenceHandle handle) const {
-    if (context_operation_ || execution || !valid_sequence(handle) || !host_context_enabled) {
+    if (context_operation_ || executing() || !valid_sequence(handle) || !host_context_enabled) {
         return std::nullopt;
     }
     const auto lane      = this->lane(handle);

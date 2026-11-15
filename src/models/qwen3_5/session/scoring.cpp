@@ -8,7 +8,7 @@ namespace ninfer::models::qwen3_5::detail {
 std::optional<runtime::ExecutionTicket> SessionImpl::start_score(qwen::PreparedPromptData&& prompt,
                                                                  std::uint32_t first_target) {
     if (!causal_scoring) throw std::logic_error("Session is not configured for causal scoring");
-    if (scoring || execution || has_context_operation()) return {};
+    if (scoring || executing() || has_context_operation()) return {};
     if (prompt.token_ids.size() < 2 || prompt.token_ids.size() > capacity || !first_target ||
         first_target >= prompt.token_ids.size())
         throw std::invalid_argument("causal scoring window or target is invalid");
@@ -42,7 +42,7 @@ std::optional<runtime::ExecutionTicket> SessionImpl::start_score(qwen::PreparedP
 }
 
 void SessionImpl::advance_score() {
-    if (!scoring || execution) throw std::logic_error("scoring continuation has no free frame");
+    if (!scoring || executing()) throw std::logic_error("scoring continuation has no free frame");
     const auto handle  = scoring->sequence;
     auto& state        = sequences[lane(handle)];
     auto& request      = requests[state.lane];

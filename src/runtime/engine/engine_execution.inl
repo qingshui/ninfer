@@ -4,7 +4,9 @@ namespace ninfer::runtime {
 
 template <class Instance>
 void EngineCore<Instance>::commit_pending(PendingBatch&& pending, ComputeFlight flight) {
-    if (retiring_) throw std::logic_error("another model commit is still retiring");
+    const std::uint32_t frame_index = flight.ticket.frame.index;
+    if (frame_index >= retiring_.size() || retiring_[frame_index])
+        throw std::logic_error("another model commit is still retiring on this frame");
     EnginePhaseScope phase(*this, EngineHostPhase::CommitOutput);
     const auto lane_indices     = std::span<const std::uint32_t>(flight.lanes);
     const bool decode_round     = flight.kind == UnitKind::Decode;
@@ -249,7 +251,7 @@ void EngineCore<Instance>::commit_pending(PendingBatch&& pending, ComputeFlight 
     }
     phase.finish();
     record_service(flight);
-    retiring_.emplace(std::move(flight));
+    retiring_[frame_index].emplace(std::move(flight));
 }
 
 template <class Instance>
@@ -399,7 +401,7 @@ template <class Instance>
     flight.cancelled.resize(segments);
     flight.progressed.resize(segments);
     flight.ticket = *ticket;
-    compute_.emplace(std::move(flight));
+    admit_compute(std::move(flight));
     for (const auto lane : lanes) reserved_units_[lane].reset();
     return true;
 }
@@ -419,7 +421,7 @@ template <class Instance>
     if (!ticket) return false;
     flight.ticket = *ticket;
     for (const auto lane : flight.lanes) reserved_units_[lane].reset();
-    compute_.emplace(std::move(flight));
+    admit_compute(std::move(flight));
     return true;
 }
 
@@ -488,7 +490,7 @@ template <class Instance>
         reserved_units_[lane].reset();
         control_executed_[lane] = true;
     }
-    compute_.emplace(std::move(flight));
+    admit_compute(std::move(flight));
     return true;
 }
 
@@ -517,20 +519,21 @@ void EngineCore<Instance>::resolve_control(ComputeFlight& flight) {
 template <class Instance>
 void EngineCore<Instance>::supply_decision(ExecutionTicket ticket,
                                            const DecisionRequest& decision) {
-    if (!compute_ || compute_->ticket != ticket || decision.vocabulary == 0) {
+    const auto* flight = find_compute(ticket);
+    if (flight == nullptr || decision.vocabulary == 0) {
         throw std::logic_error("decision input does not belong to an active execution");
     }
     DecisionInput input;
     input.stage = decision.stage;
     input.rows.reserve(decision.rows.size());
-    std::vector<bool> seen(compute_->requests.size(), false);
+    std::vector<bool> seen(flight->requests.size(), false);
     const std::size_t words_per_position = (std::size_t(decision.vocabulary) + 31) / 32;
     for (const auto& row : decision.rows) {
-        if (row.member >= compute_->requests.size() || seen[row.member]) {
+        if (row.member >= flight->requests.size() || seen[row.member]) {
             throw std::logic_error("decision request has invalid compact membership");
         }
         seen[row.member]    = true;
-        const auto& request = compute_->requests[row.member];
+        const auto& request = flight->requests[row.member];
         if (!request->output.constrained()) {
             throw std::logic_error("decision requested a mask for an unconstrained row");
         }
@@ -547,14 +550,15 @@ void EngineCore<Instance>::supply_decision(ExecutionTicket ticket,
 
 template <class Instance>
 void EngineCore<Instance>::record_decision_upload(const DecisionConsumed& consumed) {
-    if (!compute_ || compute_->ticket != consumed.ticket) {
+    auto* flight = find_compute(consumed.ticket);
+    if (flight == nullptr) {
         throw std::logic_error("decision upload does not belong to an active execution");
     }
     for (const auto& row : consumed.rows) {
-        if (row.member >= compute_->requests.size()) {
+        if (row.member >= flight->requests.size()) {
             throw std::logic_error("decision upload has invalid compact membership");
         }
-        compute_->requests[row.member]->output.constraint_uploaded(row.bytes);
+        flight->requests[row.member]->output.constraint_uploaded(row.bytes);
     }
 }
 
@@ -595,9 +599,9 @@ template <class Instance>
             continue;
         }
         if (const auto* complete = std::get_if<ExecutionComplete>(&event->result)) {
-            const bool retiring = retiring_ && retiring_->ticket == event->ticket;
-            auto& flight        = retiring ? retiring_ : compute_;
-            if (!flight || flight->ticket != event->ticket || flight->sequences != event->members ||
+            auto* retiring = find_retiring(event->ticket);
+            auto* flight   = retiring ? retiring : find_compute(event->ticket);
+            if (flight == nullptr || flight->sequences != event->members ||
                 complete->row_count != flight->requests.size())
                 throw std::logic_error("execution completion changed its frozen membership");
             const auto kind = static_cast<std::size_t>(complete->sample.work.kind);
@@ -611,15 +615,15 @@ template <class Instance>
             }
             flight->retired_ns = complete->sample.latency.total_ns;
             record_service(*flight);
-            if (retiring) retiring_.reset();
+            if (retiring) retiring_[event->ticket.frame.index].reset();
             continue;
         }
-        if (!compute_ || compute_->ticket != event->ticket ||
-            compute_->sequences != event->members) {
+        auto* computing = find_compute(event->ticket);
+        if (computing == nullptr || computing->sequences != event->members) {
             throw std::logic_error("execution result changed its frozen membership");
         }
-        auto flight = std::move(*compute_);
-        compute_.reset();
+        auto flight = std::move(*computing);
+        compute_[event->ticket.frame.index].reset();
         set_host_work_class(flight.kind == UnitKind::Decode    ? HostWorkClass::Decode
                             : flight.kind == UnitKind::Control ? HostWorkClass::Control
                                                                : HostWorkClass::Prefill,
@@ -665,17 +669,67 @@ template <class Instance>
 
 template <class Instance>
 [[nodiscard]] bool EngineCore<Instance>::execution_outstanding() const noexcept {
-    return compute_ || retiring_ || instance_.session->has_context_operation() ||
+    return compute_flights() != 0 || instance_.session->has_context_operation() ||
            instance_.executor->has_pending_work();
 }
 
 template <class Instance>
 bool EngineCore<Instance>::compute_pending() const noexcept {
-    if (compute_ || retiring_) return true;
+    if (compute_flights() != 0) return true;
     return std::any_of(slots_.begin(), slots_.end(), [&](const auto& request) {
         return request && request->sequence &&
                instance_.session->execution_pending(*request->sequence);
     });
+}
+
+template <class Instance>
+typename EngineCore<Instance>::ComputeFlight*
+EngineCore<Instance>::find_compute(const ExecutionTicket& ticket) noexcept {
+    if (ticket.frame.kind != FrameKind::Compute || ticket.frame.index >= compute_.size())
+        return nullptr;
+    auto& flight = compute_[ticket.frame.index];
+    return flight && flight->ticket == ticket ? &*flight : nullptr;
+}
+
+template <class Instance>
+typename EngineCore<Instance>::ComputeFlight*
+EngineCore<Instance>::find_retiring(const ExecutionTicket& ticket) noexcept {
+    if (ticket.frame.kind != FrameKind::Compute || ticket.frame.index >= retiring_.size())
+        return nullptr;
+    auto& flight = retiring_[ticket.frame.index];
+    return flight && flight->ticket == ticket ? &*flight : nullptr;
+}
+
+template <class Instance>
+std::size_t EngineCore<Instance>::compute_flights() const noexcept {
+    const auto occupied = [](const auto& flight) { return flight.has_value(); };
+    return static_cast<std::size_t>(std::count_if(compute_.begin(), compute_.end(), occupied) +
+                                    std::count_if(retiring_.begin(), retiring_.end(), occupied));
+}
+
+template <class Instance>
+const typename EngineCore<Instance>::ComputeFlight*
+EngineCore<Instance>::oldest_compute() const noexcept {
+    const ComputeFlight* oldest = nullptr;
+    for (const auto& flight : compute_)
+        if (flight && (oldest == nullptr || flight->ticket.id < oldest->ticket.id))
+            oldest = &*flight;
+    return oldest;
+}
+
+template <class Instance>
+bool EngineCore<Instance>::compute_frame_available() const noexcept {
+    // The executor owns frame admission; the tables only mirror its occupied compute frames.
+    return compute_flights() < compute_.size();
+}
+
+template <class Instance>
+void EngineCore<Instance>::admit_compute(ComputeFlight&& flight) {
+    const auto index = flight.ticket.frame.index;
+    if (flight.ticket.frame.kind != FrameKind::Compute || index >= compute_.size() ||
+        compute_[index] || retiring_[index])
+        throw std::logic_error("execution ticket names an occupied compute frame");
+    compute_[index].emplace(std::move(flight));
 }
 
 template <class Instance>
@@ -707,7 +761,10 @@ void EngineCore<Instance>::log_worker_failure(std::exception_ptr error) const no
                      reason, static_cast<unsigned>(cycle_step_),
                      static_cast<unsigned long long>(scheduler_.progress_owner().value_or(0)),
                      paused_.size(), instance_.session->has_context_operation(),
-                     compute_.has_value(), retiring_.has_value());
+                     static_cast<int>(std::count_if(compute_.begin(), compute_.end(),
+                                                    [](const auto& f) { return f.has_value(); })),
+                     static_cast<int>(std::count_if(retiring_.begin(), retiring_.end(),
+                                                    [](const auto& f) { return f.has_value(); })));
         for (std::uint32_t lane = 0; lane < max_concurrency_; ++lane) {
             const auto& request = slots_[lane];
             if (request)
@@ -739,9 +796,11 @@ void EngineCore<Instance>::fail_all(std::exception_ptr error) noexcept {
         materializing_ ? materializing_->request : nullptr;
     // Native retires all transfer readers before any external checkpoint owner is destroyed.
     instance_.session->fail_all_cleanup();
-    if (compute_ && compute_->kind == UnitKind::Control) discard_control_preview(*compute_);
-    compute_.reset();
-    retiring_.reset();
+    for (auto& flight : compute_) {
+        if (flight && flight->kind == UnitKind::Control) discard_control_preview(*flight);
+        flight.reset();
+    }
+    for (auto& flight : retiring_) flight.reset();
     cycle_step_ = CycleStep::Boundary;
     materializing_.reset();
     admission_decision_.reset();

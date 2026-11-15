@@ -429,6 +429,14 @@ public:
     prepare_visual(const SequenceState&, std::uint32_t begin, std::uint32_t end);
     runtime::Executor<ExecutionTypes>* executor_ = nullptr;
 
+    // Binds the Session to the executor that runs its executions and sizes the execution table
+    // to the executor's compute frames.
+    void bind_executor(runtime::Executor<ExecutionTypes>& executor) {
+        executor_ = &executor;
+        executions.clear();
+        executions.resize(executor.capacity().compute_frames);
+    }
+
     [[nodiscard]] runtime::Executor<ExecutionTypes>& executor() const { return *executor_; }
 
     context::ContextDirectory directory;
@@ -509,7 +517,21 @@ public:
         bool discarded          = false;
     };
 
-    std::optional<Execution> execution;
+    // Executions in flight, one table entry per compute frame of the executor (sized when the
+    // Session is bound to it). A ticket names its entry, so every result, decision, commit and
+    // retirement is routed by `ticket.frame.index`.
+    std::vector<std::optional<Execution>> executions;
+
+    [[nodiscard]] std::optional<Execution>& execution_slot(runtime::FrameId);
+    [[nodiscard]] Execution* find_execution(runtime::ExecutionTicket) noexcept;
+    [[nodiscard]] const Execution* find_execution(runtime::ExecutionTicket) const noexcept;
+    // Whether any execution is in flight. Context operations, pauses, captures and scoring need
+    // the Session without one.
+    [[nodiscard]] bool executing() const noexcept;
+    // Whether an execution that owns the whole Session (a vision window, a normalization or a
+    // score) is in flight: nothing else starts beside it.
+    [[nodiscard]] bool exclusive_execution() const noexcept;
+    [[nodiscard]] static bool exclusive(const Execution&) noexcept;
 
     struct Scoring {
         runtime::ExecutionTicket public_ticket;
@@ -555,10 +577,10 @@ public:
 
     void receive_result(runtime::ResultReady<ExecutionTypes>&&);
     void retire(runtime::DeviceRetired);
-    void commit_completed_unit();
+    void commit_completed_unit(Execution&);
     void advance_score();
-    [[nodiscard]] PendingBatch generated_pending(const GeneratedResult&);
-    [[nodiscard]] bool matches_pending(const PendingBatch&) const noexcept;
+    [[nodiscard]] PendingBatch generated_pending(const Execution&, const GeneratedResult&);
+    [[nodiscard]] const Execution* matching_execution(const PendingBatch&) const noexcept;
     // The end of the window the sequence's next prefill execution would cover, when that window
     // can share an execution with decode rows.
     [[nodiscard]] std::optional<std::uint32_t> mixable_end(const SequenceState&,

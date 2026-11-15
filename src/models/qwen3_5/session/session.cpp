@@ -93,7 +93,7 @@ PreparedSession prepare_session(std::shared_ptr<const ModelDefinition> definitio
 Session::Session(PreparedSession&& prepared, runtime::Executor<ExecutionTypes>& executor)
     : impl_(std::move(prepared.impl_)) {
     if (!impl_ || impl_->executor_) throw std::invalid_argument("prepared session is unavailable");
-    impl_->executor_ = &executor;
+    impl_->bind_executor(executor);
 }
 
 Session::~Session() noexcept = default;
@@ -534,12 +534,13 @@ void SessionImpl::fail_all_cleanup() noexcept {
     pending_maintenance_.reset();
     if (context_operation_) context_operation_->transaction.fail_after_drain();
     abort_context();
-    if (execution) {
+    for (auto& slot : executions) {
+        if (!slot) continue;
         try {
-            if (execution->preparation) execution->preparation->fail_after_drain();
-            if (execution->settlement) execution->settlement->fail_after_drain();
+            if (slot->preparation) slot->preparation->fail_after_drain();
+            if (slot->settlement) slot->settlement->fail_after_drain();
         } catch (...) { std::terminate(); }
-        execution.reset();
+        slot.reset();
     }
     events.clear();
     releases.clear();

@@ -7,22 +7,48 @@
 namespace ninfer::models::qwen3_5::detail {
 
 GraphPreparationSample RankProgramImpl::initialize_graphs(GraphPreparationMode mode) {
-    if (!use_cuda_graph || resources.frame.spec.causal_scoring) return {};
-    if (graphs) throw std::logic_error("Qwen3.5 graphs are already initialized");
+    if (!use_cuda_graph || resources.compute_frame(0).frame.spec.causal_scoring) return {};
+    for (const auto& entry : slots)
+        if (entry->graphs) throw std::logic_error("Qwen3.5 graphs are already initialized");
     if (mode == GraphPreparationMode::Complete) {
         initialize_graphs(GraphPreparationMode::Warmup);
         return initialize_graphs(GraphPreparationMode::Capture);
     }
+    // Graphs bake the addresses of their frame's tables and workspace, so each compute frame
+    // captures its own set; the measured memory covers all of them.
     GraphPreparation observation(device, mode);
-    graphs.emplace(GraphSpec{capacity, max_concurrency, draft_window, backend, prefill_chunk,
-                             resources.frame.spec.pack_tokens});
+    for (std::uint32_t frame = 0; frame < compute_frames; ++frame) {
+        select_frame(frame);
+        prepare_frame_graphs(observation);
+    }
+    select_frame(0);
+    observation.checkpoint();
+    const auto result = observation.sample();
+    if (!graph_memory) graph_memory.emplace();
+    if (observation.capturing()) {
+        graph_memory->preparation_increment_bytes = result.increment_bytes;
+        graph_memory->preparation_peak_bytes      = result.peak_bytes;
+    } else {
+        for (auto& entry : slots) entry->graphs.reset();
+        graph_memory->warmup_increment_bytes = result.increment_bytes;
+    }
+    for (std::uint32_t frame = 0; frame < compute_frames; ++frame)
+        resources.compute_frame(frame).work.reset();
+    reset_measurement_peaks();
+    return result;
+}
+
+// Prepares the graphs of the selected compute frame.
+void RankProgramImpl::prepare_frame_graphs(GraphPreparation& observation) {
+    slot().graphs.emplace(GraphSpec{capacity, max_concurrency, draft_window, backend, prefill_chunk,
+                                    resources.frame().spec.pack_tokens});
     GraphBodies bodies;
     bodies.prologue = [this, capture = observation.capturing()](const GraphInvocation& call) {
-        gpu_timer.begin_target(capture);
+        slot().gpu_timer.begin_target(capture);
         if (call.phase != GraphPhase::Verify && !resources.dflash) upload_ingress();
     };
     bodies.text = [this](const GraphInvocation& call) {
-        auto& frame      = resources.frame;
+        auto& frame      = resources.frame();
         const auto batch = static_cast<int>(call.batch), width = static_cast<int>(call.width);
         auto input = frame.decode_view(width, batch);
         execution::TextInputs inputs{input.ids,
@@ -43,14 +69,14 @@ GraphPreparationSample RankProgramImpl::initialize_graphs(GraphPreparationMode m
             feature->layers          = parameters.profile->config.draft->target_layer_ids;
         }
         return std::make_unique<execution::TextRun>(
-            execution::TextExecutionView{parameters, resources.work, device.execution_view(),
+            execution::TextExecutionView{parameters, resources.work(), device.execution_view(),
                                          resources.decoder.text_kv, resources.state_images.linear(),
                                          resources.moe.get()},
             std::move(inputs), update, call.envelope, input.hidden, feature ? &*feature : nullptr);
     };
     bodies.prefill_text = [this](const GraphInvocation& call,
                                  std::span<const execution::SequenceSegment> segments) {
-        auto& frame        = resources.frame;
+        auto& frame        = resources.frame();
         const auto columns = static_cast<int>(call.batch * call.width);
         const auto rows    = static_cast<int>(call.batch);
         auto input         = frame.input_view(columns, 1);
@@ -63,7 +89,7 @@ GraphPreparationSample RankProgramImpl::initialize_graphs(GraphPreparationMode m
                                      frame.state_destination_offsets.slice(0, 0, rows),
                                      {}};
         return std::make_unique<execution::TextRun>(
-            execution::TextExecutionView{parameters, resources.work, device.execution_view(),
+            execution::TextExecutionView{parameters, resources.work(), device.execution_view(),
                                          resources.decoder.text_kv, resources.state_images.linear(),
                                          resources.moe.get()},
             std::move(inputs), execution::PackedSequenceUpdate{segments}, call.envelope,
@@ -71,10 +97,10 @@ GraphPreparationSample RankProgramImpl::initialize_graphs(GraphPreparationMode m
     };
     bodies.project = [this, capture = observation.capturing()](const GraphInvocation& call) {
         project_decode(call.batch, call.width);
-        gpu_timer.end_target(capture);
+        slot().gpu_timer.end_target(capture);
     };
     bodies.draft = [this, capture = observation.capturing()](const GraphInvocation& call) {
-        gpu_timer.begin_draft(capture);
+        slot().gpu_timer.begin_draft(capture);
         if (backend == SpeculativeBackend::Mtp) {
             upload_ingress();
             run_mtp_draft(call.batch, draft_window, std::max(1U, call.profile.max));
@@ -82,7 +108,7 @@ GraphPreparationSample RankProgramImpl::initialize_graphs(GraphPreparationMode m
             append_draft_history(call.batch, {0, draft_window + 1});
             run_dflash_draft(call.batch, 0, call.profile.max);
         }
-        gpu_timer.end_draft(capture);
+        slot().gpu_timer.end_draft(capture);
     };
     bodies.decision = [this](const GraphInvocation& call) {
         decide_decode(call.batch, call.width);
@@ -95,30 +121,19 @@ GraphPreparationSample RankProgramImpl::initialize_graphs(GraphPreparationMode m
     bodies.readback = [this](const GraphInvocation& call) {
         readback_decode(call.batch, call.width > 1);
     };
-    graphs->prepare(resources, parameters, device, bodies, observation);
-    observation.checkpoint();
-    const auto result = observation.sample();
-    if (!graph_memory) graph_memory.emplace();
-    if (observation.capturing()) {
-        graph_memory->preparation_increment_bytes = result.increment_bytes;
-        graph_memory->preparation_peak_bytes      = result.peak_bytes;
-    } else {
-        graphs.reset();
-        graph_memory->warmup_increment_bytes = result.increment_bytes;
-    }
-    resources.work.reset();
-    reset_measurement_peaks();
-    return result;
+    slot().graphs->prepare(resources, parameters, device, bodies, observation);
 }
 
 void RankProgramImpl::release_graphs() {
-    if (compute || context_operation)
+    if (computing() || context_operation)
         throw std::logic_error("cannot release graphs with active work");
     if (resources.moe) resources.moe->synchronize();
     device.synchronize();
     CUDA_CHECK(cudaStreamSynchronize(device.transfer_stream()));
-    if (graphs) graphs->clear();
-    graphs.reset();
+    for (auto& entry : slots) {
+        if (entry->graphs) entry->graphs->clear();
+        entry->graphs.reset();
+    }
 }
 
 } // namespace ninfer::models::qwen3_5::detail

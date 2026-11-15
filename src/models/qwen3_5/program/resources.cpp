@@ -21,6 +21,9 @@ std::int32_t dimension(std::uint64_t value) {
 } // namespace
 
 ResourceLayout plan_resources(const ResourceSpec& spec) {
+    if (spec.compute_frames == 0) {
+        throw std::invalid_argument("Qwen3.5 resources need at least one compute frame");
+    }
     if (spec.decoder.enable_mtp != (spec.frame.backend == SpeculativeBackend::Mtp) ||
         spec.dflash.has_value() != is_masked_draft_backend(spec.frame.backend) ||
         spec.decoder.kv_table_rows < static_cast<std::int32_t>(spec.frame.batch_capacity)) {
@@ -56,7 +59,8 @@ ResourceLayout plan_resources(const ResourceSpec& spec) {
              dimension(spec.frame.batch_capacity)},
             kAlignment, "DFlash residency target features");
     }
-    out.frame = plan_frames(builder, spec.frame);
+    for (std::uint32_t frame = 0; frame < spec.compute_frames; ++frame)
+        out.frames.push_back(plan_frames(builder, spec.frame));
     if (!spec.frame.causal_scoring) {
         out.token_counts = builder.add_tensor(
             DType::I32, {spec.frame.public_tokens, dimension(spec.frame.batch_capacity)},
@@ -88,10 +92,13 @@ std::size_t ResourceLayout::pinned_bytes() const {
     auto mapping = mapping_bytes(decoder.text_kv);
     if (decoder.mtp_kv) mapping += mapping_bytes(*decoder.mtp_kv);
     if (dflash && dflash->full) mapping += mapping_bytes(*dflash->full);
-    const auto counts = token_counts ? std::size_t(frame.spec.public_tokens) *
-                                           frame.spec.batch_capacity * sizeof(std::int32_t)
+    const auto& spec  = frames.front().spec;
+    const auto counts = token_counts ? std::size_t(spec.public_tokens) * spec.batch_capacity *
+                                           sizeof(std::int32_t)
                                      : 0;
-    return frame.host.bytes + 2 * mapping + counts;
+    std::size_t frame_bytes = 0;
+    for (const auto& frame : frames) frame_bytes += frame.host.bytes;
+    return frame_bytes + 2 * mapping + counts;
 }
 
 DFlashPersistentState::DFlashPersistentState(MemorySpan arena, MemorySpan backing,
@@ -113,6 +120,14 @@ PagedKVBatchLayerView DFlashPersistentState::full_batch_layer(std::uint32_t laye
     return full->batch_layer_view(layer);
 }
 
+ComputeFrameResources::ComputeFrameResources(DeviceContext& device, MemorySpan backing,
+                                             const FrameLayout& layout,
+                                             const WorkspaceSpec& workspace,
+                                             std::int64_t padding_state_offset)
+    : workspace_storage(device.device(), workspace.capacity),
+      work(workspace_storage.span().subspan(0, workspace.general_capacity)),
+      frame(backing, layout, padding_state_offset) {}
+
 Resources::Resources(DeviceContext& device, const ResourceLayout& layout,
                      const WorkspaceSpec& workspace, const StartupObserver& observer)
     : context_records(layout.context_records()),
@@ -125,14 +140,19 @@ Resources::Resources(DeviceContext& device, const ResourceLayout& layout,
               layout.context_bytes +
                   (std::size_t{1} + layout.staging_states) * layout.state_images.images.image_bytes),
       persistent(device.device(), layout.bytes),
-      workspace_storage(device.device(), workspace.capacity),
-      work(workspace_storage.span().subspan(0, workspace.general_capacity)),
       decoder(context.span(), persistent.span(), layout.decoder),
-      state_images(context.span(), layout.state_images, layout.staging_states),
-      frame(persistent.span(), layout.frame, state_images.scratch_row()) {
+      state_images(context.span(), layout.state_images, layout.staging_states) {
     if (workspace.general_capacity == 0 || workspace.capacity < workspace.general_capacity) {
         throw std::invalid_argument("Qwen3.5 execution workspace layout is inconsistent");
     }
+    if (layout.frames.empty()) {
+        throw std::invalid_argument("Qwen3.5 resources have no compute frame layout");
+    }
+    // Every compute frame gets its own frame region and workspace: a flight reads and writes only
+    // the frame of its ticket, so no table or plane is shared between flights in flight.
+    for (const auto& frame_layout : layout.frames)
+        frames.push_back(std::make_unique<ComputeFrameResources>(
+            device, persistent.span(), frame_layout, workspace, state_images.scratch_row()));
     if (layout.host_context_bytes) {
         StartupPhaseScope phase(observer, StartupPhase::HostContextPin, StartupProgressUnit::Bytes,
                                 layout.host_context_bytes);
@@ -156,6 +176,21 @@ Resources::Resources(DeviceContext& device, const ResourceLayout& layout,
         token_counts = layout.token_counts->bind(backing);
         CUDA_CHECK(cudaMemsetAsync(token_counts.data, 0, token_counts.bytes(), device.stream()));
     }
+}
+
+void Resources::select(std::uint32_t index) {
+    if (index >= frames.size()) throw std::out_of_range("Qwen3.5 compute frame index is invalid");
+    selected_ = index;
+}
+
+ComputeFrameResources& Resources::compute_frame(std::uint32_t index) {
+    if (index >= frames.size()) throw std::out_of_range("Qwen3.5 compute frame index is invalid");
+    return *frames[index];
+}
+
+const ComputeFrameResources& Resources::compute_frame(std::uint32_t index) const {
+    if (index >= frames.size()) throw std::out_of_range("Qwen3.5 compute frame index is invalid");
+    return *frames[index];
 }
 
 PagedKVCache* Resources::backend_kv() noexcept {

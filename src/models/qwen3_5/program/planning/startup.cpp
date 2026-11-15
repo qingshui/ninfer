@@ -154,6 +154,19 @@ std::uint32_t prefill_plan_rows(const SequencePlanImpl& plan) {
     return counts.empty() ? 0 : counts.back();
 }
 
+// Compute frames in flight at once. Two frames let the host freeze, marshal and submit the next
+// flight while the previous one executes, each on its own frame region and workspace. A single
+// frame remains where flights cannot overlap: an offloaded expert schedule yields between layers
+// over shared bridge buffers, a speculative backend keeps per-lane draft and replay state that a
+// second flight would share, and scoring runs one segment at a time.
+inline constexpr std::uint32_t kPipelinedComputeFrames = 2;
+
+std::uint32_t resolve_compute_frames(const SequencePlanImpl& plan) {
+    if (plan.moe || plan.causal_scoring || plan.speculative_backend != SpeculativeBackend::None)
+        return 1;
+    return kPipelinedComputeFrames;
+}
+
 ResourceLayout persistent_layout(const SequencePlanImpl& plan) {
     const auto& profile = *plan.profile;
     const auto& config  = profile.config.text;
@@ -225,6 +238,7 @@ ResourceLayout persistent_layout(const SequencePlanImpl& plan) {
         .vision              = plan.features.vision,
         .control_token_limit = profile.control_token_limit,
     };
+    spec.compute_frames     = plan.compute_frames;
     spec.context_bytes      = plan.context_bytes;
     spec.host_context_bytes = plan.context_cache.host_capacity_bytes.value_or(0);
     spec.staging_states     = plan.prefill_plan_rows;
@@ -770,6 +784,7 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
     impl->vision_memory_budget_bytes        = inputs.vision_memory_budget_bytes;
     impl->kv_storage                        = inputs.kv_storage;
     impl->prefill_plan_rows                 = prefill_plan_rows(*impl);
+    impl->compute_frames                    = resolve_compute_frames(*impl);
     impl->persistent                        = persistent_layout(*impl);
     impl->context_cache.host_capacity_bytes = context::host_context_capacity(
         impl->context_cache.host_capacity_bytes, impl->persistent.state_images.images.image_bytes);
@@ -783,9 +798,13 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
         checked_mul(impl->persistent.state_images.images.image_bytes,
                     std::size_t{1} + impl->prefill_plan_rows, "Context arena tail"),
         "Context arena capacity");
+    // Each compute frame owns a workspace of the planned capacity (its frame region is already
+    // part of `persistent.bytes`).
     impl->device_reservation_bytes = checked_add(
         checked_add(impl->persistent.bytes, context_arena_bytes, "Context arena capacity"),
-        impl->workspace.capacity, "sequence device capacity");
+        checked_mul(impl->workspace.capacity, std::size_t{impl->compute_frames},
+                    "sequence workspace capacity"),
+        "sequence device capacity");
     if (impl->workspace.vision)
         impl->device_reservation_bytes +=
             impl->workspace.vision->output_bytes +

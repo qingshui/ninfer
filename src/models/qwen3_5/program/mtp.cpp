@@ -25,10 +25,10 @@ Tensor host_step(const Tensor& storage, std::uint32_t step, std::int32_t element
 
 execution::MtpExecutionView mtp_view(const execution::Parameters& parameters, Resources& resources,
                                      CudaExecutionView execution, ProposalHead proposal_head) {
-    if (!resources.frame.mtp || !resources.decoder.mtp_cache()) {
+    if (!resources.frame().mtp || !resources.decoder.mtp_cache()) {
         throw std::logic_error("MTP execution resources are unavailable");
     }
-    return {parameters, resources.work, execution,
+    return {parameters, resources.work(), execution,
             resources.decoder.mtp_cache()->batch_layer_view(0), proposal_head};
 }
 
@@ -39,7 +39,7 @@ Tensor causal_rope(const Tensor& rope, int width, int batch) {
 // Gathers the continuation hidden of compact rows [first, first + batch) into the conditioning
 // plane's first `batch` columns.
 void gather_conditioning(Resources& resources, int first, int batch, CudaExecutionView cuda) {
-    const auto& frame = resources.frame;
+    const auto& frame = resources.frame();
     auto output       = packed(frame.mtp->base_conditioning, {frame.spec.hidden, batch});
     const std::array fields{ops::StateGather{
         resources.state_images.continuation_hidden(
@@ -52,7 +52,7 @@ void gather_conditioning(Resources& resources, int first, int batch, CudaExecuti
 
 void RankProgramImpl::prepare_mtp_draft(ComputeOperation& operation) {
     const auto& work  = decode_part(operation);
-    auto& frame       = resources.frame;
+    auto& frame       = resources.frame();
     const auto batch  = static_cast<std::int32_t>(operation.batch);
     for (std::uint32_t step = 0; step < draft_window; ++step) {
         auto host_positions = host_step(frame.host_step_positions, step, batch);
@@ -79,7 +79,7 @@ void RankProgramImpl::prepare_mtp_draft(ComputeOperation& operation) {
 
 void RankProgramImpl::run_mtp_draft(std::uint32_t batch_size, std::uint32_t steps,
                                     std::uint32_t max_frontier) {
-    auto& frame              = resources.frame;
+    auto& frame              = resources.frame();
     auto& mtp                = *frame.mtp;
     const auto cuda          = device.execution_view();
     const auto batch         = static_cast<std::int32_t>(batch_size);
@@ -129,7 +129,7 @@ void RankProgramImpl::align_mtp_history(ComputeOperation& operation) {
     if (!forward && !decode) return;
     if (operation.speculative) return;
 
-    auto& frame              = resources.frame;
+    auto& frame              = resources.frame();
     auto& mtp                = *frame.mtp;
     const auto cuda          = device.execution_view();
     const auto mtp_execution = mtp_view(parameters, resources, cuda, proposal_head);
@@ -183,7 +183,7 @@ void RankProgramImpl::align_mtp_history(ComputeOperation& operation) {
 // first token pairs with the sequence's previous continuation hidden and later tokens with the
 // preceding Main column of the same segment, never a neighbouring sequence's column.
 void RankProgramImpl::align_packed_mtp_history(ComputeOperation& operation) {
-    auto& frame              = resources.frame;
+    auto& frame              = resources.frame();
     auto& mtp                = *frame.mtp;
     const auto cuda          = device.execution_view();
     const auto mtp_execution = mtp_view(parameters, resources, cuda, proposal_head);
@@ -238,7 +238,7 @@ void RankProgramImpl::align_packed_mtp_history(ComputeOperation& operation) {
 }
 
 void RankProgramImpl::rebuild_mtp_history(std::uint32_t batch_size, std::uint32_t column) {
-    auto& frame       = resources.frame;
+    auto& frame       = resources.frame();
     auto& mtp         = *frame.mtp;
     const auto cuda   = device.execution_view();
     const auto batch  = static_cast<std::int32_t>(batch_size);

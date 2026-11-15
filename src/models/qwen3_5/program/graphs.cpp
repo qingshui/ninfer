@@ -45,7 +45,7 @@ public:
           // The preparation pool stops below the scratch State row, exactly like the session's
           // state pool, so no preparation record overlaps the scratch image.
           pool_(0, resources.state_images.pool_bytes(), resources.context_records) {
-        const auto batch = resources.frame.spec.batch_capacity;
+        const auto batch = resources.frame().spec.batch_capacity;
         std::vector<RecordRequest> demand;
         for (std::size_t i = 0; i < resources.context_records.size(); ++i)
             demand.push_back({pool_.record_class(i), batch});
@@ -64,7 +64,7 @@ public:
     }
 
     void prepare(const GraphInvocation& call) {
-        auto& frame         = resources_.frame;
+        auto& frame         = resources_.frame();
         const auto cuda     = device_.execution_view();
         frame.clear_host_ingress();
         frame.clear_host_commit();
@@ -154,7 +154,7 @@ public:
     // bodies only need valid, in-range inputs.
     void prepare_prefill(std::uint32_t segments, std::uint32_t chunk,
                          std::span<const std::int64_t> state_rows) {
-        auto& frame     = resources_.frame;
+        auto& frame     = resources_.frame();
         const auto cuda = device_.execution_view();
         frame.clear_host_ingress();
         frame.clear_host_commit();
@@ -217,7 +217,7 @@ public:
 private:
     void initialize_tables(PagedKVCache& cache, std::size_t spec_index,
                            PoolReservation& reservation) {
-        const auto batch     = resources_.frame.spec.batch_capacity;
+        const auto batch     = resources_.frame().spec.batch_capacity;
         const auto count     = cache.tables().logical_page_capacity();
         const auto row_bytes = std::size_t(count) * sizeof(std::int64_t);
         tables_.emplace_back(row_bytes * batch);
@@ -364,18 +364,18 @@ void Graphs::prepare(Resources& resources, const execution::Parameters& paramete
                                       std::uint32_t width, const auto& profiles) {
             const auto call = invocation(phase, batch, width, profiles.front(), spec_.capacity);
             inputs.prepare(call);
-            resources.work.reset();
-            resources.work.reset_peak();
+            resources.work().reset();
+            resources.work().reset_peak();
             auto run = bodies.text(call);
             if (!run) throw std::logic_error("graph target body returned no traversal");
             graph.prepare(
                 *run, parameters, resources.moe.get(), profiles, width,
                 [&] { bodies.prologue(call); },
                 [&] {
-                    auto scope = resources.work.scope();
+                    auto scope = resources.work().scope();
                     bodies.project(call);
                 },
-                resources.work, device, observation);
+                resources.work(), device, observation);
             if (observation.capturing()) {
                 if (!graph.start(device.execution_view()))
                     while (!graph.poll()) {
@@ -397,10 +397,10 @@ void Graphs::prepare(Resources& resources, const execution::Parameters& paramete
             for (const auto profile : profiles) {
                 const auto call = invocation(phase, batch, width, profile, spec_.capacity);
                 inputs.prepare(call);
-                resources.work.reset();
-                resources.work.reset_peak();
+                resources.work().reset();
+                resources.work().reset_peak();
                 const auto body = [&] {
-                    auto scope = resources.work.scope();
+                    auto scope = resources.work().scope();
                     if (phase == GraphPhase::Draft)
                         bodies.draft(call);
                     else {
@@ -416,7 +416,7 @@ void Graphs::prepare(Resources& resources, const execution::Parameters& paramete
                 auto& stored   = family.profiles.emplace_back();
                 stored.profile = profile;
                 stored.definition.capture(device.stream(), body);
-                workspace_peak_ = std::max(workspace_peak_, resources.work.peak_used());
+                workspace_peak_ = std::max(workspace_peak_, resources.work().peak_used());
             }
             if (observation.capturing()) {
                 family.instantiate(device.execution_view());
@@ -441,12 +441,12 @@ void Graphs::prepare(Resources& resources, const execution::Parameters& paramete
         if (bodies.mtp_commit && spec_.draft_window) {
             inputs.prepare(invocation(GraphPhase::Verify, batch, spec_.draft_window + 1,
                                       {0, spec_.capacity - 1, 0}, spec_.capacity));
-            auto& frame = resources.frame;
+            auto& frame = resources.frame();
             for (std::uint32_t row = 0; row < batch; ++row)
                 frame.host_commit->accepted_columns[row] = spec_.draft_window + 1;
             CUDA_CHECK(cudaMemcpyAsync(frame.commit.data, frame.host_commit_region.data,
                                        frame.commit.bytes, cudaMemcpyHostToDevice, device.stream()));
-            resources.work.reset_peak();
+            resources.work().reset_peak();
             if (!observation.capturing()) {
                 bodies.mtp_commit(batch, nullptr, nullptr);
                 observation.checkpoint();
@@ -459,7 +459,7 @@ void Graphs::prepare(Resources& resources, const execution::Parameters& paramete
             history.executable.instantiate(history.definition);
             history.executable.upload(device.stream());
             history.executable.launch(device.stream());
-            workspace_peak_ = std::max(workspace_peak_, resources.work.peak_used());
+            workspace_peak_ = std::max(workspace_peak_, resources.work().peak_used());
             observation.checkpoint();
         }
     }
@@ -489,13 +489,13 @@ void Graphs::prepare(Resources& resources, const execution::Parameters& paramete
         const auto call = invocation(GraphPhase::Prefill, segments, spec_.prefill_chunk,
                                      prefill_profiles.front(), spec_.capacity);
         inputs.prepare_prefill(segments, spec_.prefill_chunk, rows);
-        resources.work.reset();
-        resources.work.reset_peak();
+        resources.work().reset();
+        resources.work().reset_peak();
         auto run = bodies.prefill_text(call, canonical);
         if (!run) throw std::logic_error("graph prefill body returned no traversal");
         auto& plan = prefill_.build({PrefillPhase::Text, width}, segments);
         plan.graph.prepare(*run, parameters, nullptr, prefill_profiles, spec_.prefill_chunk, [] {},
-                           [] {}, resources.work, device, observation);
+                           [] {}, resources.work(), device, observation);
         if (observation.capturing()) {
             if (!plan.graph.start(device.execution_view()))
                 throw std::logic_error("resident prefill plan did not submit completely");
@@ -507,7 +507,7 @@ void Graphs::prepare(Resources& resources, const execution::Parameters& paramete
     if (resources.moe) resources.moe->restore_cache_after_preparation();
     observation.checkpoint();
     inputs.finish();
-    resources.work.reset();
+    resources.work().reset();
 }
 
 std::uint32_t Graphs::covering_bucket(std::uint32_t batch) const noexcept {

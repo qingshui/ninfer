@@ -45,30 +45,33 @@ ops::SamplingConfig RankProgramImpl::sampling_config(const ExecutionRow& row,
                 .data);
     }
     if (input.constrained) {
-        const auto mask = resources.frame.masks.slice(2, static_cast<std::int32_t>(compact_row), 1);
+        const auto mask =
+            resources.frame().masks.slice(2, static_cast<std::int32_t>(compact_row), 1);
         result.mask     = {static_cast<const std::uint32_t*>(mask.data), mask.ne[0]};
     }
     return result;
 }
 
 void RankProgramImpl::upload_ingress() {
-    CUDA_CHECK(cudaMemcpyAsync(resources.frame.ingress.data,
-                               resources.frame.host_ingress_region.data,
-                               resources.frame.ingress.bytes, cudaMemcpyHostToDevice,
+    CUDA_CHECK(cudaMemcpyAsync(resources.frame().ingress.data,
+                               resources.frame().host_ingress_region.data,
+                               resources.frame().ingress.bytes, cudaMemcpyHostToDevice,
                                device.stream()));
 }
 
 void RankProgramImpl::upload_input(std::uint32_t width, std::uint32_t batch) {
-    auto host  = resources.frame.host_input_view(static_cast<int>(width), static_cast<int>(batch));
-    auto input = resources.frame.input_view(static_cast<int>(width), static_cast<int>(batch));
+    auto host  = resources.frame().host_input_view(static_cast<int>(width),
+                                                   static_cast<int>(batch));
+    auto input = resources.frame().input_view(static_cast<int>(width), static_cast<int>(batch));
     CUDA_CHECK(cudaMemcpyAsync(input.ids.data, host.ids.data, input.ids.bytes(),
                                cudaMemcpyHostToDevice, device.stream()));
     upload_positions(width, batch);
 }
 
 void RankProgramImpl::upload_positions(std::uint32_t width, std::uint32_t batch) {
-    auto host  = resources.frame.host_input_view(static_cast<int>(width), static_cast<int>(batch));
-    auto input = resources.frame.input_view(static_cast<int>(width), static_cast<int>(batch));
+    auto host  = resources.frame().host_input_view(static_cast<int>(width),
+                                                   static_cast<int>(batch));
+    auto input = resources.frame().input_view(static_cast<int>(width), static_cast<int>(batch));
     for (const auto pair : {std::pair{host.cache_positions, input.cache_positions},
                             std::pair{host.rope_positions, input.rope_positions}}) {
         CUDA_CHECK(cudaMemcpyAsync(pair.second.data, pair.first.data, pair.second.bytes(),
@@ -110,7 +113,7 @@ void RankProgramImpl::initialize_forward(ComputeOperation& operation, const Forw
     }
     operation.width        = end - offset;
     operation.row_finished = false;
-    auto& frame            = resources.frame;
+    auto& frame            = resources.frame();
     // Rows execute one after another as a B=1 window in compact row 0. Only the operation's first
     // window starts from a clean ingress; later windows rebind every field they use (row binding,
     // valid_columns, sampling positions, previous RoPE) in place.
@@ -148,7 +151,7 @@ void RankProgramImpl::initialize_forward(ComputeOperation& operation, const Forw
             auto output       = storage.output(0, batch.features);
             qwen::VisionContext encoder(device.execution_view(), *parameters.profile->config.vision,
                                         *parameters.vision);
-            const auto bytes = encoder.encode(batch, output, resources.workspace_storage.span(),
+            const auto bytes = encoder.encode(batch, output, resources.workspace_storage().span(),
                                               storage.staging());
             storage.produced(bytes);
             workspace_peak = std::max(workspace_peak, bytes);
@@ -184,7 +187,7 @@ void RankProgramImpl::initialize_forward(ComputeOperation& operation, const Forw
 // Compact row i of the ingress arrays describes segment i; execution reads them by segment.
 void RankProgramImpl::initialize_packed_forward(ComputeOperation& operation,
                                                 const ForwardWork& work) {
-    auto& frame         = resources.frame;
+    auto& frame         = resources.frame();
     const auto count    = static_cast<std::uint32_t>(work.rows.size());
     frame.clear_host_ingress();
     operation.segments.clear();
@@ -225,7 +228,7 @@ void RankProgramImpl::initialize_packed_forward(ComputeOperation& operation,
 // The supported extent of packed prefill is owned here: one flat token axis of bounded total
 // length, whole windows only, no sampling, vision or draft feature state.
 void RankProgramImpl::validate_packed_forward(const ForwardWork& work) const {
-    const auto& spec = resources.frame.spec;
+    const auto& spec = resources.frame().spec;
     if (work.sample != SamplePurpose::None || resources.dflash ||
         work.rows.size() > spec.pack_segments)
         throw std::invalid_argument("Qwen3.5 packed prefill has unsupported membership");
@@ -240,7 +243,7 @@ void RankProgramImpl::validate_packed_forward(const ForwardWork& work) const {
 }
 
 void RankProgramImpl::initialize_decode(ComputeOperation& operation, const DecodeWork& work) {
-    auto& frame         = resources.frame;
+    auto& frame         = resources.frame();
     frame.clear_host_ingress();
     operation.batch     = static_cast<std::uint32_t>(work.rows.size());
     for (std::size_t i = 0; i < work.rows.size(); ++i) {
@@ -286,7 +289,8 @@ void RankProgramImpl::initialize_decode(ComputeOperation& operation, const Decod
     // destinations at the scratch State row); it must upload the ingress itself, exactly like the
     // always-eager mixed initialization below.
     const auto phase = operation.speculative ? GraphPhase::Verify : GraphPhase::Main;
-    if (!graphs || resources.dflash || !graphs->captured_batch(phase, operation.batch))
+    if (!slot().graphs || resources.dflash ||
+        !slot().graphs->captured_batch(phase, operation.batch))
         upload_ingress();
 }
 
@@ -296,7 +300,7 @@ void RankProgramImpl::initialize_decode(ComputeOperation& operation, const Decod
 // verifies the anchor alone (W = 1); MTP always verifies at the full draft width, each row valid
 // up to its own extent.
 void RankProgramImpl::initialize_mixed(ComputeOperation& operation, const MixedWork& work) {
-    auto& frame         = resources.frame;
+    auto& frame         = resources.frame();
     frame.clear_host_ingress();
     const auto rows     = static_cast<std::uint32_t>(work.decode.rows.size());
     const auto count    = static_cast<std::uint32_t>(work.prefill.rows.size());
@@ -389,7 +393,7 @@ void RankProgramImpl::initialize_mixed(ComputeOperation& operation, const MixedW
 // The supported extent of a mixed execution is owned here: non-final text-only windows packed as
 // in a packed prefill, followed by unconstrained decode rows, within the planned token axis.
 void RankProgramImpl::validate_mixed(const MixedWork& work) const {
-    const auto& spec = resources.frame.spec;
+    const auto& spec = resources.frame().spec;
     if (spec.mixed_tokens == 0 || resources.dflash ||
         (backend != SpeculativeBackend::None && backend != SpeculativeBackend::Mtp))
         throw std::invalid_argument("Qwen3.5 mixed execution is not prepared");
@@ -428,7 +432,7 @@ void RankProgramImpl::initialize_score(ComputeOperation& operation, const ScoreW
 }
 
 void RankProgramImpl::initialize_inputs(ComputeOperation& operation) {
-    resources.work.reset();
+    resources.work().reset();
     if (const auto* work = std::get_if<ForwardWork>(&operation.request.work.operation))
         initialize_forward(operation, *work);
     else if (const auto* work = std::get_if<DecodeWork>(&operation.request.work.operation))
@@ -441,9 +445,9 @@ void RankProgramImpl::initialize_inputs(ComputeOperation& operation) {
         operation.rows                = work->rows;
         operation.batch               = static_cast<std::uint32_t>(work->rows.size());
         operation.width               = draft_window + 1;
-        resources.frame.clear_host_ingress();
+        resources.frame().clear_host_ingress();
         for (std::size_t i = 0; i < work->rows.size(); ++i)
-            bind_row(*resources.frame.host_ingress, i, work->rows[i]);
+            bind_row(*resources.frame().host_ingress, i, work->rows[i]);
         upload_ingress();
     }
 }

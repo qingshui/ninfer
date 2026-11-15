@@ -104,6 +104,10 @@ public:
         published_requests_.reserve(max_outstanding_);
         published_snapshot_.decode_by_batch.resize(max_concurrency_);
         const auto frames = instance_.executor->capacity();
+        // One flight table entry per compute frame of the executor, indexed by the frame of the
+        // flight's ticket.
+        compute_.resize(frames.compute_frames);
+        retiring_.resize(frames.compute_frames);
         execution_observations_.reserve(frames.compute_frames + frames.context_frames);
         published_snapshot_.in_flight.reserve(frames.compute_frames + frames.context_frames);
         std::promise<void> startup;
@@ -853,6 +857,23 @@ private:
 
     [[nodiscard]] bool compute_pending() const noexcept;
 
+    // The flight a ticket names in `compute_` / `retiring_`; null when the ticket's frame holds
+    // another flight or none.
+    [[nodiscard]] ComputeFlight* find_compute(const ExecutionTicket& ticket) noexcept;
+    [[nodiscard]] ComputeFlight* find_retiring(const ExecutionTicket& ticket) noexcept;
+
+    // Flights in either table.
+    [[nodiscard]] std::size_t compute_flights() const noexcept;
+
+    // The oldest flight still computing: it names the host work class of a wait.
+    [[nodiscard]] const ComputeFlight* oldest_compute() const noexcept;
+
+    // Whether an executor compute frame can take another flight.
+    [[nodiscard]] bool compute_frame_available() const noexcept;
+
+    // Records a started flight in the table entry of its ticket's frame.
+    void admit_compute(ComputeFlight&& flight);
+
     void record_service(ComputeFlight& flight) noexcept;
     void log_worker_failure(std::exception_ptr error) const noexcept;
     void fail_all(std::exception_ptr error) noexcept;
@@ -893,8 +914,11 @@ private:
     std::optional<bool> pass_blocked_;
     std::vector<std::shared_ptr<Request>> paused_;
     Scheduling scheduler_;
-    std::optional<ComputeFlight> compute_;
-    std::optional<ComputeFlight> retiring_;
+    // Flights of the executor's compute frames, indexed by ticket.frame.index. A flight is in
+    // `compute_` from submission until its result is resolved; one whose model commit was issued
+    // waits for device retirement in `retiring_`. A frame holds at most one of the two.
+    std::vector<std::optional<ComputeFlight>> compute_;
+    std::vector<std::optional<ComputeFlight>> retiring_;
     CycleStep cycle_step_ = CycleStep::Boundary;
     std::vector<bool> control_executed_{};
     std::vector<std::optional<UnitPermit>> reserved_units_{};

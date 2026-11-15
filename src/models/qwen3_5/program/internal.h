@@ -105,6 +105,23 @@ struct ContextOperation {
     runtime::CommandSequence last_command;
 };
 
+// Everything one compute frame owns beside its Resources storage: the flight on the frame, the
+// context actions of that flight, the completion events and timers its stages record, and the
+// CUDA graphs captured against the frame's tables and workspace. Flights on different slots
+// share no host-written state and no replay pointer.
+struct ComputeSlot {
+    std::unique_ptr<ComputeOperation> compute;
+    std::unique_ptr<context::ContextMigration> compute_actions;
+    CudaCompletionEvent result_ready;
+    CudaCompletionEvent drafts_ready;
+    CudaCompletionEvent compute_retired;
+    CudaEventTimer prefill_timer;
+    runtime::ExecutionGpuTimer gpu_timer;
+    std::optional<Graphs> graphs;
+
+    ComputeSlot(DeviceContext&, context::ContextStorage&, bool gpu_timing);
+};
+
 class RankProgramImpl {
 public:
     RankProgramImpl(const execution::Parameters&, const SequencePlanImpl&, DeviceContext&,
@@ -157,6 +174,7 @@ public:
     void decide_decode(std::uint32_t batch, std::uint32_t width);
     void readback_decode(std::uint32_t batch, bool speculative);
     GraphPreparationSample initialize_graphs(GraphPreparationMode = GraphPreparationMode::Complete);
+    void prepare_frame_graphs(GraphPreparation&);
     void release_graphs();
     void append_draft_history(ComputeOperation&);
     void append_draft_history(std::uint32_t batch, ops::KVCacheAppendPrefixExecutionEnvelope);
@@ -175,8 +193,17 @@ public:
     void publish_result(ComputeOperation&);
     void retire_compute();
     void progress();
+    // Advances the flight of one compute slot as far as its host-visible stages allow.
+    void progress_compute(std::uint32_t frame);
+    // The flight a ticket names; the non-const form also selects the ticket's compute frame, so
+    // every member the flight touches (frame tables, workspace, events, graphs) is its own.
     [[nodiscard]] ComputeOperation& require_compute(runtime::ExecutionTicket);
     [[nodiscard]] const ComputeOperation& require_compute(runtime::ExecutionTicket) const;
+    // Binds the compute frame that Resources::frame()/work() and slot() address.
+    void select_frame(std::uint32_t frame);
+    [[nodiscard]] ComputeSlot& slot() noexcept { return *slots[resources.selected()]; }
+    [[nodiscard]] const ComputeSlot& slot() const noexcept { return *slots[resources.selected()]; }
+    [[nodiscard]] bool computing() const noexcept;
     [[nodiscard]] ops::SamplingConfig sampling_config(const ExecutionRow&, const SamplingInput&,
                                                       std::size_t compact_row) const;
 
@@ -191,24 +218,20 @@ public:
     const bool use_cuda_graph;
     const KvCacheStorage kv_storage;
     const WorkspaceSpec workspace_plan;
+    // Compute frames of the rank: the executor reserves a flight on one of them and the ticket's
+    // frame index names its slot and its storage in `resources`.
+    const std::uint32_t compute_frames;
     Resources resources;
     std::unique_ptr<context::ContextStorage> storage;
-    std::unique_ptr<context::ContextMigration> compute_actions;
     std::unique_ptr<context::ContextMigration> context_actions;
     std::unique_ptr<ContextOperation> context_operation;
     PinnedHostBuffer context_counts;
     // One residency slot per lane of the resolved concurrency.
     std::vector<Residency> residencies;
     std::size_t workspace_peak = 0;
-    std::unique_ptr<ComputeOperation> compute;
-    CudaCompletionEvent result_ready;
-    CudaCompletionEvent drafts_ready;
-    CudaCompletionEvent compute_retired;
+    std::vector<std::unique_ptr<ComputeSlot>> slots;
     CudaCompletionEvent context_ready;
-    CudaEventTimer prefill_timer;
-    runtime::ExecutionGpuTimer gpu_timer;
     std::deque<runtime::ExecutionEvent<ExecutionTypes>> events;
-    std::optional<Graphs> graphs;
     // Cumulative prefill launch-plan outcomes of this rank (see PrefillPlanCounters).
     PrefillPlanCounters prefill_plan;
     std::optional<GraphMemorySummary> graph_memory;

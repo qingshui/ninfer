@@ -97,7 +97,7 @@ bool SessionImpl::prepare_backup(context::ContextTransaction& migration, Checkpo
 }
 
 std::vector<PauseOption> SessionImpl::pause_options(SequenceHandle handle) const {
-    if (has_context_operation() || execution || !valid_sequence(handle)) return {};
+    if (has_context_operation() || executing() || !valid_sequence(handle)) return {};
     const auto index    = lane(handle);
     const auto& state   = sequences[index];
     const auto& control = requests[index];
@@ -202,7 +202,7 @@ bool SessionImpl::pause_contributes(SequenceHandle handle, const PauseOption& op
 
 bool SessionImpl::prepare_pause(SequenceHandle handle, runtime::PauseAction action,
                                 std::span<const CheckpointHandle> host_victims) {
-    if (has_context_operation() || execution || !valid_sequence(handle)) return false;
+    if (has_context_operation() || executing() || !valid_sequence(handle)) return false;
     if (pause_reservation_) throw std::logic_error("pause preparation is already owned");
     const auto options  = pause_options(handle);
     const auto selected = std::find_if(options.begin(), options.end(),
@@ -253,7 +253,7 @@ bool SessionImpl::prepare_pause(SequenceHandle handle, runtime::PauseAction acti
 }
 
 bool SessionImpl::start_pause(SequenceHandle handle, runtime::PauseAction action) {
-    if (has_context_operation() || execution) return false;
+    if (has_context_operation() || executing()) return false;
     if (!valid_sequence(handle)) throw std::logic_error("pause has a stale sequence");
     const auto index = lane(handle);
     auto& state      = sequences[index];
@@ -298,7 +298,7 @@ bool SessionImpl::continue_pause_ready(SequenceHandle handle, runtime::PauseActi
 }
 
 void SessionImpl::continue_pause_after_normalize(SequenceHandle handle) {
-    if (!normalizing_pause_ || *normalizing_pause_ != handle || execution)
+    if (!normalizing_pause_ || *normalizing_pause_ != handle || executing())
         throw std::logic_error("pause normalization has not retired");
     normalizing_pause_.reset();
     const auto action = pause_cancelled_

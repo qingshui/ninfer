@@ -183,7 +183,7 @@ void run(const char* artifact, SpeculativeBackend backend) {
     auto state_source = source_offset, state_destination = source_offset;
 
     const auto decode_binding = [&](std::int64_t offset, std::int32_t row) {
-        auto& frame                          = resources.frame;
+        auto& frame                          = resources.frame();
         frame.clear_host_ingress();
         frame.host_ingress->state_destination_offsets[0] = offset;
         frame.host_ingress->backend_table_rows[0]        = row;
@@ -196,7 +196,7 @@ void run(const char* artifact, SpeculativeBackend backend) {
         const AppendSelectors selectors{state_destination, 1, width};
         CUDA_CHECK(cudaMemcpy(selector_storage.data(), &selectors, sizeof(selectors),
                               cudaMemcpyHostToDevice));
-        auto& frame = resources.frame;
+        auto& frame = resources.frame();
         auto host   = frame.host_input_view(width, 1);
         auto input  = frame.input_view(width, 1);
         std::copy_n(tokens.begin() + frontier, count, static_cast<TokenId*>(host.ids.data));
@@ -216,7 +216,7 @@ void run(const char* artifact, SpeculativeBackend backend) {
         const execution::DFlashFeatureSink sink{
             features, positions, {}, profile->config.draft->target_layer_ids};
         {
-            execution::TextRun run({parameters, resources.work, device.execution_view(),
+            execution::TextRun run({parameters, resources.work(), device.execution_view(),
                                     resources.decoder.text_kv, states.linear()},
                                    {input.ids,
                                     input.cache_positions,
@@ -231,7 +231,7 @@ void run(const char* artifact, SpeculativeBackend backend) {
             require(run.start(), "resident Main unexpectedly yielded for offloaded weights");
         }
         const execution::DraftExecutionView draft{
-            parameters, resources.work, device.execution_view(), resources.dflash->local,
+            parameters, resources.work(), device.execution_view(), resources.dflash->local,
             resources.dflash->full ? &*resources.dflash->full : nullptr};
         execution::draft_append_context(draft, features, positions, append_count, append_offset,
                                         table_row, {count, count});
