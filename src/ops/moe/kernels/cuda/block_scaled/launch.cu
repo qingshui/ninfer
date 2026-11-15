@@ -1,7 +1,13 @@
+#include "core/platform.h"
 #include "ops/moe/kernels/cuda/block_scaled/grouping.cuh"
 #include "ops/moe/kernels/cuda/block_scaled/nvfp4/launch.h"
-#include "ops/moe/kernels/cuda/block_scaled/fp8/launch.h"
 #include "ops/moe/kernels/cuda/block_scaled/output.cuh"
+
+#if !NINFER_TARGET_B200
+// The fp8 block-scaled experts run mma.sync kernels that only exist off B200; the fp8 family
+// is not part of the Qwen3.5-122B b200 build (the shape dispatch reports it unavailable).
+#include "ops/moe/kernels/cuda/block_scaled/fp8/launch.h"
+#endif
 
 #include <algorithm>
 #include <climits>
@@ -243,8 +249,12 @@ void launch_shape(const Tensor& x, const CudaSwiGLUExperts& experts, const Exper
             nvfp4::launch_vector(x, experts, routes, subset, shared != nullptr, mode, destination,
                                  s, plan, execution);
         } else {
+#if NINFER_TARGET_B200
+            throw std::invalid_argument("moe block scaled: fp8 is not available on b200");
+#else
             fp8::launch_vector(x, experts, routes, subset, shared != nullptr, mode, destination, s,
                                plan, execution);
+#endif
         }
         if (!shared) { return; }
     } else if (subset.kind != ExpertSubsetKind::None) {
@@ -254,7 +264,11 @@ void launch_shape(const Tensor& x, const CudaSwiGLUExperts& experts, const Exper
         if (plan.format == QType::NVFP4) {
             nvfp4::launch_input(x, experts, s, execution, !prepared.route_counts);
         } else {
+#if NINFER_TARGET_B200
+            throw std::invalid_argument("moe block scaled: fp8 is not available on b200");
+#else
             fp8::launch_input(x, experts, s, execution, !prepared.route_counts);
+#endif
         }
         if (plan.single_block_grouping) {
             group_small<Shape><<<1, Shape::experts, 0, stream>>>(ids, subset.kind, mask, s.groups,
@@ -276,7 +290,11 @@ void launch_shape(const Tensor& x, const CudaSwiGLUExperts& experts, const Exper
         if (plan.format == QType::NVFP4) {
             nvfp4::launch_experts(x, experts, routes, plan, s, execution);
         } else {
+#if NINFER_TARGET_B200
+            throw std::invalid_argument("moe block scaled: fp8 is not available on b200");
+#else
             fp8::launch_experts(x, experts, routes, plan, s, execution);
+#endif
         }
     }
     if (shared) {

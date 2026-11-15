@@ -120,6 +120,11 @@ mxfp8_tma_scale_stage(const Mxfp8ScaledTmaDescriptors& maps, const Rows& rows, i
                             group * 16, rows.weight_row(row_begin, row, row_count), full + slot);
 }
 
+// The MXFP8 A8 TMA mma.sync kernel is an SM120 family and is not part of the B200 build:
+// SM100 has no mma.sync block-scale instruction and the emulation is gone (see
+// ops/common/cuda/mma.cuh). Any B200 translation unit that reaches the A8 GEMM gets a
+// dispatch-level "not available on b200" error instead (launch_mxfp8_a8_tma).
+#if !NINFER_TARGET_B200
 template <class S, bool Full, bool TmaScales, class Output, class Epilogue, class Rows>
 __global__ __launch_bounds__(S::kThreads, S::kMinBlocksPerSm) void mxfp8_a8_tma_kernel(
     const __grid_constant__ Mxfp8TmaDescriptors<TmaScales> maps, Mxfp8A8Operands p, Output output,
@@ -333,11 +338,20 @@ __global__ __launch_bounds__(S::kThreads, S::kMinBlocksPerSm) void mxfp8_a8_tma_
     native_fp8_finish<Consumer, Full>(output, epilogue, storage, accum, row_begin, token_begin,
                                       p.rows, p.tokens);
 }
+#endif // !NINFER_TARGET_B200
 
 template <class S, bool PaddedCodes = false, class Output, class Epilogue,
           class Rows = Fp8IdentityRows>
 void launch_mxfp8_a8_tma(const Mxfp8A8Operands& p, Output output, Epilogue epilogue,
                          cudaStream_t stream, Rows rows = {}) {
+#if NINFER_TARGET_B200
+    (void)p;
+    (void)output;
+    (void)epilogue;
+    (void)stream;
+    (void)rows;
+    throw std::invalid_argument("mxfp8 linear: mma.sync is not available on b200");
+#else
     constexpr int panel = mxfp8_tma_panel_rows<S, Rows>;
     static_assert(panel > 0 && panel % 8 == 0 && S::kBlockRows % panel == 0);
     validate_native_fp8<S>(p);
@@ -383,6 +397,7 @@ void launch_mxfp8_a8_tma(const Mxfp8A8Operands& p, Output output, Epilogue epilo
             return selected.template operator()<true>();
     }
     selected.template operator()<false>();
+#endif
 }
 
 } // namespace ninfer::ops::detail

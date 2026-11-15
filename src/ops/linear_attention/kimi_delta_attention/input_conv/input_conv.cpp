@@ -1,4 +1,5 @@
 #include "ninfer/ops/kda_input_proj.h"
+#include "core/platform.h"
 #include "ops/common/host/operands.h"
 #include "ops/linear/kernels/q8/q8_operands.h"
 #include "ops/linear_attention/kimi_delta_attention/input_conv/launch.h"
@@ -26,9 +27,14 @@ std::size_t capacity(const LinearProfile& p, int batch, int first, int last, boo
         throw std::invalid_argument("KDA input: invalid batch or token interval");
     if (p.qtype != QType::MXFP8 && last > std::numeric_limits<int>::max() / batch)
         throw std::overflow_error("KDA input: flattened token extent exceeds int32");
-    return p.qtype == QType::MXFP8
-               ? detail::kda_input::mxfp8_workspace_capacity(batch, first, last, update, p.policy)
-               : detail::kda_input::workspace_capacity(batch, first, last, update);
+    if (p.qtype != QType::MXFP8)
+        return detail::kda_input::workspace_capacity(batch, first, last, update);
+#if NINFER_TARGET_B200
+    // The MXFP8 A8 kernels are an SM120 family and are not part of the B200 build.
+    throw std::invalid_argument("kda_input_proj_conv: mxfp8 is not available on b200");
+#else
+    return detail::kda_input::mxfp8_workspace_capacity(batch, first, last, update, p.policy);
+#endif
 }
 
 void execute(const Tensor& x, const SingleProjectionWeight& qkv, const Tensor& weights,
@@ -118,10 +124,16 @@ void execute(const Tensor& x, const SingleProjectionWeight& qkv, const Tensor& w
         static_cast<__nv_bfloat16*>(records.data),
         width,
         batch};
-    if (mx)
+    if (mx) {
+#if NINFER_TARGET_B200
+        // The MXFP8 A8 kernels are an SM120 family and are not part of the B200 build.
+        throw std::invalid_argument("kda_input_proj_conv: mxfp8 is not available on b200");
+#else
         detail::kda_input::launch_mxfp8(x, w, qkv.policy, a, scratch_data, cuda.stream());
-    else
+#endif
+    } else {
         detail::kda_input::launch(x, w, a, static_cast<float*>(scratch_data), cuda.stream());
+    }
 }
 } // namespace
 

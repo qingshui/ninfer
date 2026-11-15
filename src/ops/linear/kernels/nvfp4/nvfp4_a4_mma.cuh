@@ -1,5 +1,14 @@
 #pragma once
+
+// The quantized-activation (A4) mma.sync kernels are an SM120 family and are not part of the
+// B200 build: SM100 has no mma.sync block-scale instruction and the emulation is gone
+// (see ops/common/cuda/mma.cuh). Any B200 translation unit that reaches the A4 GEMM gets a
+// dispatch-level "not available on b200" error instead (launch_nvfp4_a4_mma).
+#if !NINFER_TARGET_B200
+
+#include "core/platform.h"
 #include "ops/common/cuda/pipeline.cuh"
+
 
 #include "ops/common/cuda/memory.cuh"
 #include "ops/common/cuda/mma.cuh"
@@ -342,3 +351,4 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void nvfp4_a4_m
     }
 }
 } // namespace ninfer::ops::detail
+#endif // !NINFER_TARGET_B200

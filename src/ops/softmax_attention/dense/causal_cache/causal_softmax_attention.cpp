@@ -233,9 +233,16 @@ std::size_t causal_softmax_attention_workspace_capacity_bytes(
         return detail::bf16_kv_workspace_bytes(q_heads, batch_size, min_width, max_width, envelope,
                                                multiprocessor_count);
 
-    if (cache_storage == KvCacheStorage::Fp8E4m3fnGroup128Ue8m0)
+    if (cache_storage == KvCacheStorage::Fp8E4m3fnGroup128Ue8m0) {
+#if NINFER_TARGET_B200
+        // The fp8 FMHA kernels are an SM120 family; on B200 the fp8 cache is only served by
+        // the tcgen05 path above.
+        throw std::invalid_argument("causal_softmax_attention workspace: fp8 is not available on b200");
+#else
         return detail::fp8_kv_workspace_bytes(q_heads, batch_size, min_width, max_width, envelope,
                                               multiprocessor_count);
+#endif
+    }
 
     if (cache_storage == KvCacheStorage::Int8Group64)
         return detail::int8_kv_workspace_bytes(q_heads, batch_size, min_width, max_width, envelope,
@@ -245,8 +252,14 @@ std::size_t causal_softmax_attention_workspace_capacity_bytes(
         return detail::nvfp4_kv_workspace_bytes(q_heads, batch_size, min_width, max_width, envelope,
                                                 multiprocessor_count);
 
+#if NINFER_TARGET_B200
+    // The k8v4 FMHA kernels are an SM120 family; on B200 the k8v4 cache is only served by
+    // the tcgen05 path above.
+    throw std::invalid_argument("causal_softmax_attention workspace: k8v4 is not available on b200");
+#else
     return detail::k8v4_kv_workspace_bytes(q_heads, batch_size, min_width, max_width, envelope,
                                            multiprocessor_count);
+#endif
 }
 
 void causal_softmax_attention(const Tensor& q, const Tensor& k, const Tensor& v,
@@ -290,9 +303,15 @@ void causal_softmax_attention(const Tensor& q, const Tensor& k, const Tensor& v,
     }
 
     if (cache.storage == KvCacheStorage::Fp8E4m3fnGroup128Ue8m0) {
+#if NINFER_TARGET_B200
+        // The fp8 FMHA kernels are an SM120 family; on B200 the fp8 cache is only served by
+        // the tcgen05 path above.
+        throw std::invalid_argument("causal_softmax_attention: fp8 is not available on b200");
+#else
         detail::fp8_kv_append_attention(q, k, v, positions, valid_columns, kv_table_rows, scale,
                                         cache, envelope, workspace, out, execution);
         return;
+#endif
     }
 
     if (cache.storage == KvCacheStorage::Int8Group64) {
@@ -307,8 +326,14 @@ void causal_softmax_attention(const Tensor& q, const Tensor& k, const Tensor& v,
         return;
     }
 
+#if NINFER_TARGET_B200
+    // The k8v4 FMHA kernels are an SM120 family; on B200 the k8v4 cache is only served by
+    // the tcgen05 path above.
+    throw std::invalid_argument("causal_softmax_attention: k8v4 is not available on b200");
+#else
     detail::k8v4_kv_append_attention(q, k, v, positions, valid_columns, kv_table_rows, scale, cache,
                                      envelope, workspace, out, execution);
+#endif
 }
 
 void causal_softmax_attention_cached(const Tensor& q, const Tensor& positions,
@@ -341,9 +366,15 @@ void causal_softmax_attention_cached(const Tensor& q, const Tensor& positions,
     }
 
     if (cache.storage == KvCacheStorage::Fp8E4m3fnGroup128Ue8m0) {
+#if NINFER_TARGET_B200
+        // The fp8 FMHA kernels are an SM120 family; on B200 the fp8 cache is only served by
+        // the tcgen05 path above.
+        throw std::invalid_argument("causal_softmax_attention_cached: fp8 is not available on b200");
+#else
         detail::fp8_kv_cached_attention(q, positions, scale, cache, envelope, workspace, out,
                                         execution);
         return;
+#endif
     }
 
     if (cache.storage == KvCacheStorage::Int8Group64) {
@@ -358,8 +389,14 @@ void causal_softmax_attention_cached(const Tensor& q, const Tensor& positions,
         return;
     }
 
+#if NINFER_TARGET_B200
+    // The k8v4 FMHA kernels are an SM120 family; on B200 the k8v4 cache is only served by
+    // the tcgen05 path above.
+    throw std::invalid_argument("causal_softmax_attention_cached: k8v4 is not available on b200");
+#else
     detail::k8v4_kv_cached_attention(q, positions, scale, cache, envelope, workspace, out,
                                      execution);
+#endif
 }
 
 } // namespace ninfer::ops

@@ -24,9 +24,13 @@ include("${CMAKE_CURRENT_LIST_DIR}/routed_swiglu/cpu/sources.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/kernels/cuda/block_scaled/nvfp4/${NINFER_TARGET}/sources.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/routed_swiglu/cuda/nvfp4/${NINFER_TARGET}/sources.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/topk_softmax_swiglu_moe/nvfp4/${NINFER_TARGET}/sources.cmake")
-include("${CMAKE_CURRENT_LIST_DIR}/kernels/cuda/block_scaled/fp8/${NINFER_TARGET}/sources.cmake")
-include("${CMAKE_CURRENT_LIST_DIR}/routed_swiglu/cuda/fp8/${NINFER_TARGET}/sources.cmake")
-include("${CMAKE_CURRENT_LIST_DIR}/topk_softmax_swiglu_moe/fp8/${NINFER_TARGET}/sources.cmake")
+# The fp8 routed experts are an SM120 mma.sync family and are not part of the B200 build;
+# the shape dispatch reports the fp8 family as not available on b200.
+if(NOT NINFER_TARGET STREQUAL "b200")
+  include("${CMAKE_CURRENT_LIST_DIR}/kernels/cuda/block_scaled/fp8/${NINFER_TARGET}/sources.cmake")
+  include("${CMAKE_CURRENT_LIST_DIR}/routed_swiglu/cuda/fp8/${NINFER_TARGET}/sources.cmake")
+  include("${CMAKE_CURRENT_LIST_DIR}/topk_softmax_swiglu_moe/fp8/${NINFER_TARGET}/sources.cmake")
+endif()
 include("${CMAKE_CURRENT_LIST_DIR}/topk_softmax_route/bf16/${NINFER_TARGET}/sources.cmake")
 target_sources(ninfer_ops PRIVATE
   "${CMAKE_CURRENT_LIST_DIR}/swiglu/entry.cpp"

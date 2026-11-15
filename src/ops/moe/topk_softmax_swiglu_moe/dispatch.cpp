@@ -13,7 +13,11 @@ const ShapePolicy& shape_dispatch(const MoeProfile& profile) {
 #endif
     switch (profile.routed.ffn.down_type) {
     case QType::FP8_E4M3FN_BLOCK128X128_BF16:
+#if NINFER_TARGET_B200
+        throw std::invalid_argument("topk softmax swiglu moe: fp8 is not available on b200");
+#else
         return fp8_h2560_i640_e512_k10();
+#endif
     case QType::NVFP4:
         if (profile.routed.ffn.hidden == 3072) {
 #if !NINFER_TARGET_SPARK
@@ -22,7 +26,12 @@ const ShapePolicy& shape_dispatch(const MoeProfile& profile) {
             throw std::invalid_argument("unsupported MoE expert geometry on this target");
 #endif
         }
+#if NINFER_TARGET_B200
+        // The 2560/640/512/10 profile ran block-scaled mma.sync, an SM120 instruction.
+        throw std::invalid_argument("topk softmax swiglu moe: mma.sync is not available on b200");
+#else
         return nvfp4_h2560_i640_e512_k10();
+#endif
     case QType::Q5_G64_FP16:
         return q4_q5_h2048_i512_e256_k8();
     case QType::Q6_G64_FP16:

@@ -29,52 +29,6 @@ __global__ void quantize_input(const __nv_bfloat16* x, std::uint8_t* codes, std:
     }
 }
 
-template <class Shape, bool Gate, int Columns, bool Atomic = false>
-void launch_mma(const Tensor& x, const CudaSwiGLUExperts& experts, const ExpertRoutes& routes,
-                const Storage& s, const Plan& plan, CudaExecutionView execution) {
-    using S = Schedule<Columns, Gate, 2, 128, 0, Shape::intermediate, Shape::hidden, Shape::top_k>;
-    constexpr int rows    = Gate ? Shape::intermediate : Shape::hidden;
-    const int job_columns = plan.job_columns();
-    const int subtiles    = job_columns / Columns;
-    const int max_jobs    = (Shape::top_k * x.ne[1] / job_columns + Shape::experts) * subtiles;
-    const int blocks      = std::min(max_jobs * (rows / S::rows),
-                                     execution.multiprocessor_count() * plan.queued_ctas_per_sm);
-    grouped_mma<Columns, Gate, Atomic, 2, 128, 0, true, Shape::intermediate, Shape::hidden,
-                Shape::top_k><<<blocks, S::threads, 0, execution.stream()>>>(
-        Gate ? s.input_codes : s.product_codes,
-        static_cast<const std::uint8_t*>(Gate ? s.input_scales : s.product_scales),
-        Gate ? experts.bank.gate_up : experts.bank.down,
-        Gate ? experts.activation_calibration.gate_up.scalar_divisor()
-             : experts.activation_calibration.down.scalar_divisor(),
-        experts.activation_calibration.down.scalar_divisor(), s.groups, s.product_codes,
-        static_cast<std::uint8_t*>(s.product_scales), s.contributions,
-        static_cast<const float*>(routes.coefficients.data), s.routed_sum, subtiles);
-    CUDA_CHECK(cudaGetLastError());
-}
-
-template <bool Gate, class Function>
-void with_columns(int columns, Function&& function) {
-    switch (columns) {
-    case 8:
-        function.template operator()<8>();
-        break;
-    case 32:
-        function.template operator()<32>();
-        break;
-    case 64:
-        function.template operator()<64>();
-        break;
-    case 128:
-        if constexpr (Gate) {
-            function.template operator()<128>();
-            break;
-        }
-        [[fallthrough]];
-    default:
-        throw std::logic_error("invalid NVFP4 MoE column tile");
-    }
-}
-
 // The compiled MoE shapes share one launcher; the entry plan carries the geometry.
 template <class Function>
 void with_shape(int hidden, Function&& function) {
@@ -242,22 +196,12 @@ void launch_experts(const Tensor& x, const CudaSwiGLUExperts& experts, const Exp
         launch_grouped_tcgen05(x, experts, routes, plan, s, execution);
         return;
     case MoeBackend::MmaSync:
-        break;
+        // Block-scaled mma.sync is an SM120 instruction; the 2560/640/512/10 profile has no
+        // B200 kernel. The shape dispatch rejects that geometry, so this only guards the entry.
+        throw std::invalid_argument("moe block scaled: mma.sync is not available on b200");
     case MoeBackend::Vector:
         throw std::logic_error("nvfp4 moe: single-token calls take the vector path");
     }
-    // The 2560/640/512/10 profile keeps the mma.sync kernels.
-    with_columns<true>(plan.gate_columns, [&]<int C>() {
-        launch_mma<SwiGLUH2560I640E512K10, true, C>(x, experts, routes, s, plan, execution);
-    });
-    with_columns<false>(plan.down_columns, [&]<int C>() {
-        if (plan.atomic_output) {
-            launch_mma<SwiGLUH2560I640E512K10, false, C, true>(x, experts, routes, s, plan,
-                                                                 execution);
-        } else {
-            launch_mma<SwiGLUH2560I640E512K10, false, C>(x, experts, routes, s, plan, execution);
-        }
-    });
 }
 
 void launch_vector(const Tensor& x, const CudaSwiGLUExperts& experts, const ExpertRoutes& routes,

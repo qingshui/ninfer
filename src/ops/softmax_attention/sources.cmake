@@ -3,16 +3,12 @@ target_sources(ninfer_ops PRIVATE
   "${CMAKE_CURRENT_LIST_DIR}/dense/causal_cache/causal_softmax_attention.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/dense/causal_cache/bf16/launch.cu"
   "${CMAKE_CURRENT_LIST_DIR}/dense/causal_cache/bf16/plan.cpp"
-  "${CMAKE_CURRENT_LIST_DIR}/dense/causal_cache/fp8/launch.cu"
-  "${CMAKE_CURRENT_LIST_DIR}/dense/causal_cache/fp8/tiled_launch.cu"
   "${CMAKE_CURRENT_LIST_DIR}/dense/causal_cache/fp8/plan.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/dense/causal_cache/int8/launch.cu"
   "${CMAKE_CURRENT_LIST_DIR}/dense/causal_cache/int8/plan.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/dense/causal_cache/k8v4/plan.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/dense/causal_cache/nvfp4/launch.cu"
   "${CMAKE_CURRENT_LIST_DIR}/dense/causal_cache/nvfp4/plan.cpp"
-  "${CMAKE_CURRENT_LIST_DIR}/dense/causal_cache/k8v4/launch.cu"
-  "${CMAKE_CURRENT_LIST_DIR}/dense/causal_cache/k8v4/tiled_launch.cu"
-  "${CMAKE_CURRENT_LIST_DIR}/dense/causal_cache/k8v4/plan.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/dense/packed/packed_softmax_attention.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/dense/context/context_softmax_attention.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/dense/context/launch.cu"
@@ -24,6 +20,18 @@ target_sources(ninfer_ops PRIVATE
   "${CMAKE_CURRENT_LIST_DIR}/causal_sliding_window/launch.cu"
   "${CMAKE_CURRENT_LIST_DIR}/causal_sliding_window/plan.cpp"
 )
+
+# The fp8 and k8v4 FMHA kernels are an SM120 block-scaled mma.sync family and are not part of
+# the B200 build; the causal attention dispatch reports those KV-cache families as not available
+# on b200. The plan.cpp files stay: the tcgen05 path still consumes their paged-write planning.
+if(NOT NINFER_TARGET STREQUAL "b200")
+  target_sources(ninfer_ops PRIVATE
+    "${CMAKE_CURRENT_LIST_DIR}/dense/causal_cache/fp8/launch.cu"
+    "${CMAKE_CURRENT_LIST_DIR}/dense/causal_cache/fp8/tiled_launch.cu"
+    "${CMAKE_CURRENT_LIST_DIR}/dense/causal_cache/k8v4/launch.cu"
+    "${CMAKE_CURRENT_LIST_DIR}/dense/causal_cache/k8v4/tiled_launch.cu"
+  )
+endif()
 
 target_sources(ninfer_ops_non_rdc PRIVATE
   "${CMAKE_CURRENT_LIST_DIR}/dense/plain/softmax_attention.cu"

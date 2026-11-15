@@ -45,6 +45,12 @@ struct Schedule {
     static constexpr int min_blocks   = Columns == 128 ? 2 : Columns == 64 ? 3 : 1;
 };
 
+// The grouped mma.sync kernels are an SM120 family and are not part of the B200 build: SM100
+// has no mma.sync block-scale instruction and the emulation is gone (see
+// ops/common/cuda/mma.cuh). On B200 the 122B geometry runs the tcgen05 grouped GEMM
+// (b200/grouped_tcgen05.cuh) and every other geometry is rejected by the shape dispatch
+// with a "not available on b200" error.
+#if !NINFER_TARGET_B200
 template <class S>
 struct TileStorage {
     alignas(16) std::uint8_t weight[S::stages][128 * (S::k_step / 2)];
@@ -55,6 +61,7 @@ struct TileStorage {
 };
 
 __device__ __forceinline__ int swizzle(int row, int byte) { return byte ^ ((row & 3) << 4); }
+#endif // !NINFER_TARGET_B200
 
 struct Matrix {
     const std::uint8_t* codes;
@@ -71,6 +78,7 @@ __device__ __forceinline__ Matrix resolve(const ExpertMatrixDeviceView& matrix, 
             matrix.matrix_scales[expert * matrix.matrix_scale_stride]};
 }
 
+#if !NINFER_TARGET_B200
 template <class S, bool Gate>
 __device__ __forceinline__ void
 stage_inputs(TileStorage<S>& tile, int stage, int kt, int row0, Matrix weight,
@@ -410,6 +418,8 @@ struct PoolContraction {
         return 1.F / (divisor * weight.divisor);
     }
 };
+
+#endif // !NINFER_TARGET_B200
 
 __device__ __forceinline__ bool includes(ExpertSubsetKind kind, const int* mask, int expert) {
     return kind == ExpertSubsetKind::All || mask[expert] == (kind == ExpertSubsetKind::MaskOnes);

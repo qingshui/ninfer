@@ -36,6 +36,11 @@ extern template void launch_mxfp8_a8_quantize_padded<__nv_bfloat16>(const __nv_b
 extern template void launch_mxfp8_a8_quantize_padded<float>(const float*, int, int,
                                                             Mxfp8A8Workspace, cudaStream_t, int);
 
+// The MXFP8 A8 mma.sync kernel is an SM120 family and is not part of the B200 build: SM100 has
+// no mma.sync block-scale instruction and the emulation is gone (see ops/common/cuda/mma.cuh).
+// Any B200 translation unit that reaches the A8 GEMM gets a dispatch-level "not available on
+// b200" error instead (launch_mxfp8_a8_mma).
+#if !NINFER_TARGET_B200
 template <class S>
 __device__ __forceinline__ int mxfp8_shared_byte(int row, int col) {
     return col ^ ((row & (S::kBlockK / 16 - 1)) * 16);
@@ -218,10 +223,19 @@ __global__ __launch_bounds__(S::kThreads, S::kMinBlocksPerSm) void mxfp8_a8_mma_
     native_fp8_finish<S, Full>(output, epilogue, raw, acc, row_begin, token_begin, p.rows,
                                p.tokens);
 }
+#endif // !NINFER_TARGET_B200
 
 template <class S, class Output, class Epilogue, class Rows = Fp8IdentityRows>
 void launch_mxfp8_a8_mma(const Mxfp8A8Operands& p, Output output, Epilogue epilogue,
                          cudaStream_t stream, Rows rows = {}) {
+#if NINFER_TARGET_B200
+    (void)p;
+    (void)output;
+    (void)epilogue;
+    (void)stream;
+    (void)rows;
+    throw std::invalid_argument("mxfp8 linear: mma.sync is not available on b200");
+#else
     validate_native_fp8<S>(p);
     if (!p.x_scales || p.k % S::kBlockK || p.k / S::kBlockK < S::kStages)
         throw std::invalid_argument("MXFP8 MMA requires complete K tiles and activation scales");
@@ -238,6 +252,7 @@ void launch_mxfp8_a8_mma(const Mxfp8A8Operands& p, Output output, Epilogue epilo
         launch.template operator()<true>();
     else
         launch.template operator()<false>();
+#endif
 }
 
 } // namespace ninfer::ops::detail

@@ -97,6 +97,17 @@ void launch_nvfp4_a16_sliced_k_mma(const Nvfp4A16Operands& p, Output output, Epi
 template <class Schedule, class Output, class Epilogue, class Rows = Nvfp4IdentityRows>
 void launch_nvfp4_a4_mma(const Nvfp4A4Operands& p, Output output, Epilogue epilogue,
                          cudaStream_t stream, Rows rows = {}) {
+#if NINFER_TARGET_B200
+    // Block-scaled mma.sync is an SM120 instruction; the quantized-activation GEMM outside the
+    // 122B tcgen05 shapes has no B200 kernel. Reaching this launcher reports the family as
+    // unavailable instead of silently degrading to A16.
+    (void)p;
+    (void)output;
+    (void)epilogue;
+    (void)stream;
+    (void)rows;
+    throw std::invalid_argument("nvfp4 linear: mma.sync is not available on b200");
+#else
     validate_nvfp4_operands<Schedule>(p);
     if (p.rows % Schedule::kBlockRows || p.k % Schedule::kBlockK ||
         p.k / Schedule::kBlockK < Schedule::kStages)
@@ -121,5 +132,6 @@ void launch_nvfp4_a4_mma(const Nvfp4A4Operands& p, Output output, Epilogue epilo
         else
             launch.template operator()<false>();
     });
+#endif
 }
 } // namespace ninfer::ops::detail
