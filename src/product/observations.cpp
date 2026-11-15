@@ -37,7 +37,13 @@ constexpr std::array kRuntimeCounters{
     std::pair{"materialization_state_forks", &RuntimeStats::materialization_state_forks},
     std::pair{"state_restores", &RuntimeStats::state_restores},
     std::pair{"pressure_spill_pages", &RuntimeStats::pressure_spill_pages},
-    std::pair{"partial_tail_cow_pages", &RuntimeStats::partial_tail_cow_pages}};
+    std::pair{"partial_tail_cow_pages", &RuntimeStats::partial_tail_cow_pages},
+    std::pair{"flights", &RuntimeStats::flights},
+    std::pair{"flight_prefill_tokens", &RuntimeStats::flight_prefill_tokens},
+    std::pair{"flight_prefill_segments", &RuntimeStats::flight_prefill_segments},
+    std::pair{"flight_decode_rows", &RuntimeStats::flight_decode_rows},
+    std::pair{"flight_host_submit_ns", &RuntimeStats::flight_host_submit_ns},
+    std::pair{"flight_gpu_ns", &RuntimeStats::flight_gpu_ns}};
 
 constexpr std::array kRuntimeGauges{
     std::pair{"running_requests", &RuntimeStats::running_requests},
@@ -285,6 +291,17 @@ Json observation_json(const EngineSnapshot& snapshot, std::uint64_t now) {
              {"label", pool.label},
              {"directions", transfer(r.context_transfers.kv.at(pool.id))}});
     runtime["context_transfer_seconds"] = r.actual_context_transfer_seconds;
+    // The most recent iteration flights; a bounded recent window, not a cumulative counter, so
+    // an observation delta keeps the current window.
+    runtime["recent_flights"] = Json::array();
+    for (const auto& flight : r.recent_flights)
+        runtime["recent_flights"].push_back(
+            {{"index", flight.index},
+             {"prefill_tokens", flight.prefill_tokens},
+             {"prefill_segments", flight.prefill_segments},
+             {"decode_rows", flight.decode_rows},
+             {"host_submit_ns", flight.host_submit_ns},
+             {"gpu_ns", flight.gpu_ns}});
     constexpr std::array statuses{"ready", "stopping", "failed"};
     Json out{
         {"sequence", snapshot.stamp.sequence},
@@ -398,6 +415,8 @@ Json observation_json(const EngineSnapshot& snapshot, std::uint64_t now) {
                  {"submitted_ns", q.submitted_ns},
                  {"admitted_ns", optional(q.admitted_ns)},
                  {"first_token_ns", optional(q.first_token_ns)},
+                 {"completed_ns", optional(q.completed_ns)},
+                 {"http_flush_ns", optional(q.http_flush_ns)},
                  {"prompt_tokens", q.prompt_tokens},
                  {"reused_prompt_tokens", q.reused_prompt_tokens},
                  {"processed_prompt_tokens", q.processed_prompt_tokens},

@@ -159,6 +159,41 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
+std::uint64_t unix_time_ms() {
+    const auto now = std::chrono::system_clock::now().time_since_epoch();
+    return static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(now).count());
+}
+
+} // namespace
+
+void RequestTimeline::mark(std::optional<std::uint64_t>& boundary) {
+    const std::uint64_t stamp = unix_time_ms();
+    std::lock_guard lock(mutex_);
+    if (!boundary) { boundary = stamp; }
+}
+
+void RequestTimeline::mark_admitted() { mark(admitted_); }
+
+void RequestTimeline::mark_first_token() { mark(first_token_); }
+
+void RequestTimeline::mark_completed() { mark(completed_); }
+
+void RequestTimeline::mark_http_first_flush() { mark(http_first_flush_); }
+
+void RequestTimeline::mark_http_done() { mark(http_done_); }
+
+RequestTimeline::Snapshot RequestTimeline::take() const {
+    std::lock_guard lock(mutex_);
+    return Snapshot{.admitted_at_ms         = admitted_,
+                    .first_token_at_ms      = first_token_,
+                    .completed_at_ms        = completed_,
+                    .http_first_flush_at_ms = http_first_flush_,
+                    .http_done_at_ms        = http_done_};
+}
+
+namespace {
+
 [[noreturn]] void throw_preparation_cancelled();
 
 [[noreturn]] void throw_media_error(const ninfer::product::media_acquire::Error& exception) {
@@ -375,47 +410,55 @@ GenerationService::preparation_cancellation(std::function<bool()> external) cons
     };
 }
 
+PreparedRequest PreparedRequest::clone_branch_base() const {
+    PreparedRequest sample;
+    sample.constraint_param        = constraint_param;
+    sample.tool_schema_params      = tool_schema_params;
+    sample.service_prepare_seconds = service_prepare_seconds;
+    sample.acquisition_seconds     = acquisition_seconds;
+    sample.preparation             = preparation;
+    sample.prompt_tokens           = prompt_tokens;
+    sample.enable_thinking         = enable_thinking;
+    sample.thinking_budget         = thinking_budget;
+    sample.reasoning_effort        = reasoning_effort;
+    sample.preserve_thinking       = preserve_thinking;
+    sample.lifetime                = lifetime;
+    sample.timeline                = timeline;
+    return sample;
+}
+
 PreparedRequest GenerationService::prepare(const GenerationRequest& request,
                                            GenerationConsumerMode consumer_mode,
                                            ninfer::GenerationObservationOptions observation,
                                            std::function<bool()> is_cancelled,
                                            ContextCacheHints context_cache) const {
-    return prepare_impl(request, consumer_mode, std::move(observation), std::move(is_cancelled),
+    std::vector<PreparedRequest> samples =
+        prepare_impl(request, 1, consumer_mode, std::move(observation), std::move(is_cancelled),
+                     std::move(context_cache),
+                     options_.launch.engine.context_cache.enabled ? CacheParticipation::ReadWrite
+                                                                  : CacheParticipation::Disabled,
+                     DeadlinePolicy::ClientPendingTimeout, true);
+    return std::move(samples.front());
+}
+
+std::vector<PreparedRequest> GenerationService::prepare_samples(
+    const GenerationRequest& request, int n, GenerationConsumerMode consumer_mode,
+    ninfer::GenerationObservationOptions observation, std::function<bool()> is_cancelled,
+    ContextCacheHints context_cache) const {
+    if (n < 1) { throw std::invalid_argument("sample count must be positive"); }
+    return prepare_impl(request, n, consumer_mode, std::move(observation), std::move(is_cancelled),
                         std::move(context_cache),
                         options_.launch.engine.context_cache.enabled ? CacheParticipation::ReadWrite
                                                                      : CacheParticipation::Disabled,
                         DeadlinePolicy::ClientPendingTimeout, true);
 }
 
-PreparedRequest GenerationService::prepare_sample(
-    const GenerationRequest& request, int sample_count, int index,
-    GenerationConsumerMode consumer_mode, ninfer::GenerationObservationOptions observation,
-    std::function<bool()> is_cancelled, ContextCacheHints context_cache,
-    bool publish_source) const {
-    if (sample_count < 1 || index < 0 || index >= sample_count) {
-        throw std::logic_error("sample index outside the request's sample count");
-    }
-    const std::optional<std::uint64_t> fixed_seed =
-        request.sampling.seed ? request.sampling.seed : options_.launch.generation.sampling.seed;
-    GenerationRequest sample = request;
-    if (index != 0 && fixed_seed) {
-        sample.sampling.seed = *fixed_seed + static_cast<std::uint64_t>(index);
-    }
-    return prepare_impl(sample, consumer_mode, std::move(observation), std::move(is_cancelled),
-                        std::move(context_cache),
-                        options_.launch.engine.context_cache.enabled ? CacheParticipation::ReadWrite
-                                                                     : CacheParticipation::Disabled,
-                        DeadlinePolicy::ClientPendingTimeout, publish_source);
-}
-
-PreparedRequest GenerationService::prepare_impl(const GenerationRequest& request,
-                                                GenerationConsumerMode consumer_mode,
-                                                ninfer::GenerationObservationOptions observation,
-                                                std::function<bool()> is_cancelled,
-                                                ContextCacheHints context_cache,
-                                                CacheParticipation cache_participation,
-                                                DeadlinePolicy deadline_policy,
-                                                bool publish_prefix_continuation) const {
+std::vector<PreparedRequest> GenerationService::prepare_impl(
+    const GenerationRequest& request, int sample_count, GenerationConsumerMode consumer_mode,
+    ninfer::GenerationObservationOptions observation, std::function<bool()> is_cancelled,
+    ContextCacheHints context_cache, CacheParticipation cache_participation,
+    DeadlinePolicy deadline_policy, bool publish_prefix_continuation) const {
+    if (sample_count < 1) { throw std::logic_error("sample count must be positive"); }
     is_cancelled = preparation_cancellation(std::move(is_cancelled));
     PreparedRequest prepared;
     prepared.constraint_param = request.constraint_param;
@@ -435,6 +478,7 @@ PreparedRequest GenerationService::prepare_impl(const GenerationRequest& request
     }
     prepared.lifetime = acquire_request_lifetime(deadline_policy);
 
+    std::vector<PreparedRequest> prepared_samples;
     try {
         const auto acquisition_started = Clock::now();
         std::size_t remaining_media_bytes =
@@ -478,18 +522,36 @@ PreparedRequest GenerationService::prepare_impl(const GenerationRequest& request
                 callback(first);
             };
         }
-        prepared.generation = engine_->submit(std::move(prompt), std::move(request_options),
-                                              consumer_mode == GenerationConsumerMode::Streaming
-                                                  ? ninfer::OutputConsumerMode::Streaming
-                                                  : ninfer::OutputConsumerMode::Aggregate,
-                                              std::move(observation), prepared.lifetime->deadline);
-        prepared.sampling   = prepared.generation.resolved_sampling();
+        const ninfer::OutputConsumerMode consumer =
+            consumer_mode == GenerationConsumerMode::Streaming
+                ? ninfer::OutputConsumerMode::Streaming
+                : ninfer::OutputConsumerMode::Aggregate;
+        std::vector<ninfer::GenerationHandle> branches;
+        if (sample_count == 1) {
+            // One branch keeps the ordinary single-submission path.
+            branches.push_back(engine_->submit(std::move(prompt), std::move(request_options),
+                                               consumer, std::move(observation),
+                                               prepared.lifetime->deadline));
+        } else {
+            // The group occupies its lanes atomically and shares one prepared prompt; the Engine
+            // derives each branch's sampling seed from (the request seed, branch index).
+            branches = engine_->submit_samples(std::move(prompt), std::move(request_options),
+                                               static_cast<std::uint32_t>(sample_count), consumer,
+                                               std::move(observation),
+                                               prepared.lifetime->deadline);
+        }
+        for (ninfer::GenerationHandle& branch : branches) {
+            PreparedRequest sample = prepared.clone_branch_base();
+            sample.generation      = std::move(branch);
+            sample.sampling        = sample.generation.resolved_sampling();
+            prepared_samples.push_back(std::move(sample));
+        }
     } catch (const ApiException&) { throw; } catch (const ninfer::RequestError& exception) {
         throw_request_error(exception, request.constraint_param, prepared.tool_schema_params);
     } catch (const std::invalid_argument& exception) {
         throw_invalid_input(exception, "invalid_prompt");
     }
-    return prepared;
+    return prepared_samples;
 }
 
 int GenerationService::count_prompt_tokens(const GenerationRequest& request,
@@ -533,6 +595,7 @@ void GenerationService::wait_for_admission(PreparedRequest& prepared,
     } catch (const ninfer::RequestError& exception) {
         throw_request_error(exception, prepared.constraint_param, prepared.tool_schema_params);
     }
+    if (prepared.timeline) { prepared.timeline->mark_admitted(); }
 }
 
 GenerationOutcome GenerationService::run(PreparedRequest& prepared, const StreamSink* sink,
@@ -567,6 +630,7 @@ GenerationOutcome GenerationService::run(PreparedRequest& prepared, const Stream
 
     outcome.stats                   = std::move(result.stats);
     outcome.service_prepare_seconds = prepared.service_prepare_seconds;
+    outcome.timeline                = prepared.timeline;
 
     outcome.tool_calls      = std::move(result.tool_calls);
     outcome.tool_call_parse = result.tool_call_parse;
@@ -584,10 +648,10 @@ void GenerationService::warmup() {
     turn.content.push_back(std::move(content));
     request.messages.push_back(std::move(turn));
     request.max_tokens = 4;
-    PreparedRequest prepared =
-        prepare_impl(request, GenerationConsumerMode::Aggregate, {}, {}, {},
+    std::vector<PreparedRequest> prepared_samples =
+        prepare_impl(request, 1, GenerationConsumerMode::Aggregate, {}, {}, {},
                      CacheParticipation::Disabled, DeadlinePolicy::UnboundedStartup, false);
-    run(prepared, nullptr);
+    run(prepared_samples.front(), nullptr);
     // Result delivery precedes final device retirement. Finish warmup before the service
     // establishes its observation baseline, including all-rank execution counters.
     engine_->reset_measurement_peaks();

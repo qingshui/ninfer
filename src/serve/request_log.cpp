@@ -441,6 +441,52 @@ Json microseconds_per(std::uint64_t nanoseconds, std::uint64_t count) {
     return nanoseconds_to_microseconds(nanoseconds) / static_cast<double>(count);
 }
 
+// Serve-owned request boundaries on the wall clock; null when the request never reached the
+// boundary. Rendered for every protocol; a protocol that does not track a timeline reports all
+// five as null.
+void append_request_timeline_json(Json& record, const GenerationOutcome& outcome) {
+    RequestTimeline::Snapshot timeline;
+    if (outcome.timeline) { timeline = outcome.timeline->take(); }
+    const auto stamp = [](const std::optional<std::uint64_t>& value) {
+        return value ? Json(*value) : Json(nullptr);
+    };
+    record["admitted_at_ms"]         = stamp(timeline.admitted_at_ms);
+    record["first_token_at_ms"]      = stamp(timeline.first_token_at_ms);
+    record["completed_at_ms"]        = stamp(timeline.completed_at_ms);
+    record["http_first_flush_at_ms"] = stamp(timeline.http_first_flush_at_ms);
+    record["http_done_at_ms"]        = stamp(timeline.http_done_at_ms);
+}
+
+// Interval flight means. gpu_busy_ratio is the flights' summed device latency over the wall
+// interval, so above one means overlapping flights.
+Json flight_stats_json(const ThroughputReport& report) {
+    const auto& previous        = report.previous;
+    const auto& current         = report.current;
+    const std::uint64_t flights = monotonic_delta(previous.flights, current.flights);
+    Json mean_prefill_tokens    = nullptr;
+    Json mean_decode_rows       = nullptr;
+    if (flights != 0) {
+        mean_prefill_tokens = static_cast<double>(
+                                  monotonic_delta(previous.flight_prefill_tokens,
+                                                  current.flight_prefill_tokens)) /
+                              static_cast<double>(flights);
+        mean_decode_rows = static_cast<double>(
+                               monotonic_delta(previous.flight_decode_rows,
+                                               current.flight_decode_rows)) /
+                           static_cast<double>(flights);
+    }
+    Json gpu_busy_ratio = nullptr;
+    if (report.interval_seconds > 0.0) {
+        gpu_busy_ratio = static_cast<double>(monotonic_delta(previous.flight_gpu_ns,
+                                                             current.flight_gpu_ns)) *
+                         1.0e-9 / report.interval_seconds;
+    }
+    return Json{{"flights", flights},
+                {"mean_prefill_tokens_per_flight", std::move(mean_prefill_tokens)},
+                {"mean_decode_rows", std::move(mean_decode_rows)},
+                {"gpu_busy_ratio", std::move(gpu_busy_ratio)}};
+}
+
 } // namespace
 
 std::string format_startup_config_json(const std::string& server_instance_id,
@@ -651,6 +697,7 @@ std::string format_request_done_json(const std::string& server_instance_id, std:
     record["execution"]               = product::request_execution_json(outcome.stats);
     record["service_prepare_seconds"] = outcome.service_prepare_seconds;
     record["engine_timing"]           = request_engine_timing_json(outcome.stats.engine_timing);
+    append_request_timeline_json(record, outcome);
     record["constraint"] = product::constraint_observation_json(outcome.stats.constraint);
     record["first_output_timing"] =
         outcome.stats.first_output_timing
@@ -818,7 +865,12 @@ std::string format_throughput_json(const std::string& server_instance_id, std::u
                          {"transfers", transfer_timings_json(
                                            current.context_transfers.kv.at(pool.id), before)}});
     }
-    record["context_cache"]["kv_pools"] = std::move(pools);
+    record["context_cache"]["kv_pools"]      = std::move(pools);
+    const Json flights                       = flight_stats_json(report);
+    record["flights"]                        = flights["flights"];
+    record["mean_prefill_tokens_per_flight"] = flights["mean_prefill_tokens_per_flight"];
+    record["mean_decode_rows"]               = flights["mean_decode_rows"];
+    record["gpu_busy_ratio"]                 = flights["gpu_busy_ratio"];
     return record.dump();
 }
 

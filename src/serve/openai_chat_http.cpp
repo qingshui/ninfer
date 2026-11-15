@@ -5,12 +5,17 @@
 #include "serve/openai_common.h"
 
 #include <atomic>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <exception>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -33,6 +38,29 @@ GenerationOutcome aggregate_outcomes(const std::vector<GenerationOutcome>& outco
     return aggregate;
 }
 
+ApiError internal_error(const std::exception& exception) {
+    ApiError error;
+    error.status  = 500;
+    error.type    = "internal_error";
+    error.message = exception.what();
+    return error;
+}
+
+// One merged stream of one sample group. Branch workers render their own encoder's SSE events
+// and publish them in arrival order; the transport thread drains the batches, so it stays the
+// only writer to the client. A failed branch cancels its siblings through the shared cancelled
+// flag; `settled` reaches the branch count only after every branch outcome or failure lands.
+struct SampleMerge {
+    std::mutex mutex;
+    std::condition_variable cv;
+    std::deque<std::vector<std::string>> pending;
+    std::vector<std::optional<GenerationOutcome>> outcomes;
+    std::exception_ptr failure;
+    std::size_t settled = 0;
+};
+
+constexpr auto kMergePollInterval = std::chrono::milliseconds(250);
+
 } // namespace
 
 void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::Response& res) {
@@ -53,6 +81,9 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
                                 .stream                 = request.stream,
                                 .output_tokens_explicit = request.output_tokens_explicit};
     observations_.preparing(req_id, "openai_chat_completions", metadata);
+    // One serve-owned timeline per HTTP request, marked at each boundary it reaches; the first
+    // mark of a boundary wins and unreachable boundaries stay null.
+    const auto timeline = std::make_shared<RequestTimeline>();
     std::vector<PreparedRequest> prepared;
     ninfer::GenerationObservationOptions observation;
     try {
@@ -63,27 +94,37 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
             .scheduling         = scheduling_observer(req_id, metadata.http_request_id),
             .first_token        = first_token_observer(req_id),
         };
-        // The first sample is prepared up front; later samples of one request are prepared
-        // only after the previous sample's generation completed, so each adopts the previous
-        // sample's published prompt source instead of the Engine prefilling the same prompt
-        // once per sample.
-        prepared.push_back(prepare_chat_sample(
-            *service_, request.generation, request.sample_count, 0,
-            request.stream ? GenerationConsumerMode::Streaming : GenerationConsumerMode::Aggregate,
-            observation, [&req] { return client_disconnected(req); }));
+        if (observation.first_token) {
+            observation.first_token = [timeline,
+                                       inner = std::move(observation.first_token)](
+                                          const ninfer::GenerationFirstTokenObservation& first) {
+                timeline->mark_first_token();
+                inner(first);
+            };
+        }
+        const auto is_cancelled = [&req] { return client_disconnected(req); };
+        const GenerationConsumerMode consumer_mode =
+            request.stream ? GenerationConsumerMode::Streaming : GenerationConsumerMode::Aggregate;
+        // A single-sample request keeps the ordinary submission; an n>1 request submits one
+        // Engine sample group so every branch executes in parallel behind a shared prompt.
+        if (request.sample_count == 1) {
+            prepared.push_back(
+                service_->prepare(request.generation, consumer_mode, observation, is_cancelled));
+        } else {
+            prepared = service_->prepare_samples(request.generation, request.sample_count,
+                                                 consumer_mode, observation, is_cancelled);
+        }
+        for (PreparedRequest& sample : prepared) { sample.timeline = timeline; }
     } catch (const ApiException& exception) {
         record_request_rejected(make_request_rejection_log_context(
             req_id, "openai_chat_completions", request.generation, metadata, exception.error()));
         write_openai_error(res, exception.error());
         return;
     } catch (const std::exception& exception) {
-        ApiError error;
-        error.status  = 500;
-        error.type    = "internal_error";
-        error.message = exception.what();
         record_request_rejected(make_request_rejection_log_context(
-            req_id, "openai_chat_completions", request.generation, metadata, error));
-        write_openai_error(res, error);
+            req_id, "openai_chat_completions", request.generation, metadata,
+            internal_error(exception)));
+        write_openai_error(res, internal_error(exception));
         return;
     }
 
@@ -92,22 +133,20 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
     auto lifecycle                            = begin_request(make_request_log_context(
         req_id, "openai_chat_completions", request.generation, metadata, prepared.front()));
 
+    // The sample group gains its lanes together; waiting on each branch in turn establishes
+    // admission before the response commits. Each successful wait marks the shared timeline.
     std::vector<GenerationOutcome> outcomes;
     try {
-        if (request.stream) {
+        for (PreparedRequest& sample : prepared) {
+            service_->wait_for_admission(sample, [&req] { return client_disconnected(req); });
+        }
+        if (!request.stream) {
+            // The group already executes in parallel; each branch's result is consumed in turn.
+            outcomes.reserve(prepared.size());
             for (PreparedRequest& sample : prepared) {
-                service_->wait_for_admission(sample,
-                                             [&req] { return client_disconnected(req); });
+                outcomes.push_back(
+                    service_->run(sample, nullptr, [&req] { return client_disconnected(req); }));
             }
-        } else {
-            // Later samples are prepared only after the previous sample's generation
-            // completed, so each adopts the previous sample's published prompt source.
-            auto stream = std::make_shared<ChatGenerationStream>(std::move(prepared),
-                                                                 std::move(request.generation));
-            outcomes    = run_sequential_samples(*service_, *stream, request.sample_count,
-                                                  observation,
-                                                  [&req] { return client_disconnected(req); });
-            prepared    = std::move(stream->prepared);
         }
     } catch (const ApiException& exception) {
         lifecycle->failure(make_generation_request_failure(exception.error()));
@@ -116,40 +155,54 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
     } catch (const std::exception& exception) {
         lifecycle->failure(
             make_internal_request_failure(RequestFailurePhase::Generation, exception.what()));
-        ApiError error;
-        error.status  = 500;
-        error.type    = "internal_error";
-        error.message = exception.what();
-        write_openai_error(res, error);
+        write_openai_error(res, internal_error(exception));
         return;
     }
 
     if (!request.stream) {
-        lifecycle->done(aggregate_outcomes(outcomes));
+        timeline->mark_completed();
+        // The whole JSON body is the response's single flush; the render boundary is the last
+        // serve-owned point before cpp-httplib writes the response.
+        bool rendered = false;
+        std::string render_failure;
+        std::string body;
         try {
-            set_owned_json_content(res, make_chat_completion_response(identity, outcomes),
-                                   prepared.front().lifetime);
+            body     = make_chat_completion_response(identity, outcomes);
+            rendered = true;
         } catch (const std::exception& exception) {
+            render_failure = exception.what();
+        }
+        if (rendered) {
+            timeline->mark_http_first_flush();
+            timeline->mark_http_done();
+        }
+        lifecycle->done(aggregate_outcomes(outcomes));
+        if (!rendered) {
             lifecycle->response_failure(make_internal_request_failure(
-                RequestFailurePhase::ResponseRender, exception.what()));
+                RequestFailurePhase::ResponseRender, render_failure));
             ApiError error;
             error.status  = 500;
             error.type    = "internal_error";
-            error.message = exception.what();
+            error.message = render_failure;
             write_openai_error(res, error);
+            return;
+        }
+        try {
+            set_owned_json_content(res, std::move(body), prepared.front().lifetime);
+        } catch (const std::exception& exception) {
+            lifecycle->response_failure(make_internal_request_failure(
+                RequestFailurePhase::ResponseRender, exception.what()));
+            write_openai_error(res, internal_error(exception));
         }
         return;
     }
 
     try {
-        const bool return_progress   = request.return_progress;
-        const bool timings_per_token = request.timings_per_token;
-        const bool include_usage     = request.include_usage;
-        // The first sample is already prepared; the provider prepares each later sample
-        // only after the previous sample's generation completed.
+        const bool return_progress     = request.return_progress;
+        const bool timings_per_token   = request.timings_per_token;
+        const bool include_usage       = request.include_usage;
         const std::size_t sample_count = static_cast<std::size_t>(request.sample_count);
-        auto stream = std::make_shared<ChatGenerationStream>(std::move(prepared),
-                                                             std::move(request.generation));
+        auto stream = std::make_shared<ChatGenerationStream>(std::move(prepared));
         std::vector<std::shared_ptr<OpenAIChatStream>> encoders;
         encoders.reserve(sample_count);
         for (std::size_t index = 0; index < sample_count; ++index) {
@@ -161,8 +214,8 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
         prepare_sse_response(res);
         res.set_chunked_content_provider(
             "text/event-stream",
-            [this, identity, stream, encoders, lifecycle, return_progress, timings_per_token,
-             include_usage, observation,
+            [this, identity, stream, encoders, lifecycle, timeline, return_progress,
+             timings_per_token, include_usage,
              sample_count](std::size_t, httplib::DataSink& sink) -> bool {
                 if (stream->started.exchange(true, std::memory_order_acq_rel)) {
                     sink.done();
@@ -184,84 +237,164 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
                         return false;
                     }
                 };
-                try {
-                    for (const std::shared_ptr<OpenAIChatStream>& encoder : encoders) {
-                        render_and_write(transport, [&] { return encoder->start(); });
-                    }
-                } catch (const ClientDisconnected&) {
-                    lifecycle->failure(
-                        make_client_disconnected_failure(RequestFailurePhase::Transport));
-                    return false;
-                } catch (const ResponseRenderFailure& exception) {
-                    lifecycle->failure(make_internal_request_failure(
-                        RequestFailurePhase::ResponseRender, exception.what()));
-                    ApiError error;
-                    error.status  = 500;
-                    error.type    = "internal_error";
-                    error.message = exception.what();
-                    return send_error(error);
-                }
-
-                std::vector<GenerationOutcome> outcomes;
-                bool cancelled = false;
-                try {
-                    outcomes.reserve(encoders.size());
-                    for (std::size_t index = 0; index < encoders.size(); ++index) {
-                        if (stream->prepared.size() <= index) {
-                            // The previous sample's generation completed; prepare this sample
-                            // now so it adopts the previous sample's published prompt source
-                            // instead of the Engine prefilling the same prompt again.
-                            const auto sample_index = static_cast<int>(stream->prepared.size());
-                            stream->prepared.push_back(prepare_chat_sample(
-                                *service_, stream->generation, static_cast<int>(sample_count),
-                                sample_index, GenerationConsumerMode::Streaming, observation,
-                                [stream] {
-                                    return stream->cancelled.load(std::memory_order_acquire);
-                                }));
+                // One branch worker per sample: renders its own encoder's SSE events and
+                // publishes them to the merge queue; the transport thread writes them to the
+                // client in arrival order. Client disconnect and a failed branch cancel every
+                // branch through the shared cancelled flag.
+                auto merge = std::make_shared<SampleMerge>();
+                merge->outcomes.resize(sample_count);
+                const auto publish = [merge](std::vector<std::string> events) {
+                    if (events.empty()) { return; }
+                    std::lock_guard lock(merge->mutex);
+                    merge->pending.push_back(std::move(events));
+                    merge->cv.notify_one();
+                };
+                const auto fail_branch = [merge, stream](std::exception_ptr error) {
+                    std::lock_guard lock(merge->mutex);
+                    if (!merge->failure) { merge->failure = std::move(error); }
+                    ++merge->settled;
+                    stream->cancelled.store(true, std::memory_order_release);
+                    merge->cv.notify_one();
+                };
+                const auto run_branch = [this, stream, encoders, merge, publish, fail_branch,
+                                         return_progress, timings_per_token](std::size_t index) {
+                    const auto render = [](auto render_events) -> std::vector<std::string> {
+                        try {
+                            return render_events();
+                        } catch (const ResponseRenderFailure&) {
+                            throw;
+                        } catch (const std::exception& exception) {
+                            throw ResponseRenderFailure(exception.what());
                         }
+                    };
+                    try {
                         OpenAIChatStream& encoder = *encoders[index];
                         StreamSink output;
                         output.on_start = [&](const ninfer::GenerationStart& start) {
                             encoder.note_start(start);
                             if (return_progress) {
-                                render_and_write(
-                                    transport, [&] { return encoder.initial_prompt_progress(); });
+                                publish(render([&] {
+                                    return std::vector<std::string>{
+                                        encoder.initial_prompt_progress()};
+                                }));
                             }
                         };
                         if (return_progress) {
                             output.on_progress = [&](const ninfer::PromptProgress& progress) {
-                                render_and_write(transport,
-                                                 [&] { return encoder.prompt_progress(progress); });
+                                publish(render([&] {
+                                    return std::vector<std::string>{
+                                        encoder.prompt_progress(progress)};
+                                }));
                             };
                         }
                         if (timings_per_token) {
-                            output.on_timing = [&](const ninfer::GenerationTimingObservation& timing) {
-                                encoder.note_timing(timing);
-                            };
+                            output.on_timing =
+                                [&](const ninfer::GenerationTimingObservation& timing) {
+                                    encoder.note_timing(timing);
+                                };
                         }
                         output.on_content = [&](const std::string& text) {
-                            render_and_write(transport,
-                                             [&] { return encoder.content_delta(text); });
+                            publish(render([&] {
+                                return std::vector<std::string>{encoder.content_delta(text)};
+                            }));
                         };
                         output.on_reasoning = [&](const std::string& text) {
-                            render_and_write(transport,
-                                             [&] { return encoder.reasoning_delta(text); });
+                            publish(render([&] {
+                                return std::vector<std::string>{encoder.reasoning_delta(text)};
+                            }));
                         };
                         output.on_tool_start = [&](const ninfer::ToolCallStart& event) {
-                            render_and_write(transport, [&] { return encoder.tool_start(event); });
+                            publish(render([&] { return encoder.tool_start(event); }));
                         };
                         output.on_tool_arguments = [&](const ninfer::ToolArgumentsDelta& event) {
-                            render_and_write(transport,
-                                             [&] { return encoder.tool_arguments(event); });
+                            publish(render([&] { return encoder.tool_arguments(event); }));
                         };
                         output.on_tool_end = [&](const ninfer::ToolCallEnd& event) {
-                            render_and_write(transport, [&] { return encoder.tool_end(event); });
+                            publish(render([&] { return encoder.tool_end(event); }));
                         };
-                        output.is_cancelled = [&] { return transport.poll(); };
+                        output.is_cancelled = [&] {
+                            return stream->cancelled.load(std::memory_order_acquire);
+                        };
+                        GenerationOutcome outcome =
+                            service_->run(stream->prepared[index], &output);
+                        const std::vector<std::string> finish =
+                            render([&] { return encoder.finish_sample(outcome); });
+                        {
+                            std::lock_guard lock(merge->mutex);
+                            merge->outcomes[index].emplace(std::move(outcome));
+                            if (!finish.empty()) {
+                                merge->pending.push_back(std::move(finish));
+                            }
+                            ++merge->settled;
+                            merge->cv.notify_one();
+                        }
+                    } catch (...) {
+                        fail_branch(std::current_exception());
+                    }
+                };
 
-                        outcomes.push_back(service_->run(stream->prepared[index], &output));
-                        cancelled |=
-                            outcomes.back().finish_reason == ninfer::FinishReason::Cancelled;
+                std::vector<GenerationOutcome> outcomes;
+                try {
+                    for (const std::shared_ptr<OpenAIChatStream>& encoder : encoders) {
+                        render_and_write(transport, [&] { return encoder->start(); });
+                    }
+                    // The start chunks are the response's first HTTP flush.
+                    timeline->mark_http_first_flush();
+                    std::vector<std::thread> branches;
+                    branches.reserve(sample_count);
+                    for (std::size_t index = 0; index < sample_count; ++index) {
+                        branches.emplace_back(run_branch, index);
+                    }
+                    const auto join_branches = [&branches] {
+                        for (std::thread& branch : branches) {
+                            if (branch.joinable()) { branch.join(); }
+                        }
+                    };
+                    try {
+                        for (;;) {
+                            std::vector<std::vector<std::string>> batches;
+                            std::exception_ptr failure;
+                            bool settled_all = false;
+                            {
+                                std::unique_lock lock(merge->mutex);
+                                merge->cv.wait_for(lock, kMergePollInterval, [&] {
+                                    return !merge->pending.empty() ||
+                                           merge->settled == sample_count;
+                                });
+                                while (!merge->pending.empty()) {
+                                    batches.push_back(std::move(merge->pending.front()));
+                                    merge->pending.pop_front();
+                                }
+                                failure     = merge->failure;
+                                settled_all = merge->settled == sample_count;
+                            }
+                            if (failure) {
+                                // A failed branch already cancelled its siblings; let them
+                                // settle before the failure leaves this thread.
+                                stream->cancelled.store(true, std::memory_order_release);
+                            }
+                            for (const std::vector<std::string>& batch : batches) {
+                                transport.write(batch);
+                            }
+                            if (settled_all) {
+                                join_branches();
+                                if (failure) { std::rethrow_exception(failure); }
+                                break;
+                            }
+                            // Heartbeat the quiet stream and observe a closed socket while
+                            // the branches generate. A failed probe marks the shared
+                            // cancelled flag; the branches settle cancelled through their
+                            // own wait loops.
+                            if (transport.poll()) { continue; }
+                        }
+                    } catch (...) {
+                        stream->cancelled.store(true, std::memory_order_release);
+                        join_branches();
+                        throw;
+                    }
+                    outcomes.reserve(sample_count);
+                    for (std::size_t index = 0; index < sample_count; ++index) {
+                        outcomes.push_back(std::move(*merge->outcomes[index]));
                     }
                 } catch (const ClientDisconnected&) {
                     lifecycle->failure(
@@ -270,58 +403,50 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
                 } catch (const ResponseRenderFailure& exception) {
                     lifecycle->failure(make_internal_request_failure(
                         RequestFailurePhase::ResponseRender, exception.what()));
-                    ApiError error;
-                    error.status  = 500;
-                    error.type    = "internal_error";
-                    error.message = exception.what();
-                    return send_error(error);
+                    return send_error(internal_error(exception));
                 } catch (const ApiException& exception) {
                     lifecycle->failure(make_generation_request_failure(exception.error()));
                     return send_error(exception.error());
                 } catch (const std::exception& exception) {
                     lifecycle->failure(make_internal_request_failure(
                         RequestFailurePhase::Generation, exception.what()));
-                    ApiError error;
-                    error.status  = 500;
-                    error.type    = "internal_error";
-                    error.message = exception.what();
-                    return send_error(error);
+                    return send_error(internal_error(exception));
                 }
 
-                lifecycle->done(aggregate_outcomes(outcomes));
-                if (cancelled || stream->cancelled.load(std::memory_order_acquire)) {
-                    lifecycle->response_failure(
-                        make_client_disconnected_failure(RequestFailurePhase::Transport));
-                    return false;
+                timeline->mark_completed();
+                bool cancelled = stream->cancelled.load(std::memory_order_acquire);
+                for (const GenerationOutcome& outcome : outcomes) {
+                    cancelled |= outcome.finish_reason == ninfer::FinishReason::Cancelled;
                 }
+                // Aggregate request state (usage, [DONE]) rides one terminator chunk after
+                // every branch's finish events, with the same semantics as a single sample.
                 std::vector<std::string> terminal;
                 try {
-                    for (std::size_t index = 0; index < encoders.size(); ++index) {
-                        const std::vector<std::string> events =
-                            encoders[index]->finish_sample(outcomes[index]);
-                        terminal.insert(terminal.end(), events.begin(), events.end());
-                    }
-                    const std::vector<std::string> tail =
-                        make_chat_stream_sample_terminator(identity, outcomes, include_usage);
-                    terminal.insert(terminal.end(), tail.begin(), tail.end());
+                    terminal = make_chat_stream_sample_terminator(identity, outcomes,
+                                                                  include_usage);
                 } catch (const std::exception& exception) {
+                    lifecycle->done(aggregate_outcomes(outcomes));
                     lifecycle->response_failure(make_internal_request_failure(
                         RequestFailurePhase::ResponseRender, exception.what()));
-                    ApiError error;
-                    error.status  = 500;
-                    error.type    = "internal_error";
-                    error.message = exception.what();
-                    return send_error(error);
+                    return send_error(internal_error(exception));
                 }
                 try {
                     transport.write(terminal);
-                    sink.done();
-                    return true;
                 } catch (const ClientDisconnected&) {
+                    lifecycle->done(aggregate_outcomes(outcomes));
                     lifecycle->response_failure(
                         make_client_disconnected_failure(RequestFailurePhase::Transport));
                     return false;
                 }
+                timeline->mark_http_done();
+                lifecycle->done(aggregate_outcomes(outcomes));
+                if (cancelled) {
+                    lifecycle->response_failure(
+                        make_client_disconnected_failure(RequestFailurePhase::Transport));
+                    return false;
+                }
+                sink.done();
+                return true;
             },
             [stream, lifecycle](bool successful) {
                 stream->cancelled.store(true, std::memory_order_release);
@@ -333,11 +458,7 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
     } catch (const std::exception& exception) {
         lifecycle->failure(
             make_internal_request_failure(RequestFailurePhase::ResponseRender, exception.what()));
-        ApiError error;
-        error.status  = 500;
-        error.type    = "internal_error";
-        error.message = exception.what();
-        write_openai_error(res, error);
+        write_openai_error(res, internal_error(exception));
     }
 }
 

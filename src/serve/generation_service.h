@@ -13,6 +13,7 @@
 #include <exception>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <string>
@@ -23,6 +24,32 @@ namespace ninfer::serve {
 
 struct RequestLifetime;
 struct RequestCapacity;
+
+// Wall-clock boundaries of one HTTP generation request, in unix epoch milliseconds. The serve
+// layer marks each boundary at most once (the first mark wins); a boundary that never occurs
+// stays null. The branch threads of one sample group mark concurrently, so access is
+// serialized. The Engine never participates in this timeline.
+class RequestTimeline {
+public:
+    struct Snapshot {
+        std::optional<std::uint64_t> admitted_at_ms, first_token_at_ms, completed_at_ms,
+            http_first_flush_at_ms, http_done_at_ms;
+    };
+
+    void mark_admitted();
+    void mark_first_token();
+    void mark_completed();
+    void mark_http_first_flush();
+    void mark_http_done();
+    [[nodiscard]] Snapshot take() const;
+
+private:
+    void mark(std::optional<std::uint64_t>& boundary);
+
+    mutable std::mutex mutex_;
+    std::optional<std::uint64_t> admitted_, first_token_, completed_, http_first_flush_,
+        http_done_;
+};
 
 struct GenerationOutcome {
     std::string text;
@@ -37,6 +64,8 @@ struct GenerationOutcome {
     std::optional<std::string> matched_stop_string;
     RequestStats stats;
     double service_prepare_seconds = 0.0;
+    // Serve-owned measurement timeline shared by every branch of the request's sample group.
+    std::shared_ptr<RequestTimeline> timeline;
 };
 
 // A transport may report an interrupted stream through a callback or is_cancelled().
@@ -87,6 +116,12 @@ struct PreparedRequest {
     std::optional<ninfer::ReasoningEffort> reasoning_effort;
     std::optional<bool> preserve_thinking;
     std::shared_ptr<RequestLifetime> lifetime;
+    // Shared by every branch of one sample group; null for requests prepared without one.
+    std::shared_ptr<RequestTimeline> timeline;
+
+    // Copies the per-request facts shared by every branch of one sample group: the move-only
+    // generation handle and its resolved sampling stay unset and are installed per branch.
+    [[nodiscard]] PreparedRequest clone_branch_base() const;
 };
 
 class GenerationService {
@@ -119,22 +154,17 @@ public:
                                           ninfer::GenerationObservationOptions observation = {},
                                           std::function<bool()> is_cancelled               = {},
                                           ContextCacheHints context_cache = {}) const;
-    // Prepares one independently sampled sequence of a request that asked for `sample_count`
-    // sequences: every sequence renders the same prompt, so the Engine's prefix reuse shares
-    // their prefill. Later sequences are prepared only after the previous sequence's
-    // generation completed, so each adopts the previous sequence's published prompt source
-    // instead of the Engine prefilling the same prompt again. `publish_source` publishes the
-    // prepared sequence's final context as a source the next sequence adopts; the last
-    // sequence of a request publishes nothing, so a finished request leaves no retained
-    // source behind. A request or server-configured fixed seed is offset per sample so the
-    // sequences stay independently sampled; without a fixed seed each preparation draws a
-    // fresh random seed.
-    [[nodiscard]] PreparedRequest
-    prepare_sample(const GenerationRequest& req, int sample_count, int index,
-                   GenerationConsumerMode consumer_mode,
-                   ninfer::GenerationObservationOptions observation = {},
-                   std::function<bool()> is_cancelled               = {},
-                   ContextCacheHints context_cache = {}, bool publish_source = true) const;
+    // Prepares the request's prompt once and submits `n` independently sampled branches as one
+    // Engine sample group: the group occupies its lanes atomically, a forking Session prefills
+    // the shared prefix once and forks one child sequence per branch, and branch i derives its
+    // sampling seed from (the request seed, i). Returns one prepared request per branch, in
+    // branch order; every branch shares the request's lifetime and preparation facts. `n` of
+    // one prepares an ordinary single submission.
+    [[nodiscard]] std::vector<PreparedRequest>
+    prepare_samples(const GenerationRequest& req, int n, GenerationConsumerMode consumer_mode,
+                    ninfer::GenerationObservationOptions observation = {},
+                    std::function<bool()> is_cancelled               = {},
+                    ContextCacheHints context_cache                  = {}) const;
     [[nodiscard]] int count_prompt_tokens(const GenerationRequest& req,
                                           std::function<bool()> is_cancelled = {}) const;
 
@@ -164,8 +194,9 @@ private:
         UnboundedStartup,
     };
 
-    [[nodiscard]] PreparedRequest
-    prepare_impl(const GenerationRequest& req, GenerationConsumerMode consumer_mode,
+    [[nodiscard]] std::vector<PreparedRequest>
+    prepare_impl(const GenerationRequest& req, int sample_count,
+                 GenerationConsumerMode consumer_mode,
                  ninfer::GenerationObservationOptions observation,
                  std::function<bool()> is_cancelled, ContextCacheHints context_cache,
                  CacheParticipation cache_participation, DeadlinePolicy deadline_policy,

@@ -124,6 +124,17 @@ std::string Metrics::render(const EngineSnapshot& snapshot, const ServiceSnapsho
     COUNTER(replayed_tokens, "replayed_tokens_total", "History tokens recomputed during recovery.");
     COUNTER(decode_rounds, "decode_rounds_total", "Decode batch executions.");
     COUNTER(decode_row_rounds, "decode_row_rounds_total", "Sum of decode batch sizes.");
+    COUNTER(flights, "flights_total", "Scheduler iteration flights submitted.");
+    COUNTER(flight_prefill_tokens, "flight_prefill_tokens_total",
+            "Prefill tokens carried by submitted iteration flights.");
+    COUNTER(flight_prefill_segments, "flight_prefill_segments_total",
+            "Prefill segments carried by submitted iteration flights.");
+    COUNTER(flight_decode_rows, "flight_decode_rows_total",
+            "Decode rows carried by submitted iteration flights.");
+    counter("flight_host_submit_seconds_total", stats.flight_host_submit_ns * 1e-9,
+            "Host work from planning an iteration flight to its Session call returning.");
+    counter("flight_gpu_seconds_total", stats.flight_gpu_ns * 1e-9,
+            "Device latency of flights that retired with a timing sample.");
     COUNTER(preemptions, "preemptions_total", "Resource-pressure pauses.");
     COUNTER(snapshot_restores, "snapshot_restores_total",
             "Restores from complete paused snapshots.");

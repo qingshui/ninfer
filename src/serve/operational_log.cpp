@@ -390,6 +390,30 @@ OperationalRecord render_throughput(const ThroughputReport& report) {
         report.interval_seconds > 0.0 ? host_seconds / report.interval_seconds : 0.0;
     out << " | host " << product::format_pretty_percent(host_ratio) << " ("
         << product::format_pretty_duration(host_seconds) << ')';
+    // Iteration flight means of the same interval: mean prefill tokens and decode rows per
+    // submitted flight, and the flights' summed device latency over the wall interval.
+    const std::uint64_t flights =
+        monotonic_delta(report.previous.flights, report.current.flights);
+    if (flights != 0) {
+        const double mean_prefill_tokens =
+            static_cast<double>(monotonic_delta(report.previous.flight_prefill_tokens,
+                                                report.current.flight_prefill_tokens)) /
+            static_cast<double>(flights);
+        const double mean_decode_rows =
+            static_cast<double>(monotonic_delta(report.previous.flight_decode_rows,
+                                                report.current.flight_decode_rows)) /
+            static_cast<double>(flights);
+        const double gpu_seconds =
+            static_cast<double>(monotonic_delta(report.previous.flight_gpu_ns,
+                                                report.current.flight_gpu_ns)) *
+            1.0e-9;
+        const double gpu_busy_ratio =
+            report.interval_seconds > 0.0 ? gpu_seconds / report.interval_seconds : 0.0;
+        out << " | flights " << product::format_pretty_count(flights) << " | prefill/flight "
+            << std::fixed << std::setprecision(1) << mean_prefill_tokens
+            << " tok | decode rows/flight " << mean_decode_rows << " | gpu busy "
+            << product::format_pretty_percent(gpu_busy_ratio);
+    }
     return {.severity = OperationalSeverity::Info, .message = out.str()};
 }
 
