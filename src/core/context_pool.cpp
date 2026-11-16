@@ -162,6 +162,9 @@ struct ContextPool::Impl {
         std::vector<RecordMove> moves;
         std::vector<Placement> placements;
         std::vector<std::uint32_t> new_entries;
+        // Records whose leases died while this plan was submitted: their physical return was
+        // parked because the plan owned their positions, and they retire when it finishes.
+        std::vector<AllocationId> deferred;
         bool submitted                    = false;
         std::uint64_t owner               = 0;
         PoolReservation::Data* owner_data = nullptr;
@@ -695,7 +698,24 @@ struct ContextPool::Impl {
         }
     }
 
-    void discard_maintenance() noexcept {
+    // Applies the record returns that parked with a submitted maintenance plan: the plan owned
+    // their physical positions until it finished, so they retire here on the settled layout.
+    void retire_deferred(std::span<const AllocationId> parked) {
+        for (const auto allocation : parked) {
+            auto& e = require(allocation);
+            if (e.state != State::PendingRetirement)
+                throw std::logic_error("ContextPool: parked record changed during maintenance");
+            if (e.reservation == 0)
+                erase_planned_entry(allocation.index);
+            else {
+                set_state(e, State::Reserved);
+                ++e.generation;
+                e.binding_epoch = 1;
+            }
+        }
+    }
+
+    std::vector<AllocationId> discard_maintenance() noexcept {
         auto plan = std::move(maintenance);
         if (plan->owner_data) {
             plan->owner_data->records.clear();
@@ -707,6 +727,7 @@ struct ContextPool::Impl {
             if (entry(index).state == State::Future) recycle_entry(index);
         discard_cancelled();
         ++revision;
+        return std::move(plan->deferred);
     }
 };
 
@@ -1108,6 +1129,7 @@ void ContextPool::complete_maintenance() {
     }
     p.rebuild_indexes();
     p.discard_cancelled();
+    p.retire_deferred(plan->deferred);
     ++p.revision;
 }
 
@@ -1117,11 +1139,32 @@ void ContextPool::cancel_maintenance() {
     if (p.maintenance->submitted)
         throw std::logic_error(
             "ContextPool: submitted maintenance must complete before cancellation");
-    p.discard_maintenance();
+    const auto parked = p.discard_maintenance();
+    p.retire_deferred(parked);
 }
 
 void ContextPool::abandon_maintenance_after_failure() {
-    if (impl_->maintenance) impl_->discard_maintenance();
+    if (!impl_->maintenance) return;
+    const auto parked = impl_->discard_maintenance();
+    impl_->retire_deferred(parked);
+}
+
+bool ContextPool::maintenance_submitted() const noexcept {
+    return impl_->maintenance && impl_->maintenance->submitted;
+}
+
+void ContextPool::defer_return_to_maintenance(AllocationId allocation) {
+    auto& p = *impl_;
+    if (!p.maintenance || !p.maintenance->submitted)
+        throw std::logic_error("ContextPool: no submitted maintenance plan owns this record");
+    auto& e = p.require(allocation);
+    if (e.state == Impl::State::Live) {
+        p.set_state(e, Impl::State::PendingRetirement);
+        ++p.revision;
+    } else if (e.state != Impl::State::PendingRetirement) {
+        throw std::logic_error("ContextPool: parked record is not materialized");
+    }
+    p.maintenance->deferred.push_back(allocation);
 }
 
 PoolReservation::PoolReservation() noexcept = default;

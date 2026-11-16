@@ -815,6 +815,14 @@ public:
         ++stats_.selections;
         ReclaimSelection<ResourceManager> selection(*this, session, current, cursor, evaluation,
                                                     *plans.inventory, plans.releases, admissions);
+        // One synchronous selection bounds its wall budget: every commit re-assesses the
+        // demand against a growing release set and re-ranks the remaining inventory, so a
+        // demand the inventory cannot cover would spend that growing cost on every release
+        // inside a single call. The committed releases persist; a later call continues from
+        // the shrunken inventory, and a demand beyond the budget keeps reporting progress.
+        constexpr auto kSelectionBudget = std::chrono::steady_clock::duration{
+            std::chrono::milliseconds{100}};
+        const auto selection_started = std::chrono::steady_clock::now();
         while (!session.assess(current.demand, selection.released()).feasible()) {
             const auto next_release = selection.best();
             if (!actions.empty() &&
@@ -888,6 +896,12 @@ public:
                 return ReclaimProgress::Transferring;
             }
             selection.commit(*next_release);
+            if (std::chrono::steady_clock::now() - selection_started >= kSelectionBudget) {
+                // The budget keeps this call's work finite; the committed releases already
+                // shrank the inventory, and the caller retries from that better state.
+                commit_release(session, selection.handles(), cursor, selection.loss());
+                return ReclaimProgress::Changed;
+            }
         }
         commit_release(session, selection.handles(), cursor, selection.loss());
         return ReclaimProgress::Changed;
@@ -1652,10 +1666,20 @@ private:
         ReclaimSelection<ResourceManager> selection(*this, session, assessment, cursor, evaluation,
                                                     *plan.inventory, plan.releases, admissions,
                                                     protected_sources, later_snapshots);
+        // See reclaim(): one synchronous selection bounds its wall budget. A write the
+        // inventory cannot cover reports no victims instead of spending a growing cost on
+        // every release inside a single call; committed releases persist for a later
+        // attempt.
+        constexpr auto kSelectionBudget = std::chrono::steady_clock::duration{
+            std::chrono::milliseconds{100}};
+        const auto selection_started = std::chrono::steady_clock::now();
         while (!session.can_place_host(write, selection.released())) {
             const auto next = selection.best();
             if (!next) return std::nullopt;
             selection.commit(*next);
+            if (std::chrono::steady_clock::now() - selection_started >= kSelectionBudget) {
+                return std::nullopt;
+            }
         }
         return std::vector<Handle>(selection.handles().begin(), selection.handles().end());
     }

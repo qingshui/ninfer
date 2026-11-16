@@ -1,7 +1,6 @@
 #include "models/qwen3_5/session/internal.h"
 
 #include <algorithm>
-#include <cstdio>
 #include <stdexcept>
 #include <type_traits>
 
@@ -58,24 +57,24 @@ runtime::ContextStart SessionImpl::start_maintenance(const ContextAssessment& as
     if (has_context_operation() || executing() || !events.empty()) {
         pending_maintenance_ = assessment;
         directory.request_maintenance();
-        std::fprintf(stderr, "MAINT defer busy ctx=%d exec=%d events=%zu\n",
-                     has_context_operation() ? 1 : 0, executing() ? 1 : 0, events.size());
+        maintenance_trace("MAINT defer busy ctx=%d exec=%d events=%zu\n",
+                          has_context_operation() ? 1 : 0, executing() ? 1 : 0, events.size());
         return runtime::ContextStart::Deferred;
     }
     auto frame = executor().try_reserve(runtime::FrameKind::Context);
     if (!frame) {
         pending_maintenance_ = assessment;
         directory.request_maintenance();
-        std::fprintf(stderr, "MAINT defer noframe\n");
+        maintenance_trace("MAINT defer noframe\n");
         return runtime::ContextStart::Deferred;
     }
     pending_maintenance_.reset();
     auto prepared = directory.prepare_maintenance(assessment);
     if (!prepared) {
-        std::fprintf(stderr, "MAINT stale\n");
+        maintenance_trace("MAINT stale\n");
         return runtime::ContextStart::Stale;
     }
-    std::fprintf(stderr, "MAINT started\n");
+    maintenance_trace("MAINT started\n");
     context_operation_ =
         std::make_unique<PendingContext>(std::move(*prepared), MaintenanceOperation{});
     context_operation_->reservation.emplace(std::move(*frame));
@@ -186,6 +185,9 @@ void SessionImpl::retire_context(runtime::DeviceRetired retired) {
         out.complete = true;
     } else {
         transaction.publish();
+        if (std::holds_alternative<MaintenanceOperation>(operation.action)) {
+            maintenance_trace("MAINT complete\n");
+        }
         // A silent operation finished an installation the caller already adopted: no lane state
         // waits on it and no ContextProgress follows.
         if (operation.silent) {

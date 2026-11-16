@@ -3,7 +3,6 @@
 #include "runtime/executor/contract.h"
 
 #include <algorithm>
-#include <cstdio>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -68,17 +67,7 @@ public:
             if (slot.state != State::Free) continue;
             ++slot.generation;
             slot.state = State::Reserved;
-            if (kind == FrameKind::Compute)
-                std::fprintf(stderr, "POOL R compute idx=%u gen=%llu\n", index,
-                             static_cast<unsigned long long>(slot.generation));
             return ExecutionReservation(*this, {kind, index, slot.generation});
-        }
-        if (kind == FrameKind::Compute) {
-            std::fprintf(stderr, "POOL R-FAIL compute");
-            for (const auto& slot : slots)
-                std::fprintf(stderr, " %d/%llu", static_cast<int>(slot.state),
-                             static_cast<unsigned long long>(slot.generation));
-            std::fprintf(stderr, "\n");
         }
         return {};
     }
@@ -93,9 +82,6 @@ public:
         }
         slot.state         = State::Submitted;
         reservation.owner_ = nullptr;
-        if (reservation.frame_.kind == FrameKind::Compute)
-            std::fprintf(stderr, "POOL A compute idx=%u gen=%llu\n", reservation.frame_.index,
-                         static_cast<unsigned long long>(reservation.frame_.generation));
         return reservation.frame_;
     }
 
@@ -105,9 +91,6 @@ public:
             throw std::logic_error("execution frame retired without a submission");
         }
         slot.state = State::Free;
-        if (frame.kind == FrameKind::Compute)
-            std::fprintf(stderr, "POOL T compute idx=%u gen=%llu\n", frame.index,
-                         static_cast<unsigned long long>(frame.generation));
     }
 
     void retire_submitted() noexcept {
@@ -166,9 +149,6 @@ private:
         auto& slot = select(frame.kind)[frame.index];
         if (slot.generation == frame.generation && slot.state == State::Reserved) {
             slot.state = State::Free;
-            if (frame.kind == FrameKind::Compute)
-                std::fprintf(stderr, "POOL L compute idx=%u gen=%llu\n", frame.index,
-                             static_cast<unsigned long long>(frame.generation));
         }
     }
 

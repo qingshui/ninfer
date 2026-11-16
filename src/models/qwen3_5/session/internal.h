@@ -8,6 +8,9 @@
 #include "models/common/qwen/recovery_store.h"
 #include "models/common/qwen/vision/control.h"
 
+#include <cstdarg>
+#include <cstdio>
+#include <cstdlib>
 #include <deque>
 #include <memory>
 #include <optional>
@@ -15,6 +18,16 @@
 #include <vector>
 
 namespace ninfer::models::qwen3_5::detail {
+
+// TEMPDEBUG: opt-in maintenance lifecycle trace for serve-pressure diagnosis.
+inline void maintenance_trace(const char* format, ...) noexcept {
+    static const bool enabled = std::getenv("NINFER_DEBUG_MAINT") != nullptr;
+    if (!enabled) return;
+    va_list args;
+    va_start(args, format);
+    std::vfprintf(stderr, format, args);
+    va_end(args);
+}
 
 class SessionImpl;
 struct PendingContext;

@@ -85,16 +85,7 @@ bool SessionImpl::crosses_execution_boundary(const SequenceState& state, std::ui
 
 std::optional<PrefillStart> SessionImpl::start_prefill(std::span<const SequenceHandle> candidates,
                                                        std::span<const bool> constrained) {
-    if (exclusive_execution()) {
-        std::fprintf(stderr, "PFLRET excl candidates=%zu\n", candidates.size());
-        for (std::size_t f = 0; f < executions.size(); ++f) {
-            if (!executions[f]) continue;
-            std::fprintf(stderr, "  EXECSLOT f=%zu kind=%d vision=%u ready=%d committed=%d\n",
-                         f, static_cast<int>(executions[f]->kind), executions[f]->vision_id,
-                         executions[f]->result_ready ? 1 : 0, executions[f]->committed ? 1 : 0);
-        }
-        return {};
-    }
+    if (exclusive_execution()) return {};
     if (candidates.empty() || (!constrained.empty() && constrained.size() != candidates.size()))
         throw std::invalid_argument("prefill membership is invalid");
     // A vision window and draft feature state belong to one execution: they start with nothing
@@ -114,26 +105,12 @@ std::optional<PrefillStart> SessionImpl::start_prefill(std::span<const SequenceH
         const auto& request = requests[l];
         if (request.lifecycle != Lifecycle::Prefilling || !request.prefill ||
             request.capture_pending) {
-            std::fprintf(stderr,
-                         "PFLGUARD lane=%u lifecycle=%d prefill=%d capture_pending=%d "
-                         "capture_res=%d next_capture=%zu groups=%zu cursor=%u prompt=%u\n",
-                         l, static_cast<int>(request.lifecycle), request.prefill ? 1 : 0,
-                         request.capture_pending ? 1 : 0,
-                         request.capture_reservation
-                             ? static_cast<int>(request.capture_reservation->frontier)
-                             : -1,
-                         request.next_capture, request.capture_groups.size(),
-                         request.prefill ? request.prefill->cursor : 0U,
-                         request.base ? request.base->summary.prompt_tokens : 0U);
             throw std::logic_error("sequence has no executable prefill window");
         }
         require_unit(l, ExecutionUnitKind::Prefill);
     }
     auto reservation = executor().try_reserve(runtime::FrameKind::Compute);
-    if (!reservation) {
-        std::fprintf(stderr, "PFLRET noframe candidates=%zu\n", candidates.size());
-        return {};
-    }
+    if (!reservation) return {};
 
     struct Segment {
         std::uint32_t lane  = 0;
@@ -157,15 +134,6 @@ std::optional<PrefillStart> SessionImpl::start_prefill(std::span<const SequenceH
                 state, request, begin,
                 std::min(request.permit->main_frontier, request.base->summary.prompt_tokens),
                 vision_window);
-            if (end == begin) {
-                std::fprintf(stderr,
-                             "SEGWARN lane=%u begin=%u end=%u permit=%u prompt=%u cursor=%u "
-                             "lifecycle=%d\n",
-                             l, begin, end, request.permit->main_frontier,
-                             request.base->summary.prompt_tokens,
-                             request.prefill ? request.prefill->cursor : 0U,
-                             static_cast<int>(request.lifecycle));
-            }
             // A window that reaches the prompt end produces the first token and packs with any
             // other segment. Vision and DFlash windows carry state that only a single-row
             // execution owns, and so does a window that crosses a prefix execution boundary. The
@@ -319,17 +287,6 @@ SessionImpl::start_mixed(std::span<const SequenceHandle> prefill,
         const auto& request = requests[l];
         if (request.lifecycle != Lifecycle::Prefilling || !request.prefill ||
             request.capture_pending) {
-            std::fprintf(stderr,
-                         "MIXGUARD lane=%u lifecycle=%d prefill=%d capture_pending=%d "
-                         "capture_res=%d next_capture=%zu groups=%zu cursor=%u prompt=%u\n",
-                         l, static_cast<int>(request.lifecycle), request.prefill ? 1 : 0,
-                         request.capture_pending ? 1 : 0,
-                         request.capture_reservation
-                             ? static_cast<int>(request.capture_reservation->frontier)
-                             : -1,
-                         request.next_capture, request.capture_groups.size(),
-                         request.prefill ? request.prefill->cursor : 0U,
-                         request.base ? request.base->summary.prompt_tokens : 0U);
             throw std::logic_error("sequence has no executable prefill window");
         }
         require_unit(l, ExecutionUnitKind::Prefill);
@@ -622,7 +579,6 @@ std::optional<SessionEvent> SessionImpl::poll() {
             if (pending_maintenance_ && !executing() && !has_context_operation()) {
                 auto assessment = std::move(*pending_maintenance_);
                 pending_maintenance_.reset();
-                std::fprintf(stderr, "MAINT retry\n");
                 (void)start_maintenance(assessment);
             }
             auto event = executor().poll();

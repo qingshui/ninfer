@@ -79,10 +79,16 @@ void RecordLease::set_retiring(bool retiring) noexcept {
 
 void RecordLease::reset() noexcept {
     if (!pool_) return;
-    if (retiring_)
+    if (pool_->maintenance_submitted()) {
+        // A submitted maintenance plan owns the pool's physical positions: returning the
+        // record now would mutate its placement ledger. Park the record with the plan; it
+        // retires when maintenance completes or fails.
+        pool_->defer_return_to_maintenance(allocation_);
+    } else if (retiring_) {
         pool_->retire(allocation_);
-    else
+    } else {
         pool_->release(allocation_);
+    }
     forget();
 }
 

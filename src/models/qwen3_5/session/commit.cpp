@@ -275,8 +275,6 @@ void SessionImpl::commit_completed_unit(Execution& current) {
         const auto end = current.completed[b].execution_frontier;
         request.capture_pending =
             request.capture_reservation && request.capture_reservation->frontier == end;
-        if (request.capture_pending)
-            std::fprintf(stderr, "CAPSET site=completed lane=%u end=%u\n", l, end);
         if (current.kind == OperationKind::Prefill) request.prefill->cursor = end;
         if (current.kind == OperationKind::Replay) request.replay_cursor = end;
         if (current.kind == OperationKind::Control)
@@ -397,8 +395,6 @@ CommitResult SessionImpl::commit(PendingBatch&& pending,
             adopt_unit(l, current.completed[b], current.columns[b] != 0, segment_recovery[b]);
             request.capture_pending =
                 request.capture_reservation && request.capture_reservation->frontier == end;
-            if (request.capture_pending)
-                std::fprintf(stderr, "CAPSET site=resting lane=%u end=%u\n", l, end);
             request.prefill->cursor = end;
         }
     }
@@ -423,9 +419,6 @@ CommitResult SessionImpl::commit(PendingBatch&& pending,
                 request.capture_reservation &&
                 request.capture_reservation->frontier ==
                     current.completed[m].execution_frontier;
-            if (request.capture_pending)
-                std::fprintf(stderr, "CAPSET site=decision lane=%u end=%u\n", l,
-                             current.completed[m].execution_frontier);
         }
         if (d.terminal) {
             request.capture_pending = false;
@@ -511,8 +504,6 @@ void SessionImpl::adopt_segments(Execution& current,
         adopt_unit(l, current.completed[b], current.columns[b] != 0, recovery[b]);
         request.capture_pending =
             request.capture_reservation && request.capture_reservation->frontier == end;
-        if (request.capture_pending)
-            std::fprintf(stderr, "CAPSET site=segments lane=%u end=%u\n", l, end);
         request.prefill->cursor = end;
     }
 }

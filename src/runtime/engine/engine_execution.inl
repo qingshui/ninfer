@@ -288,48 +288,12 @@ void EngineCore<Instance>::resolve_prefill_flight(
         }
     }
     record_service(flight);
-    {
-        std::fprintf(stderr, "PFLLY kind=%d members=[",
-                     static_cast<int>(flight.kind));
-        for (const auto& request : flight.requests)
-            std::fprintf(stderr, "%llu,", static_cast<unsigned long long>(request->id));
-        std::fprintf(stderr, "] produces=[");
-        for (const bool flag : flight.produces) std::fprintf(stderr, "%d,", flag ? 1 : 0);
-        std::fprintf(stderr, "] complete=[");
-        for (std::size_t row = 0; row < progress.rows.size(); ++row)
-            std::fprintf(stderr, "%d,", progress.rows[row].complete ? 1 : 0);
-        std::fprintf(stderr, "] pending=[");
-        for (std::size_t row = 0; row < progress.rows.size(); ++row)
-            std::fprintf(stderr, "%d,", progress.rows[row].pending ? 1 : 0);
-        std::fprintf(stderr, "] has_batch=%d\n", batch ? 1 : 0);
-    }
     for (std::size_t row = 0; row < progress.rows.size(); ++row) {
-        const auto request = flight.requests[row];
-        std::fprintf(stderr,
-                     "PFLROW req=%llu computed_before=%u processed=%u complete=%d produced=%d "
-                     "pending=%d\n",
-                     static_cast<unsigned long long>(request->id), request->computed_prompt_tokens,
-                     progress.rows[row].processed_prompt_tokens,
-                     progress.rows[row].complete ? 1 : 0, produced[row] ? 1 : 0,
-                     progress.rows[row].pending ? 1 : 0);
-        resolve_prefill_progress(request, std::move(progress.rows[row]), produced[row]);
-        update_recovery(request);
+        resolve_prefill_progress(flight.requests[row], std::move(progress.rows[row]),
+                                 produced[row]);
+        update_recovery(flight.requests[row]);
     }
-    if (!batch) {
-        for (std::size_t row = 0; row < progress.rows.size(); ++row) {
-            const auto& last = flight.requests[row];
-            if (progress.rows[row].complete) {
-                std::fprintf(stderr,
-                             "NOBATCH req=%llu complete row=%zu produced=%d produces_flag=%d "
-                             "computed=%u prompt=%u\n",
-                             static_cast<unsigned long long>(last->id), row, produced[row] ? 1 : 0,
-                             row < flight.produces.size() && flight.produces[row] ? 1 : 0,
-                             last->computed_prompt_tokens,
-                             last->base_plan ? last->base_plan->summary().prompt_tokens : 0U);
-            }
-        }
-        return;
-    }
+    if (!batch) { return; }
     // The batch of a packed final carries one decision row per producing segment, in member
     // order; it rides the first producing row. The producing members therefore come from the
     // flags the flight froze at its start when the Session reports them, and from the pending
@@ -407,17 +371,6 @@ void EngineCore<Instance>::resolve_mixed_flight(typename ModelContract::MixedPro
         progress.decode.row_count() != flight.decode_rows + producing) {
         throw std::logic_error("mixed result changed its frozen membership");
     }
-    std::fprintf(stderr, "MIXLY members=[");
-    for (const auto& request : flight.requests)
-        std::fprintf(stderr, "%llu,", static_cast<unsigned long long>(request->id));
-    std::fprintf(stderr, "] produces=[");
-    for (const bool flag : flight.produces) std::fprintf(stderr, "%d,", flag ? 1 : 0);
-    std::fprintf(stderr, "] decode_rows=%u segs=%zu decode_batch=%u prefill_rows=[",
-                 flight.decode_rows, segments, progress.decode.row_count());
-    for (std::size_t row = 0; row < progress.prefill.rows.size(); ++row)
-        std::fprintf(stderr, "%d/%d,", progress.prefill.rows[row].complete ? 1 : 0,
-                     progress.prefill.rows[row].processed_prompt_tokens);
-    std::fprintf(stderr, "]\n");
     // The prefill segments settle first: their prompt progress is committed by the shared
     // batch, so none of their rows carries its own pending batch.
     for (std::size_t row = 0; row < progress.prefill.rows.size(); ++row) {

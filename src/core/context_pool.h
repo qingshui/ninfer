@@ -199,6 +199,11 @@ public:
     void cancel_deferred_release(AllocationId allocation);
     void return_to_reservation(AllocationId allocation, PoolReservation& reservation);
     void defer_to_reservation(AllocationId allocation, PoolReservation& reservation);
+    // A submitted maintenance plan owns every physical position in the pool. A materialized
+    // record whose lease dies inside that window parks as pending retirement with the plan
+    // instead of returning immediately; the plan retires it when maintenance completes or fails.
+    [[nodiscard]] bool maintenance_submitted() const noexcept;
+    void defer_return_to_maintenance(AllocationId allocation);
 
     // A prepared plan locks its source/destination blocks. Submit only after the domain's address
     // borrows retire. Completion follows payload copies and execution-table patches. Once begun,

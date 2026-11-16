@@ -329,6 +329,56 @@ void failed_maintenance_drain() {
         f.verify();
     }
 }
+void parked_returns_during_submitted_maintenance() {
+    FragmentedPool f;
+    const auto released  = f.live.front();
+    const auto deferred  = f.live[1];
+    const auto retiring  = f.live.back();
+    auto handover        = reserve(f.pool, {{f.small, 0}});
+    handover.prepare_returns(f.small, 1);
+    f.pool.defer_to_reservation(retiring, handover);
+    f.pool.defer_release(deferred);
+    auto permit = reserve(f.pool, {{f.large, 1}});
+    f.pool.begin_maintenance();
+    expect(f.pool.maintenance_submitted(),
+           "a submitted plan reports owning the physical positions");
+    // Leases dying inside the submitted window park their records with the plan instead of
+    // mutating its placement ledger.
+    f.pool.defer_return_to_maintenance(released);
+    f.pool.defer_return_to_maintenance(deferred);
+    f.pool.defer_return_to_maintenance(retiring);
+    f.copy();
+    f.pool.complete_maintenance();
+    expect(!f.pool.valid(released) && !f.pool.valid(deferred),
+           "a parked release retires with the completed plan");
+    expect(!f.pool.valid(retiring) && handover.ready() && handover.remaining(f.small) == 1,
+           "a parked retirement returns to its prepared reservation");
+    expect(f.pool.usage().pending_retirement_bytes == 0,
+           "no parked record stays pending after the plan retires it");
+    f.pool.release(handover.materialize(f.small));
+    std::erase(f.live, released);
+    std::erase(f.live, deferred);
+    std::erase(f.live, retiring);
+    f.verify();
+    expect(permit.ready(), "the maintenance permit still materializes its promised position");
+    f.pool.release(permit.materialize(f.large));
+    accounting(f.pool);
+}
+
+void parked_returns_survive_failed_maintenance() {
+    FragmentedPool f;
+    const auto parked = f.live.front();
+    auto permit       = reserve(f.pool, {{f.large, 1}});
+    f.pool.begin_maintenance();
+    f.pool.defer_return_to_maintenance(parked);
+    f.pool.abandon_maintenance_after_failure();
+    expect(!f.pool.valid(parked) && !f.pool.has_maintenance(),
+           "a failed plan still retires the records parked with it");
+    std::erase(f.live, parked);
+    f.verify();
+    accounting(f.pool);
+}
+
 } // namespace
 
 int main() {
@@ -340,6 +390,8 @@ int main() {
         unmaterialized_relocation();
         retire_while_maintenance_waits();
         failed_maintenance_drain();
+        parked_returns_during_submitted_maintenance();
+        parked_returns_survive_failed_maintenance();
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;

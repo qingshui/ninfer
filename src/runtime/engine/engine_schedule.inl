@@ -13,31 +13,18 @@ void EngineCore<Instance>::reserve_active_capture(const std::shared_ptr<Request>
     // starts it at the next quiescent boundary.
     if (instance_.session->has_context_operation() ||
         instance_.session->execution_pending(*request->sequence) || compute_flights() != 0) {
-        std::fprintf(stderr, "CAPENG wait req=%llu lane=%d\n",
-                     static_cast<unsigned long long>(request->id),
-                     request->lane ? static_cast<int>(request->lane->value) : -1);
         return;
     }
     if (scheduler_.progress_owner()) {
         instance_.session->skip_capture(*request->sequence);
-        std::fprintf(stderr, "CAPENG skip-owner req=%llu lane=%d\n",
-                     static_cast<unsigned long long>(request->id),
-                     request->lane ? static_cast<int>(request->lane->value) : -1);
         request->capture_pending = false;
         return;
     }
-    bool started = instance_.session->start_capture(*request->sequence);
-    if (!started) {
+    if (!instance_.session->start_capture(*request->sequence)) {
         instance_.session->skip_capture(*request->sequence);
-        std::fprintf(stderr, "CAPENG skip-start req=%llu lane=%d\n",
-                     static_cast<unsigned long long>(request->id),
-                     request->lane ? static_cast<int>(request->lane->value) : -1);
         request->capture_pending = false;
         return;
     }
-    std::fprintf(stderr, "CAPENG started req=%llu lane=%d\n",
-                 static_cast<unsigned long long>(request->id),
-                 request->lane ? static_cast<int>(request->lane->value) : -1);
     context_owner_ = request;
 }
 
@@ -48,6 +35,13 @@ bool EngineCore<Instance>::prepare_semantic_capture(const std::shared_ptr<Reques
     if (instance_.session->capture_is_input(*request->sequence) && !decision) {
         (void)resources_.recycle_input(*instance_.session, request->continuation_owner);
     }
+    // A Retry re-entry changes no engine state and a Changed re-entry frees capacity the
+    // preparation may still not place (its shortage can be another domain). Without a bound a
+    // preparation whose reservation keeps failing spins this iteration and starves every other
+    // engine service, whatever reclaim reports. After a few attempts the capture defers to a
+    // later iteration: committed releases persist, so a later pass retries from better state.
+    constexpr int kMaxCaptureReclaimAttempts = 8;
+    int attempts = 0;
     while (const auto capture = instance_.session->prepare_capture(*request->sequence)) {
         if (scheduler_.progress_owner()) {
             instance_.session->skip_capture(*request->sequence);
@@ -100,19 +94,16 @@ bool EngineCore<Instance>::prepare_semantic_capture(const std::shared_ptr<Reques
         const auto progress =
             resources_.reclaim(*instance_.session, capture->assessment, {}, decision->reclaim);
         if (progress == ReclaimProgress::Transferring || progress == ReclaimProgress::Deferred) {
-            static thread_local Clock::time_point next_capsem_report{};
-            const auto now = Clock::now();
-            if (now >= next_capsem_report) {
-                next_capsem_report = now + std::chrono::seconds(2);
-                std::fprintf(stderr, "CAPSEMDEF lane=%d req=%llu progress=%d\n",
-                             request->lane ? static_cast<int>(request->lane->value) : -1,
-                             static_cast<unsigned long long>(request->id),
-                             static_cast<int>(progress));
-            }
             return false;
         }
-        if (progress == ReclaimProgress::Retry) continue;
-        if (progress == ReclaimProgress::Changed) { continue; }
+        if (progress == ReclaimProgress::Retry) {
+            if (++attempts >= kMaxCaptureReclaimAttempts) return false;
+            continue;
+        }
+        if (progress == ReclaimProgress::Changed) {
+            if (++attempts >= kMaxCaptureReclaimAttempts) return false;
+            continue;
+        }
         instance_.session->skip_capture(*request->sequence);
         decision.reset();
     }
@@ -871,6 +862,11 @@ EngineCore<Instance>::admit_request(const std::shared_ptr<Request>& request, boo
     ContextAssessment assessment;
     bool deferred = false;
     std::optional<typename ResourceManagement::SourceChoice> waiting_choice;
+    // A Retry re-entry changes no engine state and a Changed re-entry frees capacity the bind
+    // may still not place (see prepare_semantic_capture): a source whose bind keeps failing
+    // must not spin the admission pass, whatever reclaim reports.
+    constexpr int kMaxAdmissionReclaimAttempts = 8;
+    int attempts = 0;
     while (decision.current < decision.sources.size()) {
         auto& choice = decision.sources[decision.current];
         if (!resources_.prepare_source(*instance_.session, *decision_request->base_plan, choice,
@@ -954,8 +950,17 @@ EngineCore<Instance>::admit_request(const std::shared_ptr<Request>& request, boo
                 ++decision.current;
                 continue;
             }
-            if (reclaimed == ReclaimProgress::Changed || reclaimed == ReclaimProgress::Retry)
+            if (reclaimed == ReclaimProgress::Changed || reclaimed == ReclaimProgress::Retry) {
+                if (++attempts >= kMaxAdmissionReclaimAttempts) {
+                    // The bind keeps failing although reclaim keeps reporting progress: leave
+                    // this source like a deferred one instead of spinning the admission pass.
+                    if (!waiting_choice) { waiting_choice = choice; }
+                    deferred = true;
+                    ++decision.current;
+                    continue;
+                }
                 continue;
+            }
             // Another waiting reference may be the only obstacle to a Move.
             // Grant its revocation only when the resulting complete bind succeeds.
             {
@@ -1165,7 +1170,6 @@ void EngineCore<Instance>::advance_sample_groups(HostPhaseMeasurement& boundary)
         std::lock_guard lock(queue_mutex_);
         snapshot = groups_;
     }
-    static thread_local Clock::time_point next_stuck_report{};
     for (const auto& group : snapshot) {
         if (!group->forking) { continue; }
         const auto parent = group->parent;
@@ -1176,17 +1180,6 @@ void EngineCore<Instance>::advance_sample_groups(HostPhaseMeasurement& boundary)
             if (instance_.session->has_context_operation() ||
                 parent->capture_pending ||
                 instance_.session->execution_pending(*parent->sequence)) {
-                const auto now = Clock::now();
-                if (now >= next_stuck_report) {
-                    next_stuck_report = now + std::chrono::seconds(2);
-                    std::fprintf(stderr,
-                                 "STUCK group=%llu forked parent=%llu ctx=%d capture=%d exec=%d\n",
-                                 static_cast<unsigned long long>(group->id),
-                                 static_cast<unsigned long long>(parent->id),
-                                 instance_.session->has_context_operation() ? 1 : 0,
-                                 parent->capture_pending ? 1 : 0,
-                                 instance_.session->execution_pending(*parent->sequence) ? 1 : 0);
-                }
                 continue;
             }
             complete_helper(parent);
@@ -1202,20 +1195,6 @@ void EngineCore<Instance>::advance_sample_groups(HostPhaseMeasurement& boundary)
         const std::uint32_t reused =
             parent->admitted_begin ? parent->admitted_begin->reused_prompt_tokens : 0;
         if (parent->computed_prompt_tokens + reused != fork_frontier) {
-            const auto now = Clock::now();
-            if (now >= next_stuck_report) {
-                next_stuck_report = now + std::chrono::seconds(2);
-                std::fprintf(stderr,
-                             "STUCK group=%llu !forked parent=%llu state=%u computed=%u reused=%u "
-                             "frontier=%u ctx=%d capture=%d exec=%d\n",
-                             static_cast<unsigned long long>(group->id),
-                             static_cast<unsigned long long>(parent->id),
-                             static_cast<unsigned>(parent->model_state), parent->computed_prompt_tokens,
-                             reused, fork_frontier,
-                             instance_.session->has_context_operation() ? 1 : 0,
-                             parent->capture_pending ? 1 : 0,
-                             instance_.session->execution_pending(*parent->sequence) ? 1 : 0);
-            }
             continue;
         }
         if (parent->capture_pending ||
@@ -1238,20 +1217,6 @@ void EngineCore<Instance>::advance_sample_groups(HostPhaseMeasurement& boundary)
             call.finish();
         }
         if (!forked.reserved) {
-            static thread_local Clock::time_point next_fork_report{};
-            const auto now = Clock::now();
-            if (now >= next_fork_report) {
-                next_fork_report = now + std::chrono::seconds(2);
-                std::fprintf(stderr,
-                             "FORKFAIL group=%llu parent=%llu status=%d "
-                             "meta_bytes=%zu meta_shortage=%d reclaim_meta=%d\n",
-                             static_cast<unsigned long long>(group->id),
-                             static_cast<unsigned long long>(parent->id),
-                             static_cast<int>(forked.assessment.status),
-                             forked.assessment.metadata_required_bytes,
-                             forked.assessment.metadata_shortage ? 1 : 0,
-                             forked.assessment.reclaim_metadata ? 1 : 0);
-            }
             continue;
         }
         if (forked.children.size() != children.size()) {
@@ -1320,18 +1285,6 @@ void EngineCore<Instance>::settle_sample_groups(HostPhaseMeasurement& boundary) 
             if (member->cancelled.load(std::memory_order_acquire)) { wind_down = true; }
         }
         if (!wind_down) { continue; }
-        std::fprintf(stderr,
-                     "WIND group=%llu forked=%d parent=%llu state=%u response_done=%d seq=%d "
-                     "capture=%d exec=%d\n",
-                     static_cast<unsigned long long>(group->id), group->forked ? 1 : 0,
-                     parent ? static_cast<unsigned long long>(parent->id) : 0ULL,
-                     parent ? static_cast<unsigned>(parent->model_state) : 0U,
-                     parent && parent->response_done ? 1 : 0,
-                     parent && parent->sequence ? 1 : 0,
-                     parent && parent->capture_pending ? 1 : 0,
-                     parent && parent->sequence
-                         ? (instance_.session->execution_pending(*parent->sequence) ? 1 : 0)
-                         : 0);
         const SettlementPass pass(*this);
         if (parent && parent->sequence &&
             !parent->capture_pending &&
@@ -1360,9 +1313,6 @@ void EngineCore<Instance>::settle_sample_groups(HostPhaseMeasurement& boundary) 
 // request statistic.
 template <class Instance>
 void EngineCore<Instance>::complete_helper(const std::shared_ptr<Request>& parent) {
-    std::fprintf(stderr, "HELPER parent=%llu state=%u\n",
-                 static_cast<unsigned long long>(parent->id),
-                 static_cast<unsigned>(parent->model_state));
     if (parent->sequence) {
         auto aborted = instance_.session->abort(*parent->sequence);
         if (aborted.status != ConsumeStatus::Consumed) {
@@ -1540,13 +1490,6 @@ void EngineCore<Instance>::reserve_planned_units(const IterationMembership& memb
         if (prefill_lane &&
             std::find(membership.prefill_lanes.begin(), membership.prefill_lanes.end(), lane) ==
                 membership.prefill_lanes.end()) {
-            static thread_local Clock::time_point next_skip_report{};
-            const auto now = Clock::now();
-            if (now >= next_skip_report) {
-                next_skip_report = now + std::chrono::seconds(2);
-                std::fprintf(stderr, "RESKIP lane=%u id=%llu not-in-plan\n", lane,
-                             static_cast<unsigned long long>(request->id));
-            }
             continue;
         }
         auto unit = execution_unit(*request);
@@ -1556,54 +1499,24 @@ void EngineCore<Instance>::reserve_planned_units(const IterationMembership& memb
                              membership.prefill_lanes.begin();
             // Nothing is left of the token budget for this lane.
             if (membership.prefill_caps[cap] == 0) {
-                static thread_local Clock::time_point next_cap_report{};
-                const auto now = Clock::now();
-                if (now >= next_cap_report) {
-                    next_cap_report = now + std::chrono::seconds(2);
-                    std::fprintf(stderr, "RESKIP lane=%u id=%llu cap-zero\n", lane,
-                                 static_cast<unsigned long long>(request->id));
-                }
                 continue;
             }
             unit.tokens = membership.prefill_caps[cap];
         }
         std::optional<typename ResourceManagement::ReclaimCursor> cursor;
+        // A Retry re-entry changes no engine state and a Changed re-entry frees capacity the
+        // reservation may still not place (see prepare_semantic_capture). Without a bound a
+        // reservation whose shortage reclaim cannot move spins this iteration and starves
+        // every other engine service, whatever reclaim reports. After a few attempts the
+        // lane keeps no unit this iteration; committed releases persist for a later pass.
+        constexpr int kMaxReserveReclaimAttempts = 8;
+        int attempts = 0;
         for (;;) {
             const auto result = instance_.session->reserve_units({&unit, 1});
             if (result) {
                 reserved_units_[lane] = UnitPermit{unit, *request->residency};
                 if (request->is_prefilling()) granted_prefill.push_back(lane);
                 break;
-            }
-            {
-                static thread_local Clock::time_point next_fail_report{};
-                const auto now = Clock::now();
-                if (now >= next_fail_report) {
-                    next_fail_report = now + std::chrono::seconds(2);
-                    std::fprintf(stderr,
-                                 "RESFAIL lane=%u id=%llu status=%d assess=%d meta_bytes=%zu "
-                                 "meta_short=%d quiescent=%d ctx=%d owner=%llu "
-                                 "capture_pending=%d\n",
-                                 lane, static_cast<unsigned long long>(request->id),
-                                 static_cast<int>(result.status),
-                                 static_cast<int>(result.assessment.status),
-                                 result.assessment.metadata_required_bytes,
-                                 result.assessment.metadata_shortage ? 1 : 0, quiescent ? 1 : 0,
-                                 instance_.session->has_context_operation() ? 1 : 0,
-                                 scheduler_.progress_owner()
-                                     ? static_cast<unsigned long long>(*scheduler_.progress_owner())
-                                     : 0ULL,
-                                 request->capture_pending ? 1 : 0);
-                    if constexpr (requires {
-                                      instance_.session->capture_reservation_frontier(
-                                          *request->sequence);
-                                  }) {
-                        const auto capture_frontier =
-                            instance_.session->capture_reservation_frontier(*request->sequence);
-                        std::fprintf(stderr, "RESFAIL2 capture_res=%d\n",
-                                     capture_frontier ? static_cast<int>(*capture_frontier) : -1);
-                    }
-                }
             }
             // A context operation in flight invalidates the reservation pass: the reclaim
             // it may start is quiescent-iteration work.
@@ -1632,8 +1545,12 @@ void EngineCore<Instance>::reserve_planned_units(const IterationMembership& memb
                 }
                 return;
             }
-            if (reclaimed == ReclaimProgress::Changed || reclaimed == ReclaimProgress::Retry)
+            if (reclaimed == ReclaimProgress::Changed || reclaimed == ReclaimProgress::Retry) {
+                if (++attempts >= kMaxReserveReclaimAttempts) {
+                    break;
+                }
                 continue;
+            }
             if (request->recovery_pending)
                 throw std::logic_error("protected recovery exceeded its Native reservation");
             scheduler_.require_progress(request->id);
@@ -1644,10 +1561,23 @@ void EngineCore<Instance>::reserve_planned_units(const IterationMembership& memb
         }
     }
     // A lane whose capture cannot be prepared loses its unit and leaves the execution; the
-    // reclamation a capture preparation may start is quiescent-iteration work.
+    // reclamation a capture preparation may start is quiescent-iteration work. Each attempt
+    // runs a full admission and reclaim evaluation, so preparing every granted lane inside
+    // one iteration stalls the engine for minutes under capture pressure (many lanes, large
+    // checkpoint inventory). Preparations are optional: a bounded number per iteration keeps
+    // the engine servicing, and deferred lanes retry once committed releases shrank the
+    // pressure.
     if (quiescent && !instance_.session->has_context_operation()) {
-        for (const auto lane : granted_prefill)
+        constexpr std::size_t kMaxCapturePreparations = 8;
+        std::size_t preparations = 0;
+        for (const auto lane : granted_prefill) {
+            if (preparations >= kMaxCapturePreparations) {
+                reserved_units_[lane].reset();
+                continue;
+            }
+            ++preparations;
             if (!prepare_semantic_capture(slots_[lane])) reserved_units_[lane].reset();
+        }
     }
 }
 
@@ -1828,39 +1758,6 @@ template <class Instance>
         const auto lanes = runnable_lanes();
         const auto table = build_lane_table(lanes);
         const auto plan  = scheduler_.plan_iteration(table, iteration_budget());
-        {
-            static thread_local Clock::time_point next_plan_report{};
-            const auto now = Clock::now();
-            if (now >= next_plan_report) {
-                next_plan_report = now + std::chrono::seconds(2);
-                std::fprintf(stderr,
-                             "PLANHEAD replay=%d runnable_replay=%d decode=%zu control=%zu "
-                             "units_free=%zu\n",
-                             membership.replay_lane ? static_cast<int>(*membership.replay_lane)
-                                                     : -1,
-                             membership.replay_lane && unit_runnable(*membership.replay_lane)
-                                 ? 1
-                                 : 0,
-                             membership.decode_lanes.size(), membership.control_lanes.size(),
-                             std::count_if(reserved_units_.begin(), reserved_units_.end(),
-                                           [](const auto& unit) { return !unit; }));
-                for (std::uint32_t lane = 0; lane < max_concurrency_; ++lane) {
-                    const auto& request = slots_[lane];
-                    if (!request || !request->sequence || !request->is_prefilling()) continue;
-                    const auto& entry = table.lanes[lane];
-                    std::fprintf(stderr,
-                                 "PLANSTATE lane=%u id=%llu runnable=%d table_prefilling=%d "
-                                 "limit=%u computed=%u planned=%d\n",
-                                 lane, static_cast<unsigned long long>(request->id),
-                                 lanes[lane] ? 1 : 0, entry.prefilling ? 1 : 0,
-                                 entry.prefill_limit, request->computed_prompt_tokens,
-                                 std::find(plan.prefill_lanes.begin(), plan.prefill_lanes.end(),
-                                           lane) != plan.prefill_lanes.end()
-                                     ? 1
-                                     : 0);
-                }
-            }
-        }
         membership.decode_lanes  = plan.decode_lanes;
         membership.prefill_lanes = plan.prefill_lanes;
         membership.prefill_caps  = plan.prefill_tokens;
@@ -1911,18 +1808,7 @@ template <class Instance>
     // before any flight of this iteration starts.
     if (instance_.session->has_context_operation()) {
         (void)poll_execution(boundary);
-        if (instance_.session->has_context_operation()) {
-            static thread_local Clock::time_point next_block_report{};
-            const auto now = Clock::now();
-            if (now >= next_block_report) {
-                next_block_report = now + std::chrono::seconds(2);
-                std::fprintf(stderr,
-                             "SUBBLOCK ctx-op decode=%zu prefill=%zu replay=%d control=%zu\n",
-                             membership.decode_lanes.size(), membership.prefill_lanes.size(),
-                             membership.replay_lane ? 1 : 0, membership.control_lanes.size());
-            }
-            return submitted;
-        }
+        if (instance_.session->has_context_operation()) return submitted;
     }
 
     // Control rows fly first; a lane that ran control does not decode in the same iteration.
@@ -2001,15 +1887,6 @@ template <class Instance>
         set_host_work_class(HostWorkClass::Decode, decode);
         if (start_decode(decode, host_submit())) submitted = true;
         return submitted;
-    }
-    if (prefill.empty() && !membership.prefill_lanes.empty()) {
-        static thread_local Clock::time_point next_empty_report{};
-        const auto now = Clock::now();
-        if (now >= next_empty_report) {
-            next_empty_report = now + std::chrono::seconds(2);
-            std::fprintf(stderr, "SUBEMPTY planned=%zu runnable=%zu\n",
-                         membership.prefill_lanes.size(), prefill.size());
-        }
     }
     if (!prefill.empty()) {
         set_host_work_class(HostWorkClass::Prefill);
@@ -2135,67 +2012,6 @@ void EngineCore<Instance>::worker_loop() noexcept {
                                     exposed);
         }
         if (!outstanding && !progressed) {
-            static thread_local Clock::time_point next_idle_report{};
-            const auto now = Clock::now();
-            if (now >= next_idle_report) {
-                next_idle_report = now + std::chrono::seconds(2);
-                std::fprintf(stderr, "IDLE flights=%zu ctx=%d pending=%d paused=%zu groups=%zu\n",
-                             compute_flights(),
-                             instance_.session->has_context_operation() ? 1 : 0,
-                             instance_.executor->has_pending_work() ? 1 : 0, paused_.size(),
-                             groups_.size());
-                for (std::uint32_t lane = 0; lane < max_concurrency_; ++lane) {
-                    const auto& request = slots_[lane];
-                    if (!request || !request->sequence || request->sample_helper ||
-                        !request->is_prefilling()) {
-                        continue;
-                    }
-                    std::fprintf(stderr,
-                                 "  STUCKRES lane=%u id=%llu state=%u computed=%u prompt=%u "
-                                 "capture=%d unit=%d session_exec=%d session_blocks=%d\n",
-                                 lane, static_cast<unsigned long long>(request->id),
-                                 static_cast<unsigned>(request->model_state),
-                                 request->computed_prompt_tokens,
-                                 request->base_plan
-                                     ? request->base_plan->summary().prompt_tokens
-                                     : 0U,
-                                 request->capture_pending ? 1 : 0,
-                                 reserved_units_[lane] ? 1 : 0,
-                                 instance_.session->execution_pending(*request->sequence)
-                                     ? 1
-                                     : 0,
-                                 instance_.session->context_blocks(*request->sequence) ? 1
-                                                                                      : 0);
-                }
-                std::vector<std::shared_ptr<SampleGroup>> snapshot;
-                {
-                    std::lock_guard lock(queue_mutex_);
-                    snapshot = groups_;
-                }
-                for (const auto& group : snapshot) {
-                    const auto parent = group->parent;
-                    if (!parent) continue;
-                    std::fprintf(
-                        stderr,
-                        "  GROUP id=%llu forking=%d forked=%d parent=%llu state=%u seq=%d "
-                        "computed=%u reused=%u frontier=%u capture=%d exec=%d members_done=%zu\n",
-                        static_cast<unsigned long long>(group->id), group->forking ? 1 : 0,
-                        group->forked ? 1 : 0,
-                        static_cast<unsigned long long>(parent->id),
-                        static_cast<unsigned>(parent->model_state),
-                        parent->sequence ? 1 : 0, parent->computed_prompt_tokens,
-                        parent->admitted_begin ? parent->admitted_begin->reused_prompt_tokens : 0,
-                        parent->base_plan ? parent->base_plan->fork_frontier() : 0U,
-                        parent->capture_pending ? 1 : 0,
-                        parent->sequence
-                            ? (instance_.session->execution_pending(*parent->sequence) ? 1 : 0)
-                            : 0,
-                        std::count_if(group->members.begin(), group->members.end(),
-                                      [](const auto& member) {
-                                          return member->response_done;
-                                      }));
-                }
-            }
             std::unique_lock lock(queue_mutex_);
             queue_cv_.wait_for(lock, std::chrono::milliseconds(1));
         }
