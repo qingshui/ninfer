@@ -1,4 +1,5 @@
 #include "fixture.h"
+#include "ninfer/types.h"
 
 namespace ninfer::test::causal_attention {
 namespace {
@@ -458,8 +459,64 @@ int run_batch_case(CudaExecutionView execution, const Geometry& geometry, KvCach
     return failures;
 }
 
+namespace {
+// Service profile (256,32,2): the batch ceiling is kMaximumConcurrency decode lanes. Interval
+// queries stay exact up to the ceiling and every batch above it is rejected.
+int verify_service_capacity_contract(CudaExecutionView execution, KvCacheStorage storage) {
+    int failures = 0;
+    constexpr ops::AttentionHeadGeometry service{kHeadDim, 32, 2};
+    constexpr ops::CausalAttentionExecutionEnvelope service_envelope{1, 2042};
+    constexpr std::int32_t ceiling = static_cast<std::int32_t>(ninfer::kMaximumConcurrency);
+    const int sm_count             = execution.multiprocessor_count();
+    for (const std::int32_t batch : {1, 2, 130, 520, ceiling}) {
+        const std::int32_t max_width = batch == 1 ? 17 : 16;
+        std::size_t largest          = 0;
+        for (std::int32_t width = 1; width <= max_width; ++width)
+            largest = std::max(largest, ops::causal_softmax_attention_workspace_capacity_bytes(
+                                            service, storage, service_envelope, batch, width,
+                                            width, sm_count));
+        const auto capacity = ops::causal_softmax_attention_workspace_capacity_bytes(
+            service, storage, service_envelope, batch, 1, max_width, sm_count);
+        if (capacity != largest) {
+            std::cerr << "causal_softmax_attention (32,2) capacity interval mismatch at B="
+                      << batch << '\n';
+            ++failures;
+        }
+    }
+    for (const std::int32_t batch : {0, ceiling + 1, 2 * ceiling}) {
+        try {
+            (void)ops::causal_softmax_attention_workspace_capacity_bytes(
+                service, storage, service_envelope, batch, 1, 1, sm_count);
+            std::cerr << "causal_softmax_attention (32,2) capacity accepted B=" << batch << '\n';
+            ++failures;
+        } catch (const std::invalid_argument&) {}
+    }
+    try {
+        // Multi-row batches carry at most 16 tokens per row.
+        (void)ops::causal_softmax_attention_workspace_capacity_bytes(
+            service, storage, service_envelope, 2, 1, 17, sm_count);
+        std::cerr << "causal_softmax_attention (32,2) capacity accepted B=2 W=17\n";
+        ++failures;
+    } catch (const std::invalid_argument&) {}
+    return failures;
+}
+
+} // namespace
+
 int verify_workspace_capacity_contract(CudaExecutionView execution, KvCacheStorage storage) {
     int failures = 0;
+#if NINFER_TARGET_B200
+    if (!geometry_served({"d256-h16-kv2", 16, 2}, storage)) {
+        // Only the (32,2) route serves this cache on B200; every other profile is rejected.
+        try {
+            (void)ops::causal_softmax_attention_workspace_capacity_bytes(
+                {kHeadDim, 16, 2}, storage, {1, 1025}, 1, 1, 17, execution.multiprocessor_count());
+            std::cerr << "causal_softmax_attention planned an unserved geometry\n";
+            ++failures;
+        } catch (const std::invalid_argument&) {}
+        return failures + verify_service_capacity_contract(execution, storage);
+    }
+#endif
     constexpr ops::CausalAttentionExecutionEnvelope envelope{1, 1025};
     constexpr ops::AttentionHeadGeometry geometry{kHeadDim, 16, 2};
     const std::size_t interval = ops::causal_softmax_attention_workspace_capacity_bytes(
@@ -540,6 +597,6 @@ int verify_workspace_capacity_contract(CudaExecutionView execution, KvCacheStora
         std::cerr << "causal_softmax_attention accepted an envelope outside the launcher domain\n";
         ++failures;
     } catch (const std::invalid_argument&) {}
-    return failures;
+    return failures + verify_service_capacity_contract(execution, storage);
 }
 } // namespace ninfer::test::causal_attention

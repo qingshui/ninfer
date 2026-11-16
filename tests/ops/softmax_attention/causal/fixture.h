@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/platform.h"
 #include "ops/float_codec.h"
 #include "core/arena.h"
 #include "cuda_fixture.h"
@@ -107,6 +108,20 @@ constexpr Geometry kGeometries[] = {
 };
 
 ops::AttentionHeadGeometry op_geometry(const Geometry& geometry);
+
+// B200 serves the FP8 and K8V4 caches only through the (32,2) tcgen05 route; the other geometries
+// are rejected when the Op plans the call, so their cases do not apply to that target.
+constexpr bool geometry_served(const Geometry& geometry, KvCacheStorage storage) {
+#if NINFER_TARGET_B200
+    if (storage == KvCacheStorage::Fp8E4m3fnGroup128Ue8m0 ||
+        storage == KvCacheStorage::Fp8KeyNvfp4Value)
+        return geometry.q_heads == 32 && geometry.kv_heads == 2;
+#else
+    (void)geometry;
+    (void)storage;
+#endif
+    return true;
+}
 
 struct AttentionCase {
     std::int32_t tokens;

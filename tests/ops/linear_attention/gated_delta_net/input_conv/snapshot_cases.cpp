@@ -81,6 +81,14 @@ std::vector<SnapshotCase> cases(Profile p) {
                   {1024, Policy::AllowA4}};
         batch(6, 3, {6, 3, 1}, 829, Policy::AllowA4);
     } else if (p.format == QType::BF16) {
+        // Qwen3.5-122B prefill: one request over short and long windows.
+        for (int t : {2, 15, 16, 17, 129, 1025}) {
+            batch(t, 1, {}, 1021U + t);
+            result.back().full_reference = t == 2;
+        }
+        // Independent request histories: ragged windows keep each row's state private.
+        batch(16, 3, {16, 9, 4}, 1031U);
+        batch(8, 8, {8, 7, 6, 5, 4, 3, 2, 1}, 1037U);
         // Qwen3.5-122B decode load: one row per lane through the update route at width one,
         // including rows beyond the old sixteen-lane bound and the wide decode batch in graphs.
         batch(1, 17, {}, 1043U);

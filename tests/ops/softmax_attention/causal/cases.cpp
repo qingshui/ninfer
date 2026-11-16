@@ -1,11 +1,13 @@
 #include "fixture.h"
 #include "kv_cache_storage.h"
+#include "ninfer/types.h"
 
 namespace ninfer::test::causal_attention {
 namespace {
 void add_append_case(OpSuite& suite, Geometry geometry, KvCacheStorage storage, AttentionCase c,
                      MappingPattern mapping, std::span<const int> queries = {},
                      std::span<const std::uint32_t> limits = {}) {
+    if (!geometry_served(geometry, storage)) return;
     const std::vector<int> selected(queries.begin(), queries.end());
     const std::vector<std::uint32_t> bounds(limits.begin(), limits.end());
     const bool graph = c.graph_replay || !bounds.empty();
@@ -24,6 +26,7 @@ void add_append_case(OpSuite& suite, Geometry geometry, KvCacheStorage storage, 
 
 void add_cached_case(OpSuite& suite, Geometry geometry, KvCacheStorage storage, AttentionCase c,
                      MappingPattern mapping, std::span<const int> queries = {}) {
+    if (!geometry_served(geometry, storage)) return;
     const std::vector<int> selected(queries.begin(), queries.end());
     const auto id = std::string("causal_cached/") + cache_name(storage) + "/" + geometry.name +
                     "/t" + std::to_string(c.tokens) + "/base" + std::to_string(c.base) + "/bound" +
@@ -40,6 +43,7 @@ void add_cached_case(OpSuite& suite, Geometry geometry, KvCacheStorage storage, 
 
 void add_batch_case(OpSuite& suite, Geometry geometry, KvCacheStorage storage, BatchAttentionCase c,
                     int envelope = 0, std::span<const std::uint32_t> limits = {}) {
+    if (!geometry_served(geometry, storage)) return;
     const std::vector<std::uint32_t> bounds(limits.begin(), limits.end());
     std::string id = std::string("causal_batch/") + cache_name(storage) + "/" + geometry.name +
                      "/w" + std::to_string(c.width) + "/b" + std::to_string(c.contexts.size()) +
@@ -439,6 +443,15 @@ void add_service_profile_cases(OpSuite& suite, KvCacheStorage storage) {
     add_pool(130, service_contexts, 2161u);
     constexpr int pool_contexts[]{1, 61, 127, 255};
     add_pool(520, pool_contexts, 2162u);
+
+    // The registered batch ceiling: every decode lane of the engine (kMaximumConcurrency rows).
+    // Short histories keep the host cache small; every 64th row carries the 2042-key serving cap
+    // so the longest row still determines the launch envelope.
+    constexpr int full_lanes = static_cast<int>(ninfer::kMaximumConcurrency);
+    std::vector<int> full_pool(full_lanes);
+    for (int row = 0; row < full_lanes; ++row)
+        full_pool[row] = row % 64 == 63 ? 2042 : pool_contexts[row % std::size(pool_contexts)];
+    add_pool(full_lanes, full_pool, 2163u);
 }
 
 void add_storage_cases(OpSuite& suite, KvCacheStorage storage) {

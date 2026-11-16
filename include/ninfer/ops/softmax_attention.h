@@ -97,7 +97,7 @@ void packed_softmax_attention(const Tensor& q, const Tensor& k, const Tensor& v,
  * live columns. This dense/masked topology is chosen by the caller and never inferred by copying
  * device metadata to the host. B=1 accepts every positive W in the current prompt/decode domain;
  * B=2..8 accepts W=1..16, and B=2..16 accepts W=1..16 for [256,8,2], while the service profile
- * [256,32,2] accepts B=2..520 at W=1..16. A cache may hold up to
+ * [256,32,2] accepts B=2..kMaximumConcurrency at W=1..16. A cache may hold up to
  * kCausalAttentionMaximumVisibleKeys rows.
  *
  * Let Vb be W for dense input or valid_columns[b] otherwise. For live column j<Vb with absolute
