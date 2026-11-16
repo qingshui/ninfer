@@ -812,17 +812,21 @@ public:
                          [](const auto& a, const auto& b) { return less_rank(a.rank, b.rank); });
         const std::array<const Admission*, 1> admissions{cursor.admission ? &*cursor.admission
                                                                           : nullptr};
-        ++stats_.selections;
-        ReclaimSelection<ResourceManager> selection(*this, session, current, cursor, evaluation,
-                                                    *plans.inventory, plans.releases, admissions);
         // One synchronous selection bounds its wall budget: every commit re-assesses the
         // demand against a growing release set and re-ranks the remaining inventory, so a
         // demand the inventory cannot cover would spend that growing cost on every release
         // inside a single call. The committed releases persist; a later call continues from
         // the shrunken inventory, and a demand beyond the budget keeps reporting progress.
+        // The deadline also rides inside the selection: one trial traversal over a large
+        // inventory is the expensive unit, and an expired selection returns the best it has
+        // found so far instead of finishing the whole pass.
         constexpr auto kSelectionBudget = std::chrono::steady_clock::duration{
             std::chrono::milliseconds{100}};
         const auto selection_started = std::chrono::steady_clock::now();
+        ReclaimSelection<ResourceManager> selection(*this, session, current, cursor, evaluation,
+                                                    *plans.inventory, plans.releases, admissions,
+                                                    {}, {},
+                                                    selection_started + kSelectionBudget);
         while (!session.assess(current.demand, selection.released()).feasible()) {
             const auto next_release = selection.best();
             if (!actions.empty() &&
@@ -1663,16 +1667,17 @@ private:
         const std::array<const Admission*, 2> admissions{
             admission ? &*admission : nullptr, cursor.admission ? &*cursor.admission : nullptr};
         ++stats_.selections;
-        ReclaimSelection<ResourceManager> selection(*this, session, assessment, cursor, evaluation,
-                                                    *plan.inventory, plan.releases, admissions,
-                                                    protected_sources, later_snapshots);
-        // See reclaim(): one synchronous selection bounds its wall budget. A write the
-        // inventory cannot cover reports no victims instead of spending a growing cost on
-        // every release inside a single call; committed releases persist for a later
-        // attempt.
         constexpr auto kSelectionBudget = std::chrono::steady_clock::duration{
             std::chrono::milliseconds{100}};
         const auto selection_started = std::chrono::steady_clock::now();
+        ReclaimSelection<ResourceManager> selection(*this, session, assessment, cursor, evaluation,
+                                                    *plan.inventory, plan.releases, admissions,
+                                                    protected_sources, later_snapshots,
+                                                    selection_started + kSelectionBudget);
+        // See reclaim(): one synchronous selection bounds its wall budget. A write the
+        // inventory cannot cover reports no victims instead of spending a growing cost on
+        // every release inside a single call; committed releases persist for a later
+        // attempt. The deadline rides inside the selection as well (see reclaim()).
         while (!session.can_place_host(write, selection.released())) {
             const auto next = selection.best();
             if (!next) return std::nullopt;

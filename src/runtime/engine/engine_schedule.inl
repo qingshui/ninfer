@@ -1456,6 +1456,14 @@ template <class Instance>
 void EngineCore<Instance>::reserve_planned_units(const IterationMembership& membership) {
     const auto owner     = scheduler_.progress_owner();
     const bool quiescent = compute_flights() == 0;
+    // One iteration's reservation shortfall work is bounded as a whole: every failing lane
+    // spends reclaim selections against the inventory, and enough failing lanes together
+    // would outlast the report cadence and starve every other engine service. Past the
+    // budget the remaining lanes keep no unit this iteration; committed releases persist
+    // and a later iteration retries from the better state.
+    constexpr auto kReserveBudget = std::chrono::steady_clock::duration{
+        std::chrono::milliseconds{250}};
+    const auto reserve_started = Clock::now();
     std::vector<std::uint32_t> order;
     order.reserve(membership.control_lanes.size() + membership.decode_lanes.size() +
                   membership.prefill_lanes.size());
@@ -1512,6 +1520,7 @@ void EngineCore<Instance>::reserve_planned_units(const IterationMembership& memb
         constexpr int kMaxReserveReclaimAttempts = 8;
         int attempts = 0;
         for (;;) {
+            if (Clock::now() - reserve_started >= kReserveBudget) break;
             const auto result = instance_.session->reserve_units({&unit, 1});
             if (result) {
                 reserved_units_[lane] = UnitPermit{unit, *request->residency};

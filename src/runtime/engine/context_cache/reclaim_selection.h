@@ -74,13 +74,14 @@ public:
                      std::span<const Release> releases,
                      std::span<const Admission* const> admissions,
                      std::span<const Handle> excluded        = {},
-                     std::span<const Handle> later_snapshots = {})
+                     std::span<const Handle> later_snapshots = {},
+                     std::chrono::steady_clock::time_point deadline = {})
         : policy_(policy), session_(session), cursor_(cursor), evaluation_(evaluation),
           index_(policy.recovery(session, evaluation)), inventory_(inventory), releases_(releases),
           limits_(session.release_limits(assessment)),
           measures_(measure(session, assessment, inventory)),
           measured_(inventory.select(std::span<const ContextReleaseMeasure>(measures_))),
-          committed_(index_.capacity()) {
+          committed_(index_.capacity()), deadline_(deadline) {
         std::vector<std::uint32_t> parents(index_.component_capacity());
         std::iota(parents.begin(), parents.end(), 0);
         const auto root = [&](std::uint32_t node) {
@@ -164,6 +165,7 @@ public:
         for (std::size_t i = 0; i < candidates_.size(); ++i) {
             auto& candidate = candidates_[i];
             if (candidate.chosen || !candidate.allowed) continue;
+            if ((i & 63U) == 0U && expired()) break;
             auto probe        = measured_.probe(releases_[i].sources);
             const auto& value = measured_.released();
             if (value.total_bytes() <= before_bytes && value.metadata_objects <= before_metadata)
@@ -323,6 +325,15 @@ private:
     std::vector<Gain> gains_;
     Rank selected_;
     std::size_t selected_snapshot_ = 0;
+    // Wall budget for one synchronous selection: the trial traversal is the expensive unit (a
+    // probe plus fact refresh per candidate over the whole inventory), so the caller's deadline
+    // is polled inside best() and an expired selection returns what it has found so far.
+    std::chrono::steady_clock::time_point deadline_ = {};
+
+    [[nodiscard]] bool expired() const noexcept {
+        return deadline_.time_since_epoch().count() != 0 &&
+               std::chrono::steady_clock::now() >= deadline_;
+    }
 };
 
 } // namespace ninfer::runtime
