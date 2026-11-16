@@ -1,0 +1,11 @@
+{
+  "task_id": "T1",
+  "refs": [
+    "F6",
+    "F1"
+  ],
+  "files": {
+    "tests/ops/linear_attention/causal_conv1d_varlen.cpp": "2026-11-17T01:13:23",
+    "tests/ops/linear_attention/gated_delta_net/test_varlen.cpp": "2026-11-17T01:13:23"
+  }
+}
