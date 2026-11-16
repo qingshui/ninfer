@@ -1,0 +1,11 @@
+{
+  "task_id": "T2",
+  "refs": [
+    "F1",
+    "F4",
+    "F5"
+  ],
+  "files": {
+    "tests/ops/linear/geometry/test.cpp": "2026-11-16T20:14:22"
+  }
+}
