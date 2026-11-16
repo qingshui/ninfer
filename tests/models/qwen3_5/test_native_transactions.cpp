@@ -2154,9 +2154,10 @@ void replay_sampling_counts(std::shared_ptr<const q35::ModelDefinition> definiti
             "sampling-count fixture leaked Context resources");
 }
 
-// T05 contract: final windows pack with other segments and mix with decode rows, a synchronous
-// root binding publishes no context operation, and a sample fork installs children that share the
-// rested parent's whole-page KV and decode the last prompt token with their own sampling.
+// Final windows pack with other segments and mix with decode rows; a penalty-free root binding
+// installs synchronously without publishing a context operation while a penalized one completes
+// asynchronously and publishes it, and a sample fork installs children that share the rested
+// parent's whole-page KV and decode the last prompt token with their own sampling.
 void sample_fork_and_packed_finals(std::shared_ptr<const q35::ModelDefinition> definition,
                                    std::shared_ptr<const q35::ModelShard> model,
                                    std::shared_ptr<const q35::execution::ModelProfile> profile,
@@ -2170,7 +2171,7 @@ void sample_fork_and_packed_finals(std::shared_ptr<const q35::ModelDefinition> d
     program.bind_executor(rank.executor());
     native::EventDriver driver(program, rank);
     const auto empty = program.physical_usage();
-    const auto stage = [](const char* label) { std::cerr << "T05 stage: " << label << '\n'; };
+    const auto stage = [](const char* label) { std::cerr << "stage: " << label << '\n'; };
 
     const auto plan = [&](std::uint32_t tokens, float penalty) {
         std::vector<TokenId> ids(tokens, 198);
@@ -2195,8 +2196,13 @@ void sample_fork_and_packed_finals(std::shared_ptr<const q35::ModelDefinition> d
                 synchronous_expected ? "penalty-free root binding was asynchronous"
                                      : "penalized root binding completed synchronously");
         driver.idle();
-        require(!driver.poll_context().has_value(),
-                "synchronous root binding published a context operation");
+        if (synchronous_expected) {
+            require(!driver.poll_context().has_value(),
+                    "synchronous root binding published a context operation");
+        } else {
+            require(driver.poll_context().has_value(),
+                    "penalized root binding did not publish its asynchronous completion");
+        }
         return program.sequences[lane].id;
     };
     const auto reserve = [&](std::span<const q35::ExecutionUnit> units) {

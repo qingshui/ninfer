@@ -1,4 +1,5 @@
 #include "product/config/options.h"
+#include "ninfer/types.h"
 #include "serve/translate.h"
 #include "serve/openai_chat.h"
 #include "product/logging/configuration.h"
@@ -35,9 +36,9 @@ void rejects(Function&& function) {
 void test_resources_and_units() {
     const auto defaults = parse({"ninfer-serve", "model.ninfer"});
     const auto& engine  = defaults.launch.engine;
-    require(engine.context_cache.enabled && !engine.context_cache.host_capacity_bytes &&
+    require(engine.context_cache.enabled && engine.context_cache.host_capacity_bytes == 0 &&
                 engine.memory_headroom_bytes == (512ULL << 20),
-            "server resource defaults were resolved before model preparation");
+            "server resource defaults changed");
     require(defaults.launch.generation.max_tokens == 8192 &&
                 !defaults.launch.generation.sampling.seed &&
                 !defaults.launch.generation.enable_thinking &&
@@ -90,6 +91,32 @@ void test_resources_and_units() {
         args.insert(args.end(), suffix.begin(), suffix.end());
         rejects([&] { parse(args); });
     }
+}
+
+// The concurrency flag accepts 0..kMaximumConcurrency, where 0 selects automatic lane fitting:
+// the serve default is 0, both boundaries reach EngineOptions, and a value above the ceiling is
+// rejected with an error naming the accepted range.
+void test_concurrency_range() {
+    const auto defaults = parse({"ninfer-serve", "model.ninfer"});
+    require(defaults.launch.engine.max_concurrency == 0 &&
+                ninfer::product::kDefaultServeMaxConcurrency == 0,
+            "serving default concurrency is not automatic lane fitting");
+    for (auto [flag, expected] :
+         std::vector<std::pair<std::string, std::uint32_t>>{{"0", 0}, {"1024", 1024}}) {
+        const auto parsed = parse({"ninfer-serve", "model.ninfer", "--max-concurrency", flag});
+        require(parsed.launch.engine.max_concurrency == expected,
+                "automatic lane fitting or the concurrency ceiling was rejected");
+    }
+    require(ninfer::kMaximumConcurrency == 1024, "public concurrency ceiling is not 1024");
+    try {
+        parse({"ninfer-serve", "model.ninfer", "--max-concurrency", "1025"});
+    } catch (const std::invalid_argument& error) {
+        const std::string message = error.what();
+        require(message.find("[0,1024]") != std::string::npos,
+                "the concurrency rejection does not state the accepted range");
+        return;
+    }
+    throw std::runtime_error("a concurrency above the ceiling was accepted");
 }
 
 void test_request_defaults() {
@@ -150,6 +177,7 @@ void test_provenance() {
 int main() {
     try {
         test_resources_and_units();
+        test_concurrency_range();
         test_request_defaults();
         test_provenance();
         std::cout << "ok\n";

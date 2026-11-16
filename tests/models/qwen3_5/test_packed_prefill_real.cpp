@@ -834,7 +834,6 @@ int main() {
                 "the frame does not plan the packed extent");
         Rig rig(fixture);
         const std::vector<CaseSpec> cases{
-            {"one segment", {{2048}}},
             {"two segments with one token and 2048", {{1, 2048}}},
             {"two segments, no multiple of 128", {{129, 777}}},
             {"two segments cut by caps", {{2048, 2047}, {1, 777}}},

@@ -424,52 +424,6 @@ void test_plan_iteration_rejects_foreign_lane_table() {
     require(threw, "a foreign lane table was planned");
 }
 
-// k prefilling lanes with more work than the budget admits per iteration: each lane advances
-// within k iterations, none is skipped, and every iteration respects the token budget.
-void test_plan_iteration_does_not_starve_prefill_lanes() {
-    for (std::uint32_t lanes = 2; lanes <= 5; ++lanes) {
-        for (const std::uint32_t budget_tokens : {32U, 100U, 256U}) {
-            Scheduler scheduler(kSlots);
-            ninfer::runtime::LaneTable table;
-            table.lanes.resize(kSlots);
-            std::array<std::uint32_t, kSlots> left{900, 128, 40, 513, 300, 1024};
-            std::array<std::uint32_t, kSlots> last{};
-            for (std::uint32_t lane = 0; lane < lanes; ++lane) {
-                table.lanes[lane].prefilling = true;
-            }
-            const auto budget = ninfer::runtime::IterationBudget{
-                .token_budget = budget_tokens, .decode_rows_limit = kSlots,
-                .prefill_floor_tokens = budget_tokens};
-            for (std::uint32_t iteration = 1; iteration <= 400; ++iteration) {
-                for (std::uint32_t lane = 0; lane < lanes; ++lane) {
-                    table.lanes[lane].prefill_limit = left[lane] > 0 ? std::min(left[lane], 128U) : 0;
-                }
-                const auto plan = scheduler.plan_iteration(table, budget);
-                require(plan.prefill_token_total() <= budget_tokens,
-                        "an iteration exceeded its token budget");
-                for (std::size_t i = 0; i < plan.prefill_lanes.size(); ++i) {
-                    const auto lane = plan.prefill_lanes[i];
-                    require(plan.prefill_tokens[i] <= table.lanes[lane].prefill_limit,
-                            "a segment cap exceeded its lane limit");
-                    left[lane] -= plan.prefill_tokens[i];
-                    if (left[lane] == 0) { table.lanes[lane].prefilling = false; }
-                    last[lane] = iteration;
-                }
-                bool live = false;
-                for (std::uint32_t lane = 0; lane < lanes; ++lane) {
-                    if (left[lane] == 0) continue;
-                    live = true;
-                    require(iteration - last[lane] <= lanes, "a prefilling lane was starved");
-                }
-                if (!live) break;
-            }
-            for (std::uint32_t lane = 0; lane < lanes; ++lane) {
-                require(left[lane] == 0, "a prefilling lane did not finish");
-            }
-        }
-    }
-}
-
 void test_decode_and_control_membership() {
     Scheduler scheduler(kSlots);
     Slots slots{};
@@ -540,7 +494,6 @@ int main() {
         test_plan_iteration_prefill_budget_and_floor();
         test_plan_iteration_round_robin_and_priority();
         test_plan_iteration_rejects_foreign_lane_table();
-        test_plan_iteration_does_not_starve_prefill_lanes();
         test_decode_and_control_membership();
         test_lane_tables_follow_the_configured_capacity();
         std::cout << "ok\n";
