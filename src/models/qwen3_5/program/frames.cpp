@@ -32,6 +32,16 @@ public:
         return at;
     }
 
+    // A table of `count` elements that does not scale with the lane count.
+    template <class T>
+    std::size_t array(std::size_t count) {
+        const auto alignment = alignof(T);
+        offset_              = (offset_ + alignment - 1) / alignment * alignment;
+        const auto at        = offset_;
+        offset_ += sizeof(T) * count;
+        return at;
+    }
+
     [[nodiscard]] std::size_t finish() const {
         constexpr auto alignment = alignof(std::max_align_t);
         return (offset_ + alignment - 1) / alignment * alignment;
@@ -43,7 +53,7 @@ private:
 };
 
 template <class T>
-std::span<T> lane_span(MemorySpan region, std::size_t offset, std::uint32_t lanes) noexcept {
+std::span<T> lane_span(MemorySpan region, std::size_t offset, std::size_t lanes) noexcept {
     return {static_cast<T*>(static_cast<void*>(static_cast<std::byte*>(region.data) + offset)),
             lanes};
 }
@@ -71,7 +81,7 @@ void validate(const FrameSpec& spec) {
     if (spec.mixed_tokens !=
             resolve_mixed_tokens(spec.pack_tokens, spec.mixed_decode_rows, spec.draft_window) ||
         (spec.mixed_decode_rows != 0 &&
-         (spec.mixed_decode_rows + 1 > spec.pack_segments || spec.causal_scoring ||
+         (spec.mixed_decode_rows > spec.batch_capacity || spec.causal_scoring ||
           is_masked_draft_backend(spec.backend)))) {
         throw std::invalid_argument("Qwen3.5 frame mixed geometry is invalid");
     }
@@ -94,10 +104,11 @@ Tensor prefix(const Tensor& tensor, std::initializer_list<std::int32_t> shape) {
 
 } // namespace
 
-FrameIngressLayout plan_frame_ingress(std::uint32_t lanes) {
+FrameIngressLayout plan_frame_ingress(std::uint32_t lanes, std::uint32_t boundaries) {
     FrameArraysCursor cursor(lanes);
     FrameIngressLayout out;
     out.lanes                     = lanes;
+    out.boundaries                = boundaries;
     out.anchors                   = cursor.table<TokenId>();
     out.frontiers                  = cursor.table<std::int32_t>();
     out.backend_frontiers          = cursor.table<std::int32_t>();
@@ -120,6 +131,10 @@ FrameIngressLayout plan_frame_ingress(std::uint32_t lanes) {
     out.step_positions             = cursor.table<std::int32_t>(5);
     out.step_valid                 = cursor.table<std::int32_t>(5);
     out.step_rope                  = cursor.table<std::int32_t>(15);
+    out.segment_offsets            = cursor.array<std::int32_t>(std::size_t(lanes) + 1);
+    out.boundary_rows              = cursor.array<std::int32_t>(boundaries);
+    out.boundary_columns           = cursor.array<std::int32_t>(boundaries);
+    out.boundary_destinations      = cursor.array<std::int64_t>(boundaries);
     out.bytes                      = cursor.finish();
     return out;
 }
@@ -173,6 +188,12 @@ FrameIngress FrameIngress::bind(MemorySpan region, const FrameIngressLayout& lay
     out.step_positions             = lane_span<std::int32_t>(region, layout.step_positions, 5 * lanes);
     out.step_valid                 = lane_span<std::int32_t>(region, layout.step_valid, 5 * lanes);
     out.step_rope                  = lane_span<std::int32_t>(region, layout.step_rope, 15 * lanes);
+    out.segment_offsets =
+        lane_span<std::int32_t>(region, layout.segment_offsets, std::size_t(lanes) + 1);
+    out.boundary_rows    = lane_span<std::int32_t>(region, layout.boundary_rows, layout.boundaries);
+    out.boundary_columns = lane_span<std::int32_t>(region, layout.boundary_columns, layout.boundaries);
+    out.boundary_destinations =
+        lane_span<std::int64_t>(region, layout.boundary_destinations, layout.boundaries);
     return out;
 }
 
@@ -208,7 +229,7 @@ FrameLayout plan_frames(LayoutBuilder& builder, const FrameSpec& spec) {
         std::max({out.staged_capacity, pack, static_cast<std::int32_t>(spec.mixed_tokens)});
     const auto inputs   = out.input_capacity;
     const auto staged   = out.staged_capacity;
-    out.ingress_arrays  = plan_frame_ingress(spec.batch_capacity);
+    out.ingress_arrays  = plan_frame_ingress(spec.ingress_rows(), kPrefillPackBoundaryLimit);
     out.commit_arrays   = plan_frame_commit(spec.batch_capacity);
     out.egress_arrays   = plan_frame_egress(spec.batch_capacity);
     out.ingress         = builder.add(out.ingress_arrays.bytes, kAlignment, "execution ingress");
@@ -354,6 +375,15 @@ ExecutionFrame::ExecutionFrame(MemorySpan backing, const FrameLayout& layout,
     const auto in    = [&](std::size_t offset) {
         return Tensor(ingress.subspan(offset), DType::I32, {batch});
     };
+    segment_offsets = Tensor(ingress.subspan(ingress_arrays.segment_offsets), DType::I32,
+                             {static_cast<std::int32_t>(ingress_arrays.lanes) + 1});
+    boundary_rows = Tensor(ingress.subspan(ingress_arrays.boundary_rows), DType::I32,
+                           {static_cast<std::int32_t>(ingress_arrays.boundaries)});
+    boundary_columns = Tensor(ingress.subspan(ingress_arrays.boundary_columns), DType::I32,
+                              {static_cast<std::int32_t>(ingress_arrays.boundaries)});
+    boundary_destinations = Tensor(ingress.subspan(ingress_arrays.boundary_destinations),
+                                   DType::I64,
+                                   {static_cast<std::int32_t>(ingress_arrays.boundaries)});
     sampling_positions = in(ingress_arrays.sampling_positions);
     history_skip       = in(ingress_arrays.history_skip);
     previous_rope =

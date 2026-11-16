@@ -52,6 +52,59 @@ ops::SamplingConfig RankProgramImpl::sampling_config(const ExecutionRow& row,
     return result;
 }
 
+void RankProgramImpl::bind_segment_table(ComputeOperation& operation, const ForwardWork& work) {
+    auto& host           = *resources.frame().host_ingress;
+    operation.boundaries = 0;
+    operation.checkpoints.clear();
+    host.segment_offsets[0] = 0;
+    for (std::size_t i = 0; i < operation.segments.size(); ++i) {
+        const auto& segment = operation.segments[i];
+        const auto& window  = work.inputs[i];
+        host.segment_offsets[i + 1] =
+            static_cast<std::int32_t>(segment.token_offset + segment.tokens);
+        // Every split is a traversal boundary; the one that carries a checkpoint also names its
+        // image. A checkpoint at the window end is a copy of the destination image afterwards.
+        auto next = window.checkpoints.begin();
+        for (const auto split : window.execution_splits) {
+            if (operation.boundaries >= host.boundary_rows.size())
+                throw std::logic_error("Qwen3.5 packed boundaries exceed the segment table");
+            std::int64_t image = -1;
+            if (next != window.checkpoints.end() && next->column == split) {
+                image = next->state_offset;
+                operation.checkpoints.push_back(
+                    {segment.destination_offset, image, segment.token_offset + split - 1, false});
+                ++next;
+            }
+            const auto boundary                   = operation.boundaries++;
+            host.boundary_rows[boundary]          = static_cast<std::int32_t>(i);
+            host.boundary_columns[boundary]       = static_cast<std::int32_t>(split);
+            host.boundary_destinations[boundary]  = image;
+        }
+        if (next != window.checkpoints.end())
+            operation.checkpoints.push_back(
+                {segment.destination_offset, next->state_offset, 0, true});
+    }
+}
+
+execution::SegmentTable RankProgramImpl::segment_table(std::uint32_t first_row,
+                                                       std::uint32_t segments,
+                                                       std::uint32_t boundaries) const {
+    const auto& frame = resources.frame();
+    const auto count  = static_cast<std::int32_t>(segments);
+    const auto first  = static_cast<std::int32_t>(first_row);
+    execution::SegmentTable table;
+    table.token_offsets       = frame.segment_offsets.slice(0, 0, count + 1);
+    table.source_offsets      = frame.state_source_offsets.slice(0, first, count);
+    table.destination_offsets = frame.state_destination_offsets.slice(0, first, count);
+    table.boundary_count      = static_cast<std::int32_t>(boundaries);
+    if (boundaries) {
+        table.boundary_rows         = frame.boundary_rows.slice(0, 0, table.boundary_count);
+        table.boundary_columns      = frame.boundary_columns.slice(0, 0, table.boundary_count);
+        table.boundary_destinations = frame.boundary_destinations.slice(0, 0, table.boundary_count);
+    }
+    return table;
+}
+
 void RankProgramImpl::upload_ingress() {
     CUDA_CHECK(cudaMemcpyAsync(resources.frame().ingress.data,
                                resources.frame().host_ingress_region.data,
@@ -123,7 +176,13 @@ void RankProgramImpl::initialize_forward(ComputeOperation& operation, const Forw
     }
     operation.width        = end - offset;
     operation.row_finished = false;
-    auto& frame            = resources.frame();
+    // A checkpoint at the end of this sub-window copies the State it publishes.
+    operation.checkpoints.clear();
+    for (const auto& checkpoint : window.checkpoints)
+        if (checkpoint.column == end)
+            operation.checkpoints.push_back(
+                {row.state_offsets.destination, checkpoint.state_offset, 0, true});
+    auto& frame = resources.frame();
     // Rows execute one after another as a B=1 window in compact row 0. Only the operation's first
     // window starts from a clean ingress; later windows rebind every field they use (row binding,
     // valid_columns, sampling positions, previous RoPE) in place.
@@ -224,6 +283,7 @@ void RankProgramImpl::initialize_packed_forward(ComputeOperation& operation,
         }
         total += columns;
     }
+    bind_segment_table(operation, work);
     upload_ingress();
     operation.input_embeddings.reset();
     operation.width        = total;
@@ -255,16 +315,18 @@ void RankProgramImpl::validate_packed_forward(const ForwardWork& work) const {
          work.sample != SamplePurpose::FirstToken) ||
         resources.dflash || work.rows.size() > spec.pack_segments)
         throw std::invalid_argument("Qwen3.5 packed prefill has unsupported membership");
-    std::uint64_t total = 0;
+    std::uint64_t total = 0, boundaries = 0;
     std::uint32_t producing = 0;
     for (std::size_t i = 0; i < work.inputs.size(); ++i) {
         const auto& input = work.inputs[i];
-        if (input.tokens.empty() || input.visual || !input.execution_splits.empty())
+        if (input.tokens.empty() || input.visual ||
+            (!execution::kSegmentVarlen && !input.execution_splits.empty()))
             throw std::invalid_argument("Qwen3.5 packed prefill window cannot share an execution");
         if (work.sampling[i].produces_token) ++producing;
         total += input.tokens.size();
+        boundaries += input.execution_splits.size();
     }
-    if (total > spec.pack_tokens)
+    if (total > spec.pack_tokens || boundaries > resources.frame().ingress_arrays.boundaries)
         throw std::invalid_argument("Qwen3.5 packed prefill exceeds its token capacity");
     if (work.sample != SamplePurpose::None &&
         (producing == 0 || producing > spec.batch_capacity))
@@ -387,6 +449,7 @@ void RankProgramImpl::initialize_mixed(ComputeOperation& operation, const MixedW
         }
         total += columns;
     }
+    bind_segment_table(operation, work.prefill);
     // The decision rows are the decode rows followed by the producing segments, in row order.
     operation.sample_members.insert(operation.sample_members.begin(), rows, 0);
     for (std::uint32_t row = 0; row < rows; ++row) operation.sample_members[row] = row;
@@ -455,11 +518,13 @@ void RankProgramImpl::validate_mixed(const MixedWork& work) const {
         prefill.rows.size() > spec.pack_segments || prefill.inputs.size() != prefill.rows.size() ||
         decode.rows.empty() || decode.rows.size() > spec.mixed_decode_rows)
         throw std::invalid_argument("Qwen3.5 mixed execution has unsupported membership");
-    std::uint64_t total = 0;
+    std::uint64_t total = 0, boundaries = 0;
     std::uint32_t producing = 0;
     for (std::size_t i = 0; i < prefill.rows.size(); ++i) {
         const auto& input = prefill.inputs[i];
-        if (input.tokens.empty() || input.visual || !input.execution_splits.empty() ||
+        boundaries += input.execution_splits.size();
+        if (input.tokens.empty() || input.visual ||
+            (!execution::kSegmentVarlen && !input.execution_splits.empty()) ||
             input.tokens.size() > prefill_chunk ||
             prefill.rows[i].main_frontier + input.tokens.size() > capacity)
             throw std::invalid_argument("Qwen3.5 mixed prefill window cannot share an execution");
@@ -478,6 +543,8 @@ void RankProgramImpl::validate_mixed(const MixedWork& work) const {
         if (row.sampling.constrained)
             throw std::invalid_argument("Qwen3.5 mixed decode rows cannot be constrained");
     const auto width = backend == SpeculativeBackend::Mtp ? draft_window + 1ULL : 1ULL;
+    if (boundaries > resources.frame().ingress_arrays.boundaries)
+        throw std::invalid_argument("Qwen3.5 mixed execution exceeds its boundary capacity");
     if (total > spec.pack_tokens || total + width * decode.rows.size() > spec.mixed_tokens)
         throw std::invalid_argument("Qwen3.5 mixed execution exceeds its token capacity");
 }

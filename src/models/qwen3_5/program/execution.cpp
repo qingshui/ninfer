@@ -220,9 +220,32 @@ void RankProgramImpl::publish_continuation_hidden(ComputeOperation& operation) {
     if (operation.packed || operation.mixed) {
         for (const auto& segment : operation.segments)
             publish(segment.token_offset + segment.tokens - 1, segment.destination_offset);
-        return;
+    } else {
+        publish(operation.width - 1,
+                operation.rows[operation.forward_row].state_offsets.destination);
     }
-    publish(operation.width - 1, operation.rows[operation.forward_row].state_offsets.destination);
+    publish_checkpoints(operation);
+}
+
+// A checkpoint inside a packed window already holds the State its column published; it needs the
+// continuation hidden of that column. A checkpoint at the window end copies the destination
+// image, which holds the final State and hidden, so the image equals the one a serial execution
+// of the sub-window would leave behind.
+void RankProgramImpl::publish_checkpoints(ComputeOperation& operation) {
+    const auto total =
+        static_cast<int>(operation.mixed ? operation.axis_tokens : operation.width);
+    const auto hidden = resources.frame().input_view(total, 1).hidden;
+    for (const auto& checkpoint : operation.checkpoints) {
+        if (checkpoint.end) {
+            resources.state_images.storage().copy(checkpoint.source, checkpoint.destination,
+                                                  device.execution_view());
+            continue;
+        }
+        const auto source = hidden.slice(1, static_cast<int>(checkpoint.hidden_column), 1);
+        const auto target = resources.state_images.continuation_hidden(checkpoint.destination);
+        CUDA_CHECK(cudaMemcpyAsync(target.data, source.data, target.bytes(),
+                                   cudaMemcpyDeviceToDevice, device.stream()));
+    }
 }
 
 } // namespace ninfer::models::qwen3_5::detail

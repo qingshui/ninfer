@@ -3,10 +3,12 @@
 #include "core/startup.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <limits>
 #include <stdexcept>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 namespace ninfer::models::qwen3_5 {
 
@@ -87,7 +89,8 @@ ComputeOperation::ComputeOperation(runtime::ExecutionRequest<ExecutionTypes>&& v
 
 ComputeOperation::~ComputeOperation() = default;
 
-void RankProgramImpl::validate_row(const ExecutionRow& row) const {
+void RankProgramImpl::validate_row(const ExecutionRow& row,
+                                   std::span<const ResidencyBinding> installs) const {
     const auto lane = row.member.residency.lane.value;
     if (lane >= max_concurrency || !row.member.sequence.generation ||
         !row.member.residency.generation || !row.source_state.valid() ||
@@ -112,20 +115,82 @@ void RankProgramImpl::validate_row(const ExecutionRow& row) const {
         row.backend_frontier != (row.main_frontier ? row.main_frontier - 1 : 0)) {
         throw std::invalid_argument("MTP history must end immediately before the Main frontier");
     }
+    // A residency the same Work installs is valid for its rows before it is installed.
+    const bool installed_here =
+        std::any_of(installs.begin(), installs.end(), [&](const ResidencyBinding& binding) {
+            return binding.member.residency == row.member.residency &&
+                   binding.member.sequence == row.member.sequence;
+        });
     const auto& installed = residencies[lane];
-    if (!installed.installed || installed.id != row.member.residency ||
-        installed.sequence != row.member.sequence) {
+    if (!installed_here && (!installed.installed || installed.id != row.member.residency ||
+                            installed.sequence != row.member.sequence)) {
         throw std::logic_error("Qwen3.5 work references a retired residency");
     }
 }
+
+// Checkpoints are ascending by column and sit on an execution split or at the window end. Their
+// images are appended to `images`; reject_shared_images() rejects a repeated one.
+void RankProgramImpl::validate_checkpoints(const InputWindow& input,
+                                           std::vector<std::int64_t>& images) const {
+    std::uint32_t previous = 0;
+    for (const auto& checkpoint : input.checkpoints) {
+        const bool on_split =
+            std::binary_search(input.execution_splits.begin(), input.execution_splits.end(),
+                               checkpoint.column);
+        if (checkpoint.column <= previous || checkpoint.column > input.tokens.size() ||
+            (!on_split && checkpoint.column != input.tokens.size()) || !checkpoint.state.valid() ||
+            checkpoint.state_offset < 0)
+            throw std::invalid_argument(
+                "Qwen3.5 window checkpoints are not ascending on its splits or end");
+        (void)resources.state_images.storage().image(checkpoint.state_offset);
+        previous = checkpoint.column;
+        images.push_back(checkpoint.state_offset);
+    }
+}
+
+namespace {
+
+// A checkpoint image is written by the Work: it is distinct from every other checkpoint image and
+// from every image a row reads or writes.
+void reject_shared_images(std::vector<std::int64_t> checkpoints, std::vector<std::int64_t> rows) {
+    std::sort(checkpoints.begin(), checkpoints.end());
+    std::sort(rows.begin(), rows.end());
+    if (std::adjacent_find(checkpoints.begin(), checkpoints.end()) != checkpoints.end() ||
+        std::find_first_of(checkpoints.begin(), checkpoints.end(), rows.begin(), rows.end()) !=
+            checkpoints.end())
+        throw std::invalid_argument("Qwen3.5 window checkpoint image is shared");
+}
+
+void add_row_images(const ExecutionRow& row, std::vector<std::int64_t>& images) {
+    images.push_back(row.state_offsets.source);
+    images.push_back(row.state_offsets.destination);
+}
+
+} // namespace
 
 void RankProgramImpl::validate_work(const Work& work, runtime::FrameKind kind) const {
     const bool context = std::holds_alternative<ContextWork>(work.operation);
     if (kind != (context ? runtime::FrameKind::Context : runtime::FrameKind::Compute)) {
         throw std::invalid_argument("Qwen3.5 work is reserved in the wrong execution frame");
     }
+    if (context && !work.installs.empty())
+        throw std::invalid_argument("Qwen3.5 context work carries residency installs");
     // Every compute frame has the same action limits, so any slot validates a compute work.
     (context ? context_actions : slots.front()->compute_actions)->validate(work.context);
+    auto validate_binding = [&](const ResidencyBinding& binding) {
+        if (binding.member.residency.lane.value >= max_concurrency ||
+            !binding.member.residency.generation || !binding.member.sequence.generation)
+            throw std::invalid_argument("Qwen3.5 residency installation is invalid");
+        binding.counts.validate(parameters.profile->public_tokens, capacity);
+    };
+    for (std::size_t i = 0; i < work.installs.size(); ++i) {
+        validate_binding(work.installs[i]);
+        for (std::size_t j = 0; j < i; ++j)
+            if (work.installs[j].member.residency.lane.value ==
+                work.installs[i].member.residency.lane.value)
+                throw std::invalid_argument("Qwen3.5 work installs a lane twice");
+    }
+    std::vector<std::int64_t> checkpoint_images, row_images;
     auto validate_input = [&](const InputWindow& input, std::uint32_t limit) {
         if (input.tokens.size() > limit || input.rope_positions.size() != input.tokens.size() * 3) {
             throw std::invalid_argument("Qwen3.5 input window has invalid positions or extent");
@@ -137,6 +202,7 @@ void RankProgramImpl::validate_work(const Work& work, runtime::FrameKind kind) c
                     "Qwen3.5 input segments are not strictly inside its window");
             previous = split;
         }
+        validate_checkpoints(input, checkpoint_images);
         for (TokenId id : input.tokens) {
             if (id < 0 || static_cast<std::uint32_t>(id) >= parameters.profile->public_tokens)
                 throw std::invalid_argument("Qwen3.5 input token is outside the public domain");
@@ -148,7 +214,8 @@ void RankProgramImpl::validate_work(const Work& work, runtime::FrameKind kind) c
         std::vector<std::uint8_t> seen(max_concurrency, 0);
         for (const auto& value : rows) {
             const auto& row = binding(value);
-            validate_row(row);
+            validate_row(row, work.installs);
+            add_row_images(row, row_images);
             auto& present = seen[row.member.residency.lane.value];
             if (present) throw std::invalid_argument("Qwen3.5 work repeats a residency");
             present = true;
@@ -167,12 +234,7 @@ void RankProgramImpl::validate_work(const Work& work, runtime::FrameKind kind) c
         [&](const auto& op) {
             using T = std::decay_t<decltype(op)>;
             if constexpr (std::is_same_v<T, ContextWork>) {
-                for (const auto& binding : op.bindings) {
-                    if (binding.member.residency.lane.value >= max_concurrency ||
-                        !binding.member.residency.generation || !binding.member.sequence.generation)
-                        throw std::invalid_argument("Qwen3.5 residency installation is invalid");
-                    binding.counts.validate(parameters.profile->public_tokens, capacity);
-                }
+                for (const auto& binding : op.bindings) validate_binding(binding);
                 for (auto id : op.releases) {
                     if (id.lane.value >= max_concurrency || !residencies[id.lane.value].installed ||
                         residencies[id.lane.value].id != id)
@@ -210,6 +272,7 @@ void RankProgramImpl::validate_work(const Work& work, runtime::FrameKind kind) c
                 }
                 if (op.purpose == ForwardPurpose::Prefill && op.rows.size() > 1)
                     validate_packed_forward(op);
+                reject_shared_images(checkpoint_images, row_images);
             } else if constexpr (std::is_same_v<T, DecodeWork>) {
                 validate_members(
                     op.rows, [](const auto& row) -> const ExecutionRow& { return row.binding; });
@@ -230,14 +293,17 @@ void RankProgramImpl::validate_work(const Work& work, runtime::FrameKind kind) c
                 for (const auto& input : op.prefill.inputs) validate_input(input, prefill_chunk);
                 validate_decode_extents(op.decode.rows);
                 validate_mixed(op);
+                reject_shared_images(checkpoint_images, row_images);
             } else if constexpr (std::is_same_v<T, NormalizeWork>) {
                 validate_members(op.rows,
                                  [](const auto& row) -> const ExecutionRow& { return row; });
                 if (!resources.dflash)
                     throw std::logic_error("normalization requires draft feature state");
             } else if constexpr (std::is_same_v<T, ScoreWork>) {
-                validate_row(op.row);
+                validate_row(op.row, work.installs);
                 validate_input(op.input, prefill_chunk);
+                if (!op.input.checkpoints.empty())
+                    throw std::invalid_argument("Qwen3.5 scoring input carries checkpoints");
                 if (!resources.frame().spec.causal_scoring || op.input.tokens.empty() ||
                     op.first_column > op.input.tokens.size() ||
                     op.targets.size() > op.input.tokens.size() - op.first_column)

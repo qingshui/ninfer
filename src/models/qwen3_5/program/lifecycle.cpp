@@ -72,7 +72,6 @@ bool RankProgramImpl::computing() const noexcept {
 }
 
 void RankProgramImpl::install_residencies(const ContextWork& work) {
-    const auto vocabulary = static_cast<std::size_t>(parameters.profile->public_tokens);
     for (auto id : work.releases) {
         auto& residency = residencies[id.lane.value];
         if (!residency.installed || residency.id != id)
@@ -84,32 +83,33 @@ void RankProgramImpl::install_residencies(const ContextWork& work) {
         }
         residency.installed = false;
     }
-    auto* counts = static_cast<std::int32_t*>(context_counts.data());
-    for (const auto& binding : work.bindings) {
-        const auto lane = binding.member.residency.lane.value;
-        auto& residency = residencies[lane];
-        if (resources.vision) {
-            const auto* active = resources.vision->current();
-            if (active && active->owner.residency == residency.id)
-                resources.vision->release(active->id);
-        }
-        residency.id        = binding.member.residency;
-        residency.sequence  = binding.member.sequence;
-        residency.installed = true;
-        residency.penalties =
-            binding.sampling.presence_penalty != 0.0F || binding.sampling.frequency_penalty != 0.0F;
-        if (!resources.token_counts.data || !residency.penalties) continue;
-        Tensor destination = resources.token_counts.slice(1, static_cast<int>(lane), 1);
-        if (binding.counts.empty()) {
-            CUDA_CHECK(cudaMemsetAsync(destination.data, 0, destination.bytes(),
-                                       device.transfer_stream()));
-            continue;
-        }
-        auto* row_counts = counts + lane * vocabulary;
-        binding.counts.restore({row_counts, vocabulary});
-        CUDA_CHECK(cudaMemcpyAsync(destination.data, row_counts, vocabulary * sizeof(std::int32_t),
-                                   cudaMemcpyHostToDevice, device.transfer_stream()));
+    for (const auto& binding : work.bindings) install_binding(binding, device.transfer_stream());
+}
+
+void RankProgramImpl::install_binding(const ResidencyBinding& binding, cudaStream_t stream) {
+    const auto vocabulary = static_cast<std::size_t>(parameters.profile->public_tokens);
+    const auto lane       = binding.member.residency.lane.value;
+    auto& residency       = residencies[lane];
+    if (resources.vision) {
+        const auto* active = resources.vision->current();
+        if (active && active->owner.residency == residency.id)
+            resources.vision->release(active->id);
     }
+    residency.id        = binding.member.residency;
+    residency.sequence  = binding.member.sequence;
+    residency.installed = true;
+    residency.penalties =
+        binding.sampling.presence_penalty != 0.0F || binding.sampling.frequency_penalty != 0.0F;
+    if (!resources.token_counts.data || !residency.penalties) return;
+    Tensor destination = resources.token_counts.slice(1, static_cast<int>(lane), 1);
+    if (binding.counts.empty()) {
+        CUDA_CHECK(cudaMemsetAsync(destination.data, 0, destination.bytes(), stream));
+        return;
+    }
+    auto* row_counts = static_cast<std::int32_t*>(context_counts.data()) + lane * vocabulary;
+    binding.counts.restore({row_counts, vocabulary});
+    CUDA_CHECK(cudaMemcpyAsync(destination.data, row_counts, vocabulary * sizeof(std::int32_t),
+                               cudaMemcpyHostToDevice, stream));
 }
 
 void RankProgramImpl::start(runtime::ExecutionRequest<ExecutionTypes>&& request) {
@@ -128,6 +128,9 @@ void RankProgramImpl::start(runtime::ExecutionRequest<ExecutionTypes>&& request)
         if (slot().compute) throw std::logic_error("Qwen3.5 compute frame is occupied");
         slot().gpu_timer.begin();
         slot().compute = std::make_unique<ComputeOperation>(std::move(request), max_concurrency);
+        // Stream order of a flight: residency installs, deferred context actions, the forward.
+        for (const auto& binding : slot().compute->request.work.installs)
+            install_binding(binding, device.stream());
         slot().compute_actions->submit(slot().compute->request.work.context);
         initialize_inputs(*slot().compute);
     }

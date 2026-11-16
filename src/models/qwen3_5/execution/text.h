@@ -2,6 +2,7 @@
 
 #include "core/gdn_replay_records.h"
 #include "core/linear_attention_state.h"
+#include "core/platform.h"
 #include "models/common/moe/schedule.h"
 #include "models/qwen3_5/execution/parameters.h"
 #include "models/qwen3_5/state/decoder_state.h"
@@ -68,12 +69,36 @@ struct SequenceSegment {
     std::int64_t destination_offset;
 };
 
-// Publishes every segment as a complete B=1 sequence with the same chunked recurrence and the
-// same attention as SequenceUpdate would apply to it alone. Token-wise stages (embedding,
+// The varlen conv/GDN Ops exist on every target but dgx_spark. There a packed traversal runs its
+// segments one after another and cannot carry boundaries.
+inline constexpr bool kSegmentVarlen = NINFER_TARGET_SPARK == 0;
+
+// Device tables of the segments of a packed or mixed traversal, consumed by the varlen conv and
+// GDN Ops. Segment i is row i: `token_offsets` is I32 [S+1] over the segment token axis, the
+// State byte offsets are I64 [S] (the source and destination of each segment), and boundary b
+// splits segment boundary_rows[b] after boundary_columns[b] tokens of it. A boundary whose
+// boundary_destinations[b] is non-negative also publishes the State after that column to that
+// State image; -1 only splits the traversal. Boundary tensors are empty when boundary_count is
+// zero. The tables are uploaded with the frame ingress; the traversal never reads them back.
+struct SegmentTable {
+    Tensor token_offsets;
+    Tensor source_offsets;
+    Tensor destination_offsets;
+    Tensor boundary_rows;
+    Tensor boundary_columns;
+    Tensor boundary_destinations;
+    std::int32_t boundary_count = 0;
+};
+
+// Publishes every segment as a complete B=1 sequence with the same recurrence and the same
+// attention as SequenceUpdate would apply to it alone. Token-wise stages (embedding,
 // normalization, projection, routed experts) run once over the whole token axis, so each segment
-// matches its separate execution. The segment storage is borrowed for the traversal.
+// matches its separate execution. The segment storage is borrowed for the traversal. A segment
+// that is cut at boundaries is bit-identical to executing its sub-segments one after another,
+// each starting from the State the previous one published.
 struct PackedSequenceUpdate {
     std::span<const SequenceSegment> segments;
+    SegmentTable table;
 };
 
 // The decode rows of a mixed traversal as a [width, rows] tail slice of the token axis. The
@@ -94,6 +119,7 @@ struct MixedUpdate {
     std::span<const SequenceSegment> segments;
     StepRows steps;
     const GdnReplayRecords* records;
+    SegmentTable table;
 };
 
 struct StepUpdate {};

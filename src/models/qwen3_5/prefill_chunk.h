@@ -31,6 +31,12 @@ inline constexpr std::uint32_t kPrefillPackChunks = 8;
 // and keep their single-segment constraint.
 inline constexpr std::uint32_t kPrefillPackSegmentLimit = 64;
 
+// Upper bound on the execution splits (traversal boundaries inside windows) that one packed
+// prefill or mixed execution carries, summed over its segments. A checkpoint at the window end is
+// not a boundary. It is the only authority for that bound: the Program sizes its segment table and
+// the varlen scratch from it and rejects work above it.
+inline constexpr std::uint32_t kPrefillPackBoundaryLimit = 1024;
+
 // Explicit EngineOptions::prefill_chunk wins over the placement default. The result is clamped
 // to max_context and must be a multiple of kPrefillChunkAlignment; a max_context that is not
 // itself aligned keeps the largest aligned chunk that fits (a chunk is batching granularity,
@@ -84,7 +90,8 @@ prefill_plan_segment_counts(std::uint32_t prefill_chunk, std::uint32_t pack_toke
 
 // Upper bound of the token axis of one mixed execution: a packed prefill (at most `pack_tokens`)
 // followed by the verify block of up to `mixed_decode_rows` decode rows, each `draft_window + 1`
-// columns wide. Zero decode rows means the model does not mix and the result is zero. Planning
+// columns wide. The decode rows are bounded by the lane count, not by the pack segment budget.
+// Zero decode rows means the model does not mix and the result is zero. Planning
 // sizes the mixed workspace and the execution frame from it, and the Program admits work against
 // it; no other place derives this extent.
 [[nodiscard]] inline std::uint32_t resolve_mixed_tokens(std::uint32_t pack_tokens,

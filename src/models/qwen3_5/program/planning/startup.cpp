@@ -4,6 +4,7 @@
 #include "models/common/moe/execution.h"
 #include "models/common/context/storage.h"
 #include "models/qwen3_5/execution/mtp.h"
+#include "models/qwen3_5/execution/text.h"
 #include "models/qwen3_5/planning.h"
 #include "models/qwen3_5/prefill_chunk.h"
 #include "models/qwen3_5/program/planning/startup.h"
@@ -346,11 +347,18 @@ WorkspaceSpec build_workspace_plan(const SequencePlanImpl& plan) {
                     }
                     (void)workspace::gdn_recurrent_output(layout, config, last);
                     if (path == GdnWorkspacePath::Prefill) {
-                        scratch(layout,
-                                ops::gated_delta_net_workspace_capacity_bytes(
-                                    dimension(config.gdn->linear_num_key_heads),
-                                    dimension(config.gdn->linear_num_value_heads), min_width,
-                                    max_width));
+                        const auto qk_heads = dimension(config.gdn->linear_num_key_heads);
+                        const auto vh_heads = dimension(config.gdn->linear_num_value_heads);
+                        auto bytes = ops::gated_delta_net_workspace_capacity_bytes(
+                            qk_heads, vh_heads, min_width, max_width);
+                        // Packed and mixed traversals run every segment in one varlen call.
+                        if (execution::kSegmentVarlen && plan.pack_segments > 1)
+                            bytes = std::max(
+                                bytes, ops::gated_delta_net_varlen_workspace_capacity_bytes(
+                                           qk_heads, vh_heads,
+                                           static_cast<std::int32_t>(plan.pack_segments), pack,
+                                           static_cast<std::int32_t>(kPrefillPackBoundaryLimit)));
+                        scratch(layout, bytes);
                     }
                     (void)workspace::gdn_normalized_output(layout, config, last);
                     add_scratch(layout, gdn.output, first, last);
@@ -838,12 +846,11 @@ make_sequence_planner_impl(std::shared_ptr<const execution::ModelProfile> profil
     // merges as many waiting segments as the token budget holds. Masked draft windows and
     // scoring still execute one segment at a time.
     const auto pack_segments = masked || scoring ? 1U : kPrefillPackSegmentLimit;
-    // Decode rows ride a prefill execution as a verify block. Every row is a distinct sequence and
-    // at least one prefill segment is present, so the rows leave room for that segment inside the
-    // same segment budget instead of the lane count; admission bounds them by the resident lanes.
-    // Offloaded experts, masked draft windows and scoring never mix.
-    static_assert(kPrefillPackSegmentLimit >= 2, "the pack segment budget must fit a mixed flight");
-    const auto mixed_rows = offload || masked || scoring ? 0U : kPrefillPackSegmentLimit - 1;
+    // Decode rows ride a prefill execution as a verify block. Every row is a distinct sequence, so
+    // the bound is the lane count and is independent of the pack segment budget; the ingress row
+    // metadata is sized for the rows plus the segments. Offloaded experts, masked draft windows
+    // and scoring never mix.
+    const auto mixed_rows = offload || masked || scoring ? 0U : options.max_concurrency;
     // The pool records (state image, KV pages) do not depend on the pack, so a provisional
     // candidate at the unclamped chunk budget exposes the pool geometry and the fixed session
     // reservation — workspace included — that the token-axis capacity is derived from. The
@@ -903,6 +910,11 @@ make_sequence_planner_impl(std::shared_ptr<const execution::ModelProfile> profil
                                                 base->device_reservation_bytes, *context_budget);
         if (lanes < inputs.max_concurrency) {
             inputs.max_concurrency = lanes;
+            if (inputs.mixed_decode_rows != 0) {
+                inputs.mixed_decode_rows = lanes;
+                inputs.mixed_tokens =
+                    resolve_mixed_tokens(inputs.pack_tokens, lanes, inputs.draft_window);
+            }
             planner->inputs        = inputs;
             base                   = build_sequence_candidate(inputs, 0);
             capacity.records       = base->persistent.context_records();

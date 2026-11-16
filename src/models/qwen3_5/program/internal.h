@@ -17,6 +17,7 @@
 #include <deque>
 #include <memory>
 #include <optional>
+#include <span>
 #include <variant>
 #include <vector>
 
@@ -38,6 +39,17 @@ enum class ComputeStage : std::uint8_t {
     AwaitCommit,
     Commit,
     Retiring,
+};
+
+// A State image that receives the sequence State at a window column. Checkpoints inside a packed
+// traversal are written by the segment Ops; `end` marks the one at the window end, which copies
+// the row's destination image once the traversal and its continuation hidden are complete.
+// Every checkpoint image also receives the continuation hidden of its column.
+struct PendingCheckpoint {
+    std::int64_t source = -1;       // destination image of the row (end checkpoints)
+    std::int64_t destination = -1;  // checkpoint image
+    std::uint32_t hidden_column = 0; // token-axis column of the last token before the checkpoint
+    bool end = false;
 };
 
 struct ComputeOperation {
@@ -87,6 +99,9 @@ struct ComputeOperation {
     AttentionWorkCounters attention;
     std::optional<Tensor> input_embeddings;
     std::vector<execution::SequenceSegment> segments;
+    // Boundaries (execution splits) of the packed segments, written to the segment table.
+    std::uint32_t boundaries = 0;
+    std::vector<PendingCheckpoint> checkpoints;
     std::unique_ptr<execution::TextRun> text;
 
     ComputeOperation(runtime::ExecutionRequest<ExecutionTypes>&&, std::uint32_t lanes);
@@ -145,8 +160,20 @@ public:
     [[nodiscard]] RankExecutionObservation retirement_observation() const noexcept;
     void reset_measurement_peaks() noexcept;
 
-    void validate_row(const ExecutionRow&) const;
+    void validate_row(const ExecutionRow&, std::span<const ResidencyBinding> installs = {}) const;
+    void validate_checkpoints(const InputWindow&, std::vector<std::int64_t>& images) const;
     void install_residencies(const ContextWork&);
+    // Makes one residency current and uploads its token counts on `stream`.
+    void install_binding(const ResidencyBinding&, cudaStream_t stream);
+    // Writes the segment table of the prefill windows listed in `operation.segments` into the
+    // host ingress: token offsets, and the boundaries and checkpoints of the windows' splits.
+    void bind_segment_table(ComputeOperation&, const ForwardWork&);
+    // The device view of that table in the selected frame; the State offsets of segment i are
+    // the ingress row `first_row + i`.
+    [[nodiscard]] execution::SegmentTable segment_table(std::uint32_t first_row,
+                                                        std::uint32_t segments,
+                                                        std::uint32_t boundaries) const;
+    void publish_checkpoints(ComputeOperation&);
     void initialize_inputs(ComputeOperation&);
     void initialize_decode(ComputeOperation&, const DecodeWork&);
     void initialize_mixed(ComputeOperation&, const MixedWork&);

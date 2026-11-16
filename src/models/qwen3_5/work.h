@@ -44,12 +44,24 @@ struct SamplingInput {
     bool produces_token = false;
 };
 
+// A state image that receives the sequence state after `column` tokens of its window. The column
+// is an execution split or the window end, and `state_offset` names the image inside the state
+// storage the way ExecutionRow::state_offsets does. The image is distinct from every source and
+// destination image of the same Work.
+struct WindowCheckpoint {
+    std::uint32_t column = 0;
+    context::StateId state;
+    std::int64_t state_offset = -1;
+};
+
 struct InputWindow {
     std::vector<TokenId> tokens;
     // Axis-major positions for the exact input window.
     std::vector<std::int32_t> rope_positions;
     // Forward mathematical segments inside one scheduling unit; excludes zero and window end.
     std::vector<std::uint32_t> execution_splits;
+    // Ascending by column; every column is in execution_splits or equals tokens.size().
+    std::vector<WindowCheckpoint> checkpoints;
     std::optional<qwen::VisionWork> visual;
     std::uint32_t prompt_begin = 0;
 };
@@ -109,8 +121,12 @@ struct ScoreWork {
     std::uint32_t first_column = 0;
 };
 
+// A compute frame executes `installs`, then `context`, then its operation in stream order. The
+// rows of the operation may name a residency that this Work installs. Context frames carry their
+// installations in ContextWork and reject `installs`.
 struct Work {
     context::ContextActions context;
+    std::vector<ResidencyBinding> installs;
     std::variant<ForwardWork, DecodeWork, MixedWork, NormalizeWork, ContextWork, ScoreWork>
         operation;
 };

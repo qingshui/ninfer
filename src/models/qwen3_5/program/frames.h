@@ -6,6 +6,7 @@
 #include "ninfer/ops/sampling.h"
 #include "ninfer/types.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <optional>
 #include <span>
@@ -25,7 +26,10 @@ struct FrameSpec {
     std::uint32_t pack_segments = 1;
     // A mixed execution appends the verify block of up to mixed_decode_rows decode rows to a
     // packed prefill on the same token axis; mixed_tokens (0 when the frame does not mix) is the
-    // resolved extent of that axis, see resolve_mixed_tokens().
+    // resolved extent of that axis, see resolve_mixed_tokens(). The decode rows are bounded by
+    // the lane count and are independent of pack_segments. The ingress row metadata of such a
+    // frame holds the decode rows and the prefill segments side by side, see
+    // FrameSpec::ingress_rows().
     std::uint32_t mixed_decode_rows   = 0;
     std::uint32_t mixed_tokens        = 0;
     std::uint32_t batch_capacity      = 1;
@@ -34,6 +38,12 @@ struct FrameSpec {
     bool causal_scoring               = false;
     bool vision                       = false;
     std::uint32_t control_token_limit = 0;
+
+    // Compact rows of the ingress arrays: the lanes of a decode execution, and for a mixed
+    // execution the decode rows plus the prefill segments.
+    [[nodiscard]] std::uint32_t ingress_rows() const noexcept {
+        return std::max(batch_capacity, pack_segments + mixed_decode_rows);
+    }
 };
 
 // Byte offsets of the lane tables of one frame region, resolved for its concurrency. One
@@ -41,12 +51,19 @@ struct FrameSpec {
 // every member at the same offset.
 struct FrameIngressLayout {
     std::uint32_t lanes = 0;
+    // Capacity of the varlen boundary tables (execution splits of one packed execution).
+    std::uint32_t boundaries = 0;
     std::size_t anchors = 0, frontiers = 0, backend_frontiers = 0, extents = 0,
         valid_columns = 0, proposal_valid_columns = 0, budgets = 0, main_table_rows = 0,
         backend_table_rows = 0, state_source_offsets = 0, state_destination_offsets = 0,
         residency_slots = 0, rope_deltas = 0, sampling = 0, sampling_positions = 0,
         history_skip = 0, previous_rope = 0, decode_positions = 0, decode_rope = 0,
         step_positions = 0, step_valid = 0, step_rope = 0;
+    // Segment table of a packed or mixed prefill: token_offsets of its rows (lanes + 1 entries)
+    // and the traversal boundaries inside them, each with the state image that receives the
+    // state after its column (-1: none).
+    std::size_t segment_offsets = 0, boundary_rows = 0, boundary_columns = 0,
+        boundary_destinations = 0;
     std::size_t bytes = 0;
 };
 
@@ -63,7 +80,8 @@ struct FrameEgressLayout {
     std::size_t bytes = 0;
 };
 
-[[nodiscard]] FrameIngressLayout plan_frame_ingress(std::uint32_t lanes);
+[[nodiscard]] FrameIngressLayout plan_frame_ingress(std::uint32_t lanes,
+                                                    std::uint32_t boundaries);
 [[nodiscard]] FrameCommitLayout plan_frame_commit(std::uint32_t lanes);
 [[nodiscard]] FrameEgressLayout plan_frame_egress(std::uint32_t lanes);
 
@@ -79,6 +97,8 @@ struct FrameIngress {
     std::span<std::int32_t> sampling_positions, history_skip;
     std::span<std::int32_t> previous_rope, decode_positions, decode_rope;
     std::span<std::int32_t> step_positions, step_valid, step_rope;
+    std::span<std::int32_t> segment_offsets, boundary_rows, boundary_columns;
+    std::span<std::int64_t> boundary_destinations;
 
     [[nodiscard]] static FrameIngress bind(MemorySpan region,
                                            const FrameIngressLayout& layout) noexcept;
@@ -252,6 +272,7 @@ public:
     const ops::SamplingConfig* sampling = nullptr;
     Tensor sampling_positions, history_skip, previous_rope;
     Tensor decode_positions, decode_rope;
+    Tensor segment_offsets, boundary_rows, boundary_columns, boundary_destinations;
     Tensor commit_destination_offsets, last_columns, count_columns, accepted_columns;
     Tensor draft_append_starts, draft_append_ends;
     Tensor output_tokens, output_counts;

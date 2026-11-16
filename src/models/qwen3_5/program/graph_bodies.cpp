@@ -92,8 +92,9 @@ void RankProgramImpl::prepare_frame_graphs(GraphPreparation& observation) {
             execution::TextExecutionView{parameters, resources.work(), device.execution_view(),
                                          resources.decoder.text_kv, resources.state_images.linear(),
                                          resources.moe.get()},
-            std::move(inputs), execution::PackedSequenceUpdate{segments}, call.envelope,
-            input.hidden);
+            std::move(inputs),
+            execution::PackedSequenceUpdate{segments, segment_table(0, call.batch, 0)},
+            call.envelope, input.hidden);
     };
     bodies.project = [this, capture = observation.capturing()](const GraphInvocation& call) {
         project_decode(call.batch, call.width);

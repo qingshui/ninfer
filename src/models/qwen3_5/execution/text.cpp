@@ -82,6 +82,25 @@ void validate_segments(std::span<const SequenceSegment> segments, std::int32_t t
         throw std::invalid_argument("Main packed segments do not cover the token axis");
 }
 
+// The segment table of a packed or mixed traversal names one row per segment and keeps every
+// boundary on its own row; the Ops validate the geometry they consume.
+void validate_segment_table(const SegmentTable& table, std::size_t segments) {
+    if (table.boundary_count < 0 || (!kSegmentVarlen && table.boundary_count != 0))
+        throw std::invalid_argument("Main segment table has an invalid boundary count");
+    if (!kSegmentVarlen) return;
+    const auto count = static_cast<std::int32_t>(segments);
+    require_shape(table.token_offsets, DType::I32, {count + 1}, "Main segment token offsets");
+    require_shape(table.source_offsets, DType::I64, {count}, "Main segment source State offsets");
+    require_shape(table.destination_offsets, DType::I64, {count},
+                  "Main segment destination State offsets");
+    if (table.boundary_count == 0) return;
+    require_shape(table.boundary_rows, DType::I32, {table.boundary_count}, "Main boundary rows");
+    require_shape(table.boundary_columns, DType::I32, {table.boundary_count},
+                  "Main boundary columns");
+    require_shape(table.boundary_destinations, DType::I64, {table.boundary_count},
+                  "Main boundary destinations");
+}
+
 } // namespace
 
 TextRun::TextRun(TextExecutionView execution, TextInputs inputs, TextStateUpdate update,
@@ -119,6 +138,7 @@ TextRun::TextRun(TextExecutionView execution, TextInputs inputs, TextStateUpdate
     if (packed) {
         if (features) throw std::invalid_argument("PackedSequenceUpdate has no feature sink");
         validate_segments(packed->segments, width, rows, config.gdn.has_value());
+        if (config.gdn) validate_segment_table(packed->table, packed->segments.size());
     } else if (mixed) {
         const auto& steps = mixed->steps;
         if (features) throw std::invalid_argument("MixedUpdate has no feature sink");
@@ -131,6 +151,7 @@ TextRun::TextRun(TextExecutionView execution, TextInputs inputs, TextStateUpdate
         validate_segments(mixed->segments, static_cast<std::int32_t>(steps.token_offset), rows,
                           config.gdn.has_value(), static_cast<std::int32_t>(steps.row_offset),
                           static_cast<std::int32_t>(steps.rows));
+        if (config.gdn) validate_segment_table(mixed->table, mixed->segments.size());
         if (config.gdn) {
             const auto step_rows = static_cast<std::int32_t>(steps.rows);
             require_shape(inputs_.state_source_offsets, DType::I64, {step_rows},
@@ -346,9 +367,22 @@ void TextRun::gdn(const BlockParameters& block, std::uint32_t compact_layer) {
                 view_.states.conv_tensor(compact_layer, sequence->destination_offset);
             ops::causal_conv1d_silu_split(qkv, p.convolution, source, destination, qc, kc, vc,
                                           cuda);
+        } else if constexpr (kSegmentVarlen) {
+            // The convolution window is per sequence: every segment starts from its own State and
+            // publishes its own trailing window, and one launch covers the whole segment table.
+            const auto& table = packed ? packed->table : mixed->table;
+            const auto source = view_.states.layer_view(compact_layer, table.source_offsets);
+            const auto target = view_.states.layer_view(compact_layer, table.destination_offsets);
+            Tensor x          = qkv.slice(1, 0, prefix_tokens);
+            Tensor query      = qc.slice(1, 0, prefix_tokens);
+            Tensor key        = kc.slice(1, 0, prefix_tokens);
+            Tensor value      = vc.slice(1, 0, prefix_tokens);
+            ops::causal_conv1d_silu_split_varlen(
+                x, p.convolution, {table.token_offsets, source.conv, target.conv},
+                table.boundary_rows, table.boundary_columns, table.boundary_destinations,
+                target.conv.field, static_cast<std::int32_t>(segments.size()),
+                table.boundary_count, query, key, value, cuda);
         } else {
-            // The convolution window is per sequence: each segment starts from its own State and
-            // publishes its own trailing window.
             for (const auto& segment : segments) {
                 const auto begin  = static_cast<std::int32_t>(segment.token_offset);
                 const auto length = static_cast<std::int32_t>(segment.tokens);
@@ -422,17 +456,32 @@ void TextRun::gdn(const BlockParameters& block, std::uint32_t compact_layer) {
             view_.states.recurrent_tensor(compact_layer, sequence->destination_offset);
         ops::gated_delta_net(q, k, v, g, beta, scale, true, work, source, destination, o, cuda);
     } else if (packed || mixed) {
-        for (const auto& segment : segments) {
-            const auto begin  = static_cast<std::int32_t>(segment.token_offset);
-            const auto length = static_cast<std::int32_t>(segment.tokens);
-            Tensor source     = view_.states.recurrent_tensor(compact_layer, segment.source_offset);
-            Tensor destination =
-                view_.states.recurrent_tensor(compact_layer, segment.destination_offset);
-            Tensor qs = q.slice(2, begin, length), ks = k.slice(2, begin, length);
-            Tensor vs = v.slice(2, begin, length), os = o.slice(2, begin, length);
-            ops::gated_delta_net(qs, ks, vs, g.slice(1, begin, length),
-                                 beta.slice(1, begin, length), scale, true, work, source,
-                                 destination, os, cuda);
+        if constexpr (kSegmentVarlen) {
+            const auto& table = packed ? packed->table : mixed->table;
+            const auto source = view_.states.layer_view(compact_layer, table.source_offsets);
+            const auto target = view_.states.layer_view(compact_layer, table.destination_offsets);
+            Tensor qs = q.slice(2, 0, prefix_tokens), ks = k.slice(2, 0, prefix_tokens);
+            Tensor vs = v.slice(2, 0, prefix_tokens), os = o.slice(2, 0, prefix_tokens);
+            ops::gated_delta_net_varlen(
+                qs, ks, vs, g.slice(1, 0, prefix_tokens), beta.slice(1, 0, prefix_tokens), scale,
+                true, {table.token_offsets, source.recurrent, target.recurrent},
+                {table.boundary_rows, table.boundary_columns, table.boundary_destinations},
+                target.recurrent.field, static_cast<std::int32_t>(segments.size()),
+                table.boundary_count, work, os, cuda);
+        } else {
+            for (const auto& segment : segments) {
+                const auto begin  = static_cast<std::int32_t>(segment.token_offset);
+                const auto length = static_cast<std::int32_t>(segment.tokens);
+                Tensor source =
+                    view_.states.recurrent_tensor(compact_layer, segment.source_offset);
+                Tensor destination =
+                    view_.states.recurrent_tensor(compact_layer, segment.destination_offset);
+                Tensor qs = q.slice(2, begin, length), ks = k.slice(2, begin, length);
+                Tensor vs = v.slice(2, begin, length), os = o.slice(2, begin, length);
+                ops::gated_delta_net(qs, ks, vs, g.slice(1, begin, length),
+                                     beta.slice(1, begin, length), scale, true, work, source,
+                                     destination, os, cuda);
+            }
         }
         if (mixed) {
             const auto& steps = mixed->steps;

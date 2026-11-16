@@ -169,7 +169,9 @@ public:
             host.residency_slots[row]           = row;
         }
         const auto total = static_cast<std::int32_t>(segments * chunk);
-        const auto host  = frame.host_input_view(total, 1);
+        for (std::uint32_t row = 0; row <= segments; ++row)
+            frame.host_ingress->segment_offsets[row] = static_cast<std::int32_t>(row * chunk);
+        const auto host = frame.host_input_view(total, 1);
         std::fill_n(static_cast<std::int32_t*>(host.ids.data), total, 0);
         auto* positions = static_cast<std::int32_t*>(host.cache_positions.data);
         auto* rope      = static_cast<std::int32_t*>(host.rope_positions.data);

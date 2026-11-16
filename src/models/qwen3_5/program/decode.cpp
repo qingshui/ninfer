@@ -181,7 +181,9 @@ void RankProgramImpl::begin_mixed_target(ComputeOperation& operation) {
         operation.segments,
         {operation.prefill_tokens, static_cast<std::uint32_t>(width),
          static_cast<std::uint32_t>(rows), 0, steps_envelope},
-        operation.speculative ? &*resources.replay_records : nullptr};
+        operation.speculative ? &*resources.replay_records : nullptr,
+        segment_table(static_cast<std::uint32_t>(rows), static_cast<std::uint32_t>(count),
+                      operation.boundaries)};
     resources.work().reset();
     if (std::getenv("NINFER_DEBUG_MIXED")) { // TEMPDEBUG
         CUDA_CHECK(cudaStreamSynchronize(device.stream()));
@@ -252,7 +254,10 @@ void RankProgramImpl::begin_target(ComputeOperation& operation) {
                                  operation.input_embeddings};
     execution::TextStateUpdate update = execution::StepUpdate{};
     if (operation.packed) {
-        update = execution::PackedSequenceUpdate{operation.segments};
+        update = execution::PackedSequenceUpdate{
+            operation.segments,
+            segment_table(0, static_cast<std::uint32_t>(operation.segments.size()),
+                          operation.boundaries)};
     } else if (forward) {
         const auto& row = operation.rows[operation.forward_row];
         update = execution::SequenceUpdate{row.state_offsets.source, row.state_offsets.destination};
@@ -298,7 +303,10 @@ bool RankProgramImpl::replay_prefill_plan(ComputeOperation& operation) {
     // The shape a plan is captured for: every segment is one complete chunk window of text
     // tokens. A shorter or split window, an embedding input or draft feature state is outside
     // every bucket and takes the eager traversal.
-    bool bucket_shaped = !operation.input_embeddings && !resources.dflash && segments != 0;
+    // A plan bakes its launch geometry, so a flight with traversal boundaries takes the eager
+    // path as well.
+    bool bucket_shaped = !operation.input_embeddings && !resources.dflash && segments != 0 &&
+                         operation.boundaries == 0;
     if (packed) {
         for (const auto& segment : operation.segments)
             bucket_shaped = bucket_shaped && segment.tokens == prefill_chunk;
