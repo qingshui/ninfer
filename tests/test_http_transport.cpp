@@ -72,8 +72,8 @@ int test_sse_transport() {
                       "SSE transport emitted a heartbeat before the quiet interval");
     failures +=
         check(!transport.poll(start + 5s) &&
-                  writes == std::vector<std::string>{std::string(SseTransport::kHeartbeatComment)},
-              "SSE transport did not emit the standard comment heartbeat on time");
+                  writes == std::vector<std::string>{std::string(SseTransport::kHeartbeatFrame)},
+              "SSE transport did not emit the blank-line heartbeat on time");
     failures += check(!transport.poll(start + 9999ms) && writes.size() == 1,
                       "SSE heartbeat did not reset the quiet interval");
 
@@ -81,7 +81,7 @@ int test_sse_transport() {
     failures += check(!transport.poll(start + 14999ms) && writes.size() == 2,
                       "normal SSE output did not reset the heartbeat interval");
     failures += check(!transport.poll(start + 15s) && writes.size() == 3 &&
-                          writes.back() == SseTransport::kHeartbeatComment,
+                          writes.back() == SseTransport::kHeartbeatFrame,
                       "quiet SSE output did not resume heartbeats after a data event");
 
     transport.write(std::vector<std::string>{"data: one\n\n", "data: two\n\n"}, start + 16s);

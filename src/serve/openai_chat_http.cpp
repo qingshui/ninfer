@@ -48,8 +48,10 @@ ApiError internal_error(const std::exception& exception) {
 
 // One merged stream of one sample group. Branch workers render their own encoder's SSE events
 // and publish them in arrival order; the transport thread drains the batches, so it stays the
-// only writer to the client. A failed branch cancels its siblings through the shared cancelled
-// flag; `settled` reaches the branch count only after every branch outcome or failure lands.
+// only writer to the client. A failed branch stops its siblings through `abort`; `abort` is the
+// group's own signal and never marks the client gone, so the failure that stopped the group can
+// still reach the client as an error event. `settled` reaches the branch count only after every
+// branch outcome or failure lands.
 struct SampleMerge {
     std::mutex mutex;
     std::condition_variable cv;
@@ -57,6 +59,7 @@ struct SampleMerge {
     std::vector<std::optional<GenerationOutcome>> outcomes;
     std::exception_ptr failure;
     std::size_t settled = 0;
+    std::atomic<bool> abort{false};
 };
 
 constexpr auto kMergePollInterval = std::chrono::milliseconds(250);
@@ -239,8 +242,8 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
                 };
                 // One branch worker per sample: renders its own encoder's SSE events and
                 // publishes them to the merge queue; the transport thread writes them to the
-                // client in arrival order. Client disconnect and a failed branch cancel every
-                // branch through the shared cancelled flag.
+                // client in arrival order. A closed socket marks the shared cancelled flag; a
+                // failed branch stops its siblings through the merge's own abort flag.
                 auto merge = std::make_shared<SampleMerge>();
                 merge->outcomes.resize(sample_count);
                 const auto publish = [merge](std::vector<std::string> events) {
@@ -249,11 +252,11 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
                     merge->pending.push_back(std::move(events));
                     merge->cv.notify_one();
                 };
-                const auto fail_branch = [merge, stream](std::exception_ptr error) {
+                const auto fail_branch = [merge](std::exception_ptr error) {
                     std::lock_guard lock(merge->mutex);
                     if (!merge->failure) { merge->failure = std::move(error); }
                     ++merge->settled;
-                    stream->cancelled.store(true, std::memory_order_release);
+                    merge->abort.store(true, std::memory_order_release);
                     merge->cv.notify_one();
                 };
                 const auto run_branch = [this, stream, encoders, merge, publish, fail_branch,
@@ -313,7 +316,8 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
                             publish(render([&] { return encoder.tool_end(event); }));
                         };
                         output.is_cancelled = [&] {
-                            return stream->cancelled.load(std::memory_order_acquire);
+                            return stream->cancelled.load(std::memory_order_acquire) ||
+                                   merge->abort.load(std::memory_order_acquire);
                         };
                         GenerationOutcome outcome =
                             service_->run(stream->prepared[index], &output);
@@ -368,11 +372,6 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
                                 failure     = merge->failure;
                                 settled_all = merge->settled == sample_count;
                             }
-                            if (failure) {
-                                // A failed branch already cancelled its siblings; let them
-                                // settle before the failure leaves this thread.
-                                stream->cancelled.store(true, std::memory_order_release);
-                            }
                             for (const std::vector<std::string>& batch : batches) {
                                 transport.write(batch);
                             }
@@ -388,7 +387,10 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
                             if (transport.poll()) { continue; }
                         }
                     } catch (...) {
-                        stream->cancelled.store(true, std::memory_order_release);
+                        // Whatever leaves the merge loop (a failed branch, a closed socket)
+                        // stops the remaining branches before it propagates; only a closed
+                        // socket marks the client gone.
+                        merge->abort.store(true, std::memory_order_release);
                         join_branches();
                         throw;
                     }
@@ -414,12 +416,9 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
                 }
 
                 timeline->mark_completed();
-                bool cancelled = stream->cancelled.load(std::memory_order_acquire);
-                for (const GenerationOutcome& outcome : outcomes) {
-                    cancelled |= outcome.finish_reason == ninfer::FinishReason::Cancelled;
-                }
                 // Aggregate request state (usage, [DONE]) rides one terminator chunk after
                 // every branch's finish events, with the same semantics as a single sample.
+                // Only a client that is gone omits it: the transport refuses the write then.
                 std::vector<std::string> terminal;
                 try {
                     terminal = make_chat_stream_sample_terminator(identity, outcomes,
@@ -440,11 +439,6 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
                 }
                 timeline->mark_http_done();
                 lifecycle->done(aggregate_outcomes(outcomes));
-                if (cancelled) {
-                    lifecycle->response_failure(
-                        make_client_disconnected_failure(RequestFailurePhase::Transport));
-                    return false;
-                }
                 sink.done();
                 return true;
             },

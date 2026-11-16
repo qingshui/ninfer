@@ -64,8 +64,8 @@ saturation does not make the Engine unavailable. The endpoint remains unauthenti
 Every OpenAI-compatible response carries a unique `x-request-id` header, including streaming and
 error responses. Anthropic endpoints use their separate `request-id` contract.
 
-All three generation SSE endpoints emit the standard `: keep-alive` comment after five seconds
-without a protocol event. The comment is transport-only: SSE clients ignore it, and it does not
+All three generation SSE endpoints emit a blank line after five seconds without a protocol
+event. The blank line is transport-only: it dispatches no SSE event, and it does not
 change generated text, event ordering, usage, stored Responses, or request logs. On Linux, accepted
 connections also use TCP keepalive and a 15-second `TCP_USER_TIMEOUT`; together with the heartbeat,
 a dead or unacknowledging peer is normally cancelled within about 20 seconds, including while the

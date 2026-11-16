@@ -633,6 +633,19 @@ ContextAssessment ContextDirectory::assess(const ContextDemand& demand,
                 result.status = ContextAvailability::NeedsMaintenance;
             break;
         case PoolAvailability::WaitingForRetirement:
+            // A pending retirement completes only when the work that borrows its addresses
+            // ends: an open transaction is the one thing that can still retire it by itself.
+            // Without one, the record is held by an owner that no execution of this
+            // directory is advancing (a reader pin of a request whose next unit needs this
+            // very capacity), so waiting never ends. Report the shortage as a reclaim
+            // shortage and let the caller reclaim other capacity instead of waiting for a
+            // retirement nothing will deliver.
+            if (address_borrows_ == 0) {
+                result.status = ContextAvailability::NeedsReclaim;
+                break;
+            }
+            result.status = ContextAvailability::Waiting;
+            return result;
         case PoolAvailability::MaintenanceInProgress:
             result.status = ContextAvailability::Waiting;
             return result;

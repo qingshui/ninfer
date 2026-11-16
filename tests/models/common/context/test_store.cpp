@@ -735,6 +735,42 @@ void test_migration_state_fields(ninfer::DeviceContext& device) {
            "State field migration retained a reservation");
 }
 
+
+// A record whose retirement is held by a reader pin that no open transaction advances can never
+// retire by waiting: the shortage must read as a reclaim shortage. While a transaction borrows
+// the directory's addresses its completion may still retire the record, so the demand waits.
+void test_retirement_wait_requires_open_work() {
+    store::ContextDirectory directory({.ranks = {{0, 128, 0}},
+                                       .state = {8, {{0, {{0, 64, 16}}}}},
+                                       .metadata_budget_bytes = 16 * 1024 * 1024});
+    auto& states = directory.states();
+    const auto held   = states.reserve_destination().value();
+    const auto active = states.reserve_destination().value();
+    states.complete_initialization(held);
+    states.complete_initialization(active);
+    states.freeze(held);
+    states.retain_checkpoint_reference(held);
+    auto reader = states.read(held);
+    expect(states.release_checkpoint_owner(held) && states.valid(held),
+           "a pinned State checkpoint retires only after its reader ends");
+
+    store::ContextDemand demand;
+    demand.add_state({.count = 1});
+    expect(directory.assess(demand).status == store::ContextAvailability::NeedsReclaim,
+           "a retirement held by a pin with no open work reported a wait nothing can end");
+    {
+        const auto open = directory.begin_transaction();
+        expect(directory.assess(demand).waiting(),
+               "a retirement behind an open transaction must wait for it");
+    }
+    expect(directory.assess(demand).status == store::ContextAvailability::NeedsReclaim,
+           "closing the transaction left the shortage waiting");
+    reader.reset();
+    expect(!states.valid(held) && directory.assess(demand).ready(),
+           "the retirement did not return its capacity when the reader ended");
+    expect(states.release(active), "retirement wait fixture cleanup");
+}
+
 } // namespace
 
 int main() {
@@ -751,6 +787,7 @@ int main() {
         test_release_set_equality();
         test_rank_local_placement();
         test_state_variants_and_metadata();
+        test_retirement_wait_requires_open_work();
         test_metadata_admission();
         test_mixed_context_demand();
         test_physical_resource_accounting();

@@ -98,7 +98,7 @@ bool SseTransport::poll(Clock::time_point now) {
     if (cancelled_.load(std::memory_order_acquire)) { return true; }
     if (sink_.is_writable && !sink_.is_writable()) { return mark_cancelled(); }
     if (now - last_write_ < heartbeat_interval_) { return false; }
-    if (!sink_.write(kHeartbeatComment.data(), kHeartbeatComment.size())) {
+    if (!sink_.write(kHeartbeatFrame.data(), kHeartbeatFrame.size())) {
         return mark_cancelled();
     }
     last_write_ = now;

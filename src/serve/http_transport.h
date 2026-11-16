@@ -36,7 +36,10 @@ public:
     using Clock = std::chrono::steady_clock;
 
     static constexpr std::chrono::seconds kHeartbeatInterval{5};
-    static constexpr std::string_view kHeartbeatComment = ": keep-alive\n\n";
+    // A blank line outside an event dispatches nothing in an SSE parser. A comment line cannot
+    // serve: line-buffering readers that trim each network read keep ": keep-alive" in their
+    // buffer and glue it to the next event, which then reads as a comment and is lost.
+    static constexpr std::string_view kHeartbeatFrame = "\n";
 
     explicit SseTransport(httplib::DataSink& sink, std::atomic<bool>& cancelled,
                           Clock::duration heartbeat_interval = kHeartbeatInterval,
@@ -46,7 +49,7 @@ public:
     void write(const std::vector<std::string>& items, Clock::time_point now = Clock::now());
 
     // Called by the Engine wait loop. Besides observing an already-closed socket, a quiet stream
-    // periodically writes an SSE comment so TCP_USER_TIMEOUT has traffic with which to detect an
+    // periodically writes a blank line so TCP_USER_TIMEOUT has traffic with which to detect an
     // unacknowledged peer. A failed probe marks the request for cancellation.
     [[nodiscard]] bool poll(Clock::time_point now = Clock::now());
 
