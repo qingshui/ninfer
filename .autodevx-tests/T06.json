@@ -1,9 +1,0 @@
-{
-  "task_id": "T06",
-  "refs": [
-    "F14"
-  ],
-  "files": {
-    "tests/runtime/test_sample_seed.cpp": "2026-11-16T01:24:30"
-  }
-}
