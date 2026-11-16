@@ -213,3 +213,38 @@ def test_matrix_source_modelopt_scale_shape_is_validated(tmp_path):
         source = matrix_source(store, "proj.weight", (2, 16))
         with pytest.raises(ValueError, match="expected F8_E4M3"):
             source.values()
+
+
+def test_names_and_read_names_track_the_tensors_actually_read(tmp_path):
+    save_file(
+        {"a": torch.arange(4.0), "b": torch.ones(2), "c": torch.zeros(3)},
+        tmp_path / "model.safetensors",
+    )
+    with SafetensorsSource(tmp_path) as store:
+        assert store.names() == ("a", "b", "c")
+        assert store.read_names() == frozenset()
+        store.describe("b")
+        store.read_flat("a", 0, 2)
+        store.read_flat("c", 1, 1)
+        assert store.read_names() == frozenset({"a"})
+
+
+def test_conversion_replaces_stale_multi_file_output(tmp_path):
+    from tools.convert.model import Model, Parameter
+    from tools.convert.pipeline import convert
+    from tools.convert.recipe import Recipe
+    from tools.convert.sources.logical import LogicalSource
+
+    model = Model({"text": {"config": {}}})
+    values = lambda begin, end: torch.ones(end - begin, dtype=torch.bfloat16)  # noqa: E731
+    model.add(Parameter("w", (8, 16), LogicalSource((8, 16), "ones", values)))
+    output = tmp_path / "model.ninfer"
+    for stale in ("", ".part-0001", ".part-0002", ".conversion.json"):
+        (tmp_path / ("model.ninfer" + stale)).write_bytes(b"stale")
+    unrelated = tmp_path / "model.ninfer.part-notes"
+    unrelated.write_bytes(b"keep")
+    report = convert(model, Recipe(model), output, device="cpu")
+    assert report["unconverted_objects"] == 0 and report["source_coverage"] is None
+    assert output.read_bytes()[:5] != b"stale"
+    assert not (tmp_path / "model.ninfer.part-0001").exists()
+    assert unrelated.read_bytes() == b"keep"

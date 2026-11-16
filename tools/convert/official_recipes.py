@@ -219,6 +219,11 @@ def qwen3_5_122b_nvfp4(model, recipe, sources):
     recipe.place("text/*", (0,))
     if "vision" in model.components:
         recipe.place("vision/*", (1, 0))
+    else:
+        recipe.ignore_sources("unselected_vision", ("model.visual.*",))
+    # This recipe rejects MTP above, so the draft head is always an unselected component.
+    recipe.ignore_sources("unselected_mtp", ("mtp.*",))
+    recipe.require_source_coverage()
     for name, parameter in model.parameters.items():
         if not name.startswith("text/layers/") or not parameter.projection:
             continue

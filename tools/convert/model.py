@@ -35,6 +35,9 @@ class Model:
     token_count: int = 0
     special_token_ids: tuple[int, ...] = ()
     proposal_domain: str = "indexed"
+    # Primary checkpoint the logical parameters were mapped from; None for adapters
+    # that do not publish one. Source-coverage accounting audits this checkpoint.
+    base: SafetensorsSource | None = None
 
     @property
     def config(self) -> dict:

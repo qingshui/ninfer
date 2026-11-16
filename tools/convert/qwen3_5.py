@@ -1015,7 +1015,11 @@ def build_model(
     for component, resource_refs in refs.items():
         records[component]["resources"] = resource_refs
     model = Model(
-        records, resources=resources, token_count=count, special_token_ids=special
+        records,
+        resources=resources,
+        token_count=count,
+        special_token_ids=special,
+        base=base,
     )
     builder = _Builder(model)
     h, r = config["hidden_size"], config["vocab_size"]

@@ -200,6 +200,28 @@ def test_nested_config_with_flat_prefix_resolves_flat_source_names(tmp_path):
         assert "model.layers.1.self_attn.q_proj.weight" in query.source.label
 
 
+@pytest.mark.parametrize(
+    "prefix", ["model.", "model.language_model."], ids=["flat", "language_model"]
+)
+def test_config_without_text_config_resolves_either_tensor_prefix(tmp_path, prefix):
+    nested = _config()
+    config = {"architectures": nested["architectures"], **nested["text_config"]}
+    assert "text_config" not in config
+    q_gate = torch.arange(32 * 16).float().reshape(32, 16)
+    tensors = {
+        prefix + "embed_tokens.weight": torch.zeros(8, 16),
+        prefix + "layers.1.self_attn.q_proj.weight": q_gate,
+    }
+    with _checkpoint(tmp_path / "no-text-config", config, tensors) as source:
+        model = build_model(source)
+        assert model.config["hidden_size"] == 16
+        embed = model.parameters["text/token_embedding"]
+        assert prefix + "embed_tokens.weight" in embed.source.label
+        query = model.parameters["text/layers/1/attention/query"]
+        assert prefix + "layers.1.self_attn.q_proj.weight" in query.source.label
+        assert model.base is source
+
+
 def test_missing_text_prefix_reports_every_probed_candidate(tmp_path):
     tensors = {"unused": torch.ones(1)}
     with _checkpoint(tmp_path / "prefixless", _config(), tensors) as source:

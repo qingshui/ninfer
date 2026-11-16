@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
+import glob
 import json
 from pathlib import Path
 import shutil
@@ -45,7 +46,10 @@ def convert(
     # 覆盖语义：裁判脚本（spark_gate.py）每次运行都用当前树重建产物，上一轮中断可能
     # 留下旧/半成品输出。已存在的输出一律视为陈旧，清掉后重建（避免 FileExistsError
     # 卡死每次必重跑的调用方）。
-    for stale in (report_path, path):
+    stale_parts = sorted(
+        path.parent.glob(glob.escape(path.name) + ".part-[0-9][0-9][0-9][0-9]")
+    )
+    for stale in (report_path, path, *stale_parts):
         if stale.is_dir():
             shutil.rmtree(stale)
         elif stale.exists() or stale.is_symlink():
@@ -120,8 +124,10 @@ def convert(
         ) as writer:
             for object_id, data in model.resources.items():
                 writer.write_object(object_id, data)
+            written = len(model.resources)
             for spec, data in prepared.auxiliaries:
                 writer.write_object(spec.id, data)
+                written += 1
             for index, job in enumerate(prepared.weights):
                 if progress is not None:
                     progress(index, len(prepared.weights), job)
@@ -134,6 +140,16 @@ def convert(
                         f"{label} [{job.method_name}/{job.spec.format}]: {error}"
                     ) from error
                 report["methods"][index]["seconds"] = time.perf_counter() - job_start
+                written += 1
+            report["unconverted_objects"] = len(specs) - written
+            report["source_coverage"] = recipe.source_coverage()
+            coverage = report["source_coverage"]
+            if recipe.source_coverage_required and coverage["unaccounted"]:
+                raise ValueError(
+                    f"{coverage['unaccounted']} of {coverage['total']} base tensors "
+                    "are neither consumed nor ignored, e.g. "
+                    + ", ".join(coverage["unaccounted_examples"][:5])
+                )
             report["artifact_id"] = writer.artifact_id.hex()
             report["files"] = [
                 {

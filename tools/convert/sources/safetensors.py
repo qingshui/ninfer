@@ -52,6 +52,7 @@ class SafetensorsSource:
         self._headers: dict[Path, dict[str, TensorInfo]] = {}
         self._fds: OrderedDict[Path, int] = OrderedDict()
         self.bytes_read = 0
+        self._read_names: set[str] = set()
         if self.path.is_file() and self.path.suffix == ".safetensors":
             file = self.path
             self.weight_map = {name: file for name in self._header(file)}
@@ -106,6 +107,14 @@ class SafetensorsSource:
     def has(self, name: str) -> bool:
         return name in self.weight_map
 
+    def names(self) -> tuple[str, ...]:
+        """Every tensor name the source index publishes, in sorted order."""
+        return tuple(sorted(self.weight_map))
+
+    def read_names(self) -> frozenset[str]:
+        """Names whose values were read, including every tensor read in full."""
+        return frozenset(self._read_names)
+
     def describe(self, name: str) -> TensorInfo:
         try:
             file = self.weight_map[name]
@@ -144,6 +153,8 @@ class SafetensorsSource:
         if info.bytes != elements * word_bytes:
             raise ValueError(f"{name}: source byte count disagrees with shape/dtype")
         if begin == end:
+            if elements == 0:
+                self._read_names.add(name)
             return torch.empty(0, dtype=dtype)
         count = (end - begin) * word_bytes
         fd = self._file(info.file)
@@ -152,6 +163,7 @@ class SafetensorsSource:
         if os.preadv(fd, [raw], offset) != count:
             raise ValueError(f"{name}: short source read")
         self.bytes_read += count
+        self._read_names.add(name)
         discard_cached_pages(fd, offset, count)
         return torch.frombuffer(raw, dtype=dtype)
 

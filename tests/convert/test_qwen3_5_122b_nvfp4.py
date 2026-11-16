@@ -278,3 +278,40 @@ def test_unquantized_roles_stay_cast_direct_and_vocabulary_uses_q8(tmp_path):
         assert _job(prepared, name).method_name == "cast_direct", name
     for name in ("text/token_embedding", "text/output_head"):
         assert _job(prepared, name).spec.format == "q8_g32_fp16", name
+
+
+def _convert(tmp_path, tensors):
+    from tools.convert.pipeline import convert
+
+    with _checkpoint(tmp_path / "source", tensors) as source:
+        model = build_model(source)
+        recipe = Recipe(model)
+        qwen3_5_122b_nvfp4(model, recipe, {"base": source})
+        output = tmp_path / "out.ninfer"
+        report = convert(model, recipe, output, device="cpu", rows_per_chunk=64)
+        return output, report, len(source.names())
+
+
+def test_conversion_report_accounts_every_source_tensor(tmp_path):
+    tensors = _tensors()
+    tensors["model.visual.patch_embed.proj.weight"] = torch.zeros(2, 2)
+    tensors["mtp.fc.weight"] = torch.zeros(2, 2)
+    output, report, total = _convert(tmp_path, tensors)
+    coverage = report["source_coverage"]
+    assert coverage["total"] == total == len(tensors)
+    assert coverage["ignored"] == 2 and coverage["unaccounted"] == 0
+    assert coverage["consumed"] + coverage["ignored"] == total
+    assert coverage["unaccounted_examples"] == []
+    assert coverage["ignored_by_rule"] == {"unselected_vision": 1, "unselected_mtp": 1}
+    assert report["unconverted_objects"] == 0
+    text = Path(str(output) + ".conversion.json").read_text().lower()
+    assert "missing" not in text and "failed" not in text
+
+
+def test_unaccounted_source_tensor_aborts_conversion(tmp_path):
+    tensors = _tensors()
+    tensors["model.layers.0.unexpected.weight"] = torch.zeros(2, 2)
+    with pytest.raises(ValueError, match="neither consumed nor ignored") as error:
+        _convert(tmp_path, tensors)
+    assert "model.layers.0.unexpected.weight" in str(error.value)
+    assert not (tmp_path / "out.ninfer").exists()

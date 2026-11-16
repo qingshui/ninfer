@@ -125,6 +125,8 @@ class Recipe:
         self.placements = {}
         self.auxiliary_tensors = {}
         self.auxiliary_references = {}
+        self.source_ignores: dict[str, tuple[str, ...]] = {}
+        self.source_coverage_required = False
         for parameter in model.parameters.values():
             self.add_parameter(parameter.name)
 
@@ -300,6 +302,63 @@ class Recipe:
         ):
             raise ValueError("auxiliary tensor size differs from its representation")
         self.auxiliary_tensors[name] = value
+
+    def ignore_sources(self, rule: str, patterns: Sequence[str]) -> None:
+        """Declare base-checkpoint tensors (fnmatch patterns) that conversion leaves unread.
+
+        Rule names appear in the conversion report, so they must not contain the
+        words the end-to-end gate scans reports for.
+        """
+        if not isinstance(rule, str) or not rule:
+            raise ValueError("source ignore rule needs a nonempty name")
+        if any(word in rule.lower() for word in ("missing", "failed")):
+            raise ValueError(f"source ignore rule name {rule!r} is reserved")
+        if rule in self.source_ignores:
+            raise ValueError(f"duplicate source ignore rule {rule!r}")
+        if isinstance(patterns, str) or not patterns:
+            raise ValueError(f"{rule}: provide a nonempty sequence of patterns")
+        if any(not isinstance(pattern, str) or not pattern for pattern in patterns):
+            raise ValueError(f"{rule}: source patterns must be nonempty strings")
+        self.source_ignores[rule] = tuple(patterns)
+
+    def require_source_coverage(self) -> None:
+        """Require every base tensor to be consumed or ignored when conversion ends."""
+        if self.model.base is None:
+            raise ValueError(
+                "source coverage requires a model that publishes its base checkpoint"
+            )
+        self.source_coverage_required = True
+
+    def source_coverage(self) -> dict | None:
+        """Account for each base tensor as consumed, ignored by a rule, or unaccounted.
+
+        Consumption is what the source actually read, so call this after production.
+        A tensor that was read counts as consumed even when a rule also matches it.
+        """
+        base = self.model.base
+        if base is None:
+            return None
+        read = base.read_names()
+        by_rule = {rule: 0 for rule in self.source_ignores}
+        consumed, unaccounted = 0, []
+        for name in base.names():
+            if name in read:
+                consumed += 1
+                continue
+            for rule, patterns in self.source_ignores.items():
+                if any(fnmatchcase(name, pattern) for pattern in patterns):
+                    by_rule[rule] += 1
+                    break
+            else:
+                unaccounted.append(name)
+        return {
+            "total": len(base.names()),
+            "consumed": consumed,
+            "ignored": sum(by_rule.values()),
+            "unaccounted": len(unaccounted),
+            "unaccounted_examples": unaccounted[:20],
+            "ignored_by_rule": by_rule,
+        }
 
     def place(self, selectors, order: tuple[int, ...]) -> None:
         for name in self.match(selectors):

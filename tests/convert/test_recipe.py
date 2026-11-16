@@ -396,3 +396,17 @@ def test_private_component_storage_cannot_be_packed_with_target_weights():
     prepared = shared.prepare(device="cpu")
     assert len(prepared.weights) == 1
     assert prepared.bindings["draft"] == prepared.bindings["target"]
+
+
+def test_source_coverage_rules_are_validated_and_require_a_base_checkpoint():
+    recipe = Recipe(_model())
+    with pytest.raises(ValueError, match="reserved"):
+        recipe.ignore_sources("Missing_parts", ("x.*",))
+    with pytest.raises(ValueError, match="nonempty sequence"):
+        recipe.ignore_sources("rule", ())
+    recipe.ignore_sources("rule", ("x.*",))
+    with pytest.raises(ValueError, match="duplicate"):
+        recipe.ignore_sources("rule", ("y.*",))
+    with pytest.raises(ValueError, match="base checkpoint"):
+        recipe.require_source_coverage()
+    assert recipe.source_coverage() is None
