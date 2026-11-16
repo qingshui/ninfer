@@ -1,0 +1,11 @@
+{
+  "task_id": "T2",
+  "refs": [
+    "F4",
+    "F5",
+    "F7"
+  ],
+  "files": {
+    "tests/models/qwen3_5/test_segment_table.cpp": "2026-11-17T03:16:28"
+  }
+}
