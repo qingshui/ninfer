@@ -2,6 +2,8 @@
 #include <array>
 #include "ops/common/host/operands.h"
 #include "ops/linear_attention/causal_conv/launch.h"
+#include "ops/linear_attention/causal_conv/varlen.h"
+#include "core/platform.h"
 #include <cstdint>
 #include <limits>
 #include <stdexcept>
@@ -241,6 +243,122 @@ void causal_conv1d_silu_split(const Tensor& x, const Tensor& weight, const Tenso
 
     detail::launch_causal_conv_split(x, weight, conv_state_in, conv_state_out, out0, out1, out2,
                                      geometry, stream);
+}
+
+void causal_conv1d_silu_split_varlen(const Tensor& x, const Tensor& weight, ConvVarlenRows rows,
+                                     const Tensor& boundary_rows, const Tensor& boundary_columns,
+                                     const Tensor& boundary_offsets,
+                                     StateFieldLayout checkpoint_field, std::int32_t row_count,
+                                     std::int32_t boundary_count, Tensor& out0, Tensor& out1,
+                                     Tensor& out2, CudaExecutionView execution) {
+    constexpr const char* op = "causal_conv1d_silu_split_varlen";
+    const std::int32_t channels = x.ne[0], tokens = x.ne[1];
+    const std::string geometry = "channels=" + std::to_string(channels) +
+                                 " R=" + std::to_string(row_count) +
+                                 " C=" + std::to_string(boundary_count) +
+                                 " T=" + std::to_string(tokens);
+    const auto reject = [&](const std::string& what) {
+        throw std::invalid_argument(std::string(op) + ": " + what + " (" + geometry + ")");
+    };
+    if (row_count < 1 || row_count > detail::kCausalConvVarlenMaxRows)
+        reject("R must be in [1,1024]");
+    if (boundary_count < 0 || boundary_count > detail::kCausalConvVarlenMaxBoundaries)
+        reject("C must be in [0,1024]");
+    if (tokens < row_count || boundary_count > tokens - row_count)
+        reject("every row needs a token and every boundary an extra one: T>=R and C<=T-R");
+
+    detail::CausalConvSplitGeometry profile{};
+    try {
+        if (x.dtype != DType::BF16 || weight.dtype != DType::BF16)
+            throw std::invalid_argument("causal_conv1d: x/weight must be BF16");
+        require_x_shape(x);
+        require_weight_shape(weight, channels);
+        profile = require_split_geometry(x, out0, out1, out2);
+
+        const std::pair<const Tensor*, const char*> operands[5] = {
+            {&x, "x"}, {&weight, "weight"}, {&out0, "out0"}, {&out1, "out1"}, {&out2, "out2"}};
+        for (const auto& operand : operands) {
+            common::operand::contiguous_nonnull(*operand.first, "causal_conv1d", operand.second,
+                                                execution.device());
+            require_pair_aligned(*operand.first, operand.second);
+        }
+        for (int i = 0; i < 5; ++i) {
+            for (int j = i + 1; j < 5; ++j) {
+                if (common::operand::overlaps(common::operand::range(*operands[i].first, op),
+                                              common::operand::range(*operands[j].first, op))) {
+                    throw std::invalid_argument(
+                        std::string("causal_conv1d: varlen operands must not overlap: ") +
+                        operands[i].second + " and " + operands[j].second);
+                }
+            }
+        }
+
+        common::operand::tensor(rows.token_offsets, DType::I32, {row_count + 1},
+                                alignof(std::int32_t), op, "token offsets", execution.device());
+        common::operand::state_field(rows.source, DType::BF16, {channels, 3}, 4, op, "source",
+                                     execution.device());
+        common::operand::state_field(rows.destination, DType::BF16, {channels, 3}, 4, op,
+                                     "destination", execution.device());
+        for (const Tensor* offsets :
+             {&rows.source.records.byte_offsets, &rows.destination.records.byte_offsets}) {
+            if (offsets->ne[0] != row_count || offsets->ne[1] != 1 || offsets->ne[2] != 1 ||
+                offsets->ne[3] != 1) {
+                throw std::invalid_argument(
+                    "causal_conv1d: state byte offsets must select exactly R records");
+            }
+        }
+        if (rows.source.field.layers != 1 || rows.destination.field.layers != 1)
+            throw std::invalid_argument("causal_conv1d: select one conv state layer");
+
+        if (boundary_count > 0) {
+            common::operand::tensor(boundary_rows, DType::I32, {boundary_count},
+                                    alignof(std::int32_t), op, "boundary rows",
+                                    execution.device());
+            common::operand::tensor(boundary_columns, DType::I32, {boundary_count},
+                                    alignof(std::int32_t), op, "boundary columns",
+                                    execution.device());
+            common::operand::tensor(boundary_offsets, DType::I64, {boundary_count},
+                                    alignof(std::int64_t), op, "boundary offsets",
+                                    execution.device());
+            if (checkpoint_field.layers != 1)
+                throw std::invalid_argument("causal_conv1d: select one checkpoint state layer");
+            const StateFieldView checkpoint{rows.destination.records, checkpoint_field};
+            common::operand::state_field(checkpoint, DType::BF16, {channels, 3}, 4, op,
+                                         "checkpoint field", execution.device(), false);
+        }
+    } catch (const std::invalid_argument& error) {
+        reject(error.what());
+    }
+
+#if NINFER_TARGET_SPARK
+    // The varlen kernels are built for the other targets only.
+    (void)profile;
+    reject("not available on this target");
+#else
+    const detail::CausalConvVarlenOperands operands{
+        static_cast<const __nv_bfloat16*>(x.data),
+        static_cast<const __nv_bfloat16*>(weight.data),
+        static_cast<const std::int32_t*>(rows.token_offsets.data),
+        static_cast<const std::byte*>(rows.source.records.storage.data) +
+            rows.source.field.tensor.region.offset,
+        static_cast<const std::int64_t*>(rows.source.records.byte_offsets.data),
+        static_cast<std::byte*>(rows.destination.records.storage.data) +
+            rows.destination.field.tensor.region.offset,
+        static_cast<const std::int64_t*>(rows.destination.records.byte_offsets.data),
+        static_cast<std::byte*>(rows.destination.records.storage.data) +
+            checkpoint_field.tensor.region.offset,
+        static_cast<const std::int32_t*>(boundary_rows.data),
+        static_cast<const std::int32_t*>(boundary_columns.data),
+        static_cast<const std::int64_t*>(boundary_offsets.data),
+        static_cast<__nv_bfloat16*>(out0.data),
+        static_cast<__nv_bfloat16*>(out1.data),
+        static_cast<__nv_bfloat16*>(out2.data),
+        channels,
+        tokens,
+        row_count,
+        boundary_count};
+    detail::launch_causal_conv_split_varlen(operands, profile, execution.stream());
+#endif
 }
 
 void causal_conv1d_silu(const Tensor& x, const Tensor& weight, Tensor& conv_state, Tensor& out,

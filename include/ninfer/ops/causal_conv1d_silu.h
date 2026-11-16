@@ -40,6 +40,43 @@ void causal_conv1d_silu_split(const Tensor& x, const Tensor& weight, const Tenso
                               CudaExecutionView execution);
 
 /**
+ * Row table for causal_conv1d_silu_split_varlen. `token_offsets` is device I32 [R+1], strictly
+ * increasing with [0]=0 and [R]=T=x.ne[1]; row r owns columns [offsets[r], offsets[r+1]).
+ * `source` and `destination` select BF16 [C,3] fields (one layer) with device I64 [R] record byte
+ * offsets. A source may exactly alias its own row's destination; destinations of different rows
+ * and checkpoint records do not overlap anything else.
+ */
+struct ConvVarlenRows {
+    Tensor token_offsets;
+    ConstStateFieldView source;
+    StateFieldView destination;
+};
+
+/**
+ * Varlen split form: every row of the packed column axis is an independent causal sequence that
+ * starts from its own source window. `x` is BF16 [C,T], `weight` BF16 [C,4], and out0/out1/out2
+ * follow the row profiles of causal_conv1d_silu_split. The outputs are bit-identical to calling
+ * the split form once per row, or once per sub-segment between boundaries. Row r publishes the
+ * trailing window of concat(source window, its columns) to its destination record. Boundary i
+ * (device I32 rows/columns [C], device I64 offsets [C], sorted by row then strictly increasing
+ * column in [1, tokens(row)-1]) with offsets[i]>=0 additionally writes the window after that
+ * column to the checkpoint record at that arena-relative byte offset inside
+ * destination.records.storage, laid out by `checkpoint_field` (BF16 [C,3], one layer); offset -1
+ * is a traversal boundary and writes nothing. C=0 uses empty boundary tensors.
+ *
+ * `row_count` is R in [1,1024] and `boundary_count` is C in [0,1024]. A row profile or geometry
+ * outside the supported domain throws std::invalid_argument naming the channel count, R, C (the
+ * boundary count) and T. Operands
+ * are four-byte aligned and do not overlap except for the exact source/destination alias.
+ */
+void causal_conv1d_silu_split_varlen(const Tensor& x, const Tensor& weight, ConvVarlenRows rows,
+                                     const Tensor& boundary_rows, const Tensor& boundary_columns,
+                                     const Tensor& boundary_offsets,
+                                     StateFieldLayout checkpoint_field, std::int32_t row_count,
+                                     std::int32_t boundary_count, Tensor& out0, Tensor& out1,
+                                     Tensor& out2, CudaExecutionView execution);
+
+/**
  * Snapshot form for B independent sequences. `x` and `out` are contiguous BF16 [C,W,B],
  * `source` selects a BF16 [C,3] field with device I64 [B] arena-relative byte offsets.
  * `snapshots` is contiguous BF16 [C,3,N], and `snapshot_base_slots` is contiguous I32 [B].

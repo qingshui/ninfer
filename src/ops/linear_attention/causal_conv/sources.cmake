@@ -5,3 +5,6 @@ target_sources(ninfer_ops PRIVATE
 if(NINFER_TARGET STREQUAL "dgx_spark")
   target_sources(ninfer_ops PRIVATE "${CMAKE_CURRENT_LIST_DIR}/dgx_spark/split.cu")
 endif()
+if(NOT NINFER_TARGET STREQUAL "dgx_spark")
+  target_sources(ninfer_ops PRIVATE "${CMAKE_CURRENT_LIST_DIR}/varlen.cu")
+endif()

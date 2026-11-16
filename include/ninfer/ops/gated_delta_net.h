@@ -75,6 +75,67 @@ void gated_delta_net_batch_update(const Tensor& q, const Tensor& k, const Tensor
                                   StateFieldView destination_state, Tensor& out,
                                   CudaExecutionView execution);
 
+/**
+ * Row table for gated_delta_net_varlen. R rows are consecutive token ranges of one packed
+ * sequence axis: `token_offsets` is device I32 [R+1], strictly increasing, with [0]=0 and [R]=T.
+ * `source` and `destination` select dense FP32 [128,128,Hv] fields (one layer) with device I64 [R]
+ * record byte offsets. Row r starts from source record r and publishes its final state to
+ * destination record r. A source may exactly alias its own row's destination. Destinations of
+ * different rows do not overlap each other, any source other than the row's own, or any
+ * checkpoint record.
+ */
+struct GdnVarlenRows {
+    Tensor token_offsets;
+    ConstStateFieldView source;
+    StateFieldView destination;
+};
+
+/**
+ * Traversal boundaries inside rows, sorted by (row, column). Entry i splits row rows[i] after
+ * columns[i] tokens of that row: `rows` is device I32 [C] and non-decreasing, `columns` is device
+ * I32 [C] with values in [1, tokens(row)-1], strictly increasing within a row. Entry i with
+ * destination_offsets[i] >= 0 also writes the state after that column to the checkpoint record at
+ * that arena-relative byte offset; -1 makes it a traversal boundary only. C=0 uses empty tensors.
+ */
+struct GdnVarlenBoundaries {
+    Tensor rows;
+    Tensor columns;
+    Tensor destination_offsets; // device I64 [C]
+};
+
+/**
+ * Returns the transient arena capacity required by gated_delta_net_varlen for every call whose
+ * rows, tokens and boundaries do not exceed the arguments. The profile must be (Hq,Hv) in
+ * {(16,32),(16,48),(16,64)} with max_rows in [1,1024], max_boundaries in [0,1024] and
+ * max_tokens >= max_rows; otherwise std::invalid_argument is thrown.
+ */
+[[nodiscard]] std::size_t gated_delta_net_varlen_workspace_capacity_bytes(
+    std::int32_t qk_heads, std::int32_t value_heads, std::int32_t max_rows,
+    std::int32_t max_tokens, std::int32_t max_boundaries);
+
+/**
+ * Applies the recurrence of gated_delta_net to R independent rows of a packed token axis in one
+ * call. q/k are BF16 [128,Hq,T], v/out BF16 [128,Hv,T], g/beta FP32 [Hv,T]. Each row is traversed
+ * as consecutive sub-segments cut at its boundaries. The call is bit-identical to invoking the
+ * distinct-state gated_delta_net once per sub-segment in order, with sub-segment k reading the
+ * state that sub-segment k-1 produced (the row source for k=0), the last sub-segment writing the
+ * row destination and every boundary with destination_offsets[i]>=0 writing its checkpoint
+ * record (checkpoint records live in destination.records.storage and are laid out by
+ * `checkpoint_field`, dense FP32 [128,128,Hv], one layer). Chunks start at the row start and at
+ * every boundary. Intermediate state of a row may be staged in that row's destination record.
+ *
+ * `row_count` is R in [1,1024] and `boundary_count` is C in [0,1024]; T is q.ne[2]. Row and
+ * boundary tables are consumed on the device and are not read back. A profile or geometry outside
+ * the supported domain throws std::invalid_argument naming Hq, Hv, R, C and T. `ws` supplies
+ * the scratch reported by gated_delta_net_varlen_workspace_capacity_bytes, scoped to the call.
+ * Inputs and out do not overlap each other, any source, destination or checkpoint record.
+ */
+void gated_delta_net_varlen(const Tensor& q, const Tensor& k, const Tensor& v, const Tensor& g,
+                            const Tensor& beta, float scale, bool normalize_qk, GdnVarlenRows rows,
+                            GdnVarlenBoundaries boundaries, StateFieldLayout checkpoint_field,
+                            std::int32_t row_count, std::int32_t boundary_count, MemoryArena& ws,
+                            Tensor& out, CudaExecutionView execution);
+
 struct GdnRecurrenceRecords {
     Tensor key;   // BF16 [128,Hq,T,B], raw represented key words.
     Tensor value; // BF16 [128,Hv,T,B], raw represented value words.

@@ -12,3 +12,11 @@ target_sources(ninfer_ops PRIVATE
   "${CMAKE_CURRENT_LIST_DIR}/replay/record.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/replay/${NINFER_TARGET}/record.cu"
 )
+
+# The varlen recurrence is shared by the targets that carry the chunked kernels' MMA shapes.
+if(NOT NINFER_TARGET STREQUAL "dgx_spark")
+  target_sources(ninfer_ops PRIVATE
+    "${CMAKE_CURRENT_LIST_DIR}/recurrence/varlen/recurrence.cu"
+    "${CMAKE_CURRENT_LIST_DIR}/recurrence/varlen/varlen.cpp"
+  )
+endif()

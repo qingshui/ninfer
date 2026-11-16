@@ -7,3 +7,9 @@ ninfer_add_op_test(ninfer_gated_delta_net_replay_record_test
 ninfer_add_op_test(ninfer_gdn_replay_fold_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_fold.cpp"
   LIBRARIES ninfer_ops)
+
+if(NOT NINFER_TARGET STREQUAL "dgx_spark")
+  ninfer_add_op_test(ninfer_gated_delta_net_varlen_test
+    SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_varlen.cpp"
+    LIBRARIES ninfer_ops)
+endif()
