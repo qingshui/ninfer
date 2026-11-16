@@ -2,6 +2,9 @@
 #include "ops/moe/operands.h"
 #include "core/platform.h"
 
+#include <stdexcept>
+#include <string>
+
 namespace ninfer::ops::detail::moe_routed {
 
 const ShapePolicy& shape_dispatch(const RoutedSwiGLUProfile& profile) {
@@ -29,7 +32,10 @@ const ShapePolicy& shape_dispatch(const RoutedSwiGLUProfile& profile) {
     switch (profile.ffn.down_type) {
     case QType::FP8_E4M3FN_BLOCK128X128_BF16:
 #if NINFER_TARGET_B200
-        throw std::invalid_argument("moe routed swiglu: fp8 is not available on b200");
+        throw std::invalid_argument("moe routed swiglu: fp8 is not available on b200,"
+                                    " hidden=" +
+                                    std::to_string(profile.ffn.hidden) + " intermediate=" +
+                                    std::to_string(profile.ffn.intermediate));
 #else
         return fp8_h2560_i640_e512_k10();
 #endif
@@ -43,7 +49,10 @@ const ShapePolicy& shape_dispatch(const RoutedSwiGLUProfile& profile) {
         }
 #if NINFER_TARGET_B200
         // The 2560/640/512/10 profile ran block-scaled mma.sync, an SM120 instruction.
-        throw std::invalid_argument("moe routed swiglu: mma.sync is not available on b200");
+        throw std::invalid_argument("moe routed swiglu: mma.sync is not available on b200,"
+                                    " hidden=" +
+                                    std::to_string(profile.ffn.hidden) + " intermediate=" +
+                                    std::to_string(profile.ffn.intermediate));
 #else
         return nvfp4_h2560_i640_e512_k10();
 #endif

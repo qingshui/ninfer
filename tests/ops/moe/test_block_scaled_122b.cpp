@@ -7,6 +7,8 @@
 #include "ops/moe/backend.h"
 #include "ops/moe/kernels/cuda/block_scaled/nvfp4/schedule.h"
 #include "ops/moe/operands.h"
+#include "ops/moe/routed_swiglu/cuda/dispatch.h"
+#include "ops/moe/topk_softmax_swiglu_moe/dispatch.h"
 #include "ops/op_tester.h"
 #include "ops/quantized_weight.h"
 
@@ -419,6 +421,47 @@ int validate_cases(Fixture&) {
     return failures;
 }
 
+// The 122B profile resolves to a kernel family on rtx5090 and b200 for both entries. On b200 the
+// 2560/640/512/10 mma.sync profile has no kernel and the rejection names its geometry.
+int dispatch_cases(Fixture&) {
+    namespace detail = ninfer::ops::detail;
+    int failures     = 0;
+    try {
+        (void)detail::moe_routed::shape_dispatch(make_profile().routed);
+        (void)detail::moe_complete::shape_dispatch(make_profile());
+    } catch (const std::invalid_argument& error) {
+        std::cerr << "dispatch: registered h3072_i1024_e256_k8 rejected: " << error.what() << '\n';
+        ++failures;
+    }
+#if NINFER_TARGET_B200
+    auto other                 = make_profile();
+    other.routed.ffn.hidden    = 2560;
+    other.routed.ffn.intermediate = 640;
+    other.routed.experts       = 512;
+    other.routed.top_k         = 10;
+    other.shared.hidden        = 2560;
+    other.shared.intermediate  = 640;
+    const auto expect_geometry = [&](auto call, const char* label) {
+        try {
+            call();
+            std::cerr << "dispatch: " << label << " expected rejection missing\n";
+            ++failures;
+        } catch (const std::invalid_argument& error) {
+            const std::string message = error.what();
+            if (message.find("2560") == std::string::npos ||
+                message.find("640") == std::string::npos) {
+                std::cerr << "dispatch: " << label << " message lacks geometry: " << message
+                          << '\n';
+                ++failures;
+            }
+        }
+    };
+    expect_geometry([&] { (void)detail::moe_routed::shape_dispatch(other.routed); }, "routed");
+    expect_geometry([&] { (void)detail::moe_complete::shape_dispatch(other); }, "complete");
+#endif
+    return failures;
+}
+
 // Backend routing and tuning contract of the b200 tcgen05 path: moe_backend selects the engine,
 // the tuning resolver rejects tiles and groupings the grouped kernels do not provide, and the
 // grouped kernels reject indexed (non-affine) expert banks.
@@ -532,6 +575,7 @@ void add_cases(OpSuite& suite) {
         runners.push_back(run);
     };
     add("validate", [](Fixture& f, auto) { return validate_cases(f); });
+    add("dispatch", [](Fixture& f, auto) { return dispatch_cases(f); });
     add("backend", [](Fixture& f, auto e) { return backend_cases(f, e); });
     for (int t : {1, 33, 130, 520})
         add("route/t" + std::to_string(t),

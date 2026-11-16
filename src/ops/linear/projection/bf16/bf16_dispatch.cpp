@@ -3,6 +3,7 @@
 #include "core/platform.h"
 #include <array>
 #include <stdexcept>
+#include <string>
 
 namespace ninfer::ops::detail {
 namespace {
@@ -75,7 +76,8 @@ Bf16Launch select_bf16_a16_launch(std::int32_t n, std::int32_t k, std::int32_t t
     for (const auto& entry : kShapes) {
         if (entry.n == n && entry.k == k) return entry.select(t);
     }
-    throw std::invalid_argument("bf16 linear: unsupported shape");
+    throw std::invalid_argument("bf16 linear: unsupported shape n=" + std::to_string(n) +
+                                " k=" + std::to_string(k));
 }
 
 Bf16Launch select_bf16_launch(std::int32_t n, std::int32_t k, std::int32_t t, LinearPolicy policy) {

@@ -2,6 +2,9 @@
 #include "ops/moe/topk_softmax_swiglu_moe/dispatch.h"
 #include "ops/moe/operands.h"
 
+#include <stdexcept>
+#include <string>
+
 namespace ninfer::ops::detail::moe_complete {
 
 const ShapePolicy& shape_dispatch(const MoeProfile& profile) {
@@ -14,7 +17,10 @@ const ShapePolicy& shape_dispatch(const MoeProfile& profile) {
     switch (profile.routed.ffn.down_type) {
     case QType::FP8_E4M3FN_BLOCK128X128_BF16:
 #if NINFER_TARGET_B200
-        throw std::invalid_argument("topk softmax swiglu moe: fp8 is not available on b200");
+        throw std::invalid_argument("topk softmax swiglu moe: fp8 is not available on b200,"
+                                    " hidden=" +
+                                    std::to_string(profile.routed.ffn.hidden) + " intermediate=" +
+                                    std::to_string(profile.routed.ffn.intermediate));
 #else
         return fp8_h2560_i640_e512_k10();
 #endif
@@ -28,7 +34,10 @@ const ShapePolicy& shape_dispatch(const MoeProfile& profile) {
         }
 #if NINFER_TARGET_B200
         // The 2560/640/512/10 profile ran block-scaled mma.sync, an SM120 instruction.
-        throw std::invalid_argument("topk softmax swiglu moe: mma.sync is not available on b200");
+        throw std::invalid_argument("topk softmax swiglu moe: mma.sync is not available on b200,"
+                                    " hidden=" +
+                                    std::to_string(profile.routed.ffn.hidden) + " intermediate=" +
+                                    std::to_string(profile.routed.ffn.intermediate));
 #else
         return nvfp4_h2560_i640_e512_k10();
 #endif

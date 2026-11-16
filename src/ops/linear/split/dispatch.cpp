@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <ranges>
 #include <stdexcept>
+#include <string>
 
 namespace ninfer::ops::detail::linear_split {
 namespace {
@@ -15,7 +16,13 @@ const SplitShape& match(std::span<const SplitShape* const> shapes, ProjectionPro
             (!weights.second || weights.second->k == shape->input_rows) &&
             std::ranges::equal(shape->segments, rows))
             return *shape;
-    throw std::invalid_argument("linear_split: unsupported parent geometry or output segmentation");
+    std::string segments;
+    for (const auto row : rows) segments += (segments.empty() ? "" : ",") + std::to_string(row);
+    throw std::invalid_argument(
+        "linear_split: unsupported parent geometry or output segmentation n=" +
+        std::to_string(weights.first.n) + " k=" + std::to_string(weights.first.k) +
+        (weights.second ? " second_n=" + std::to_string(weights.second->n) : std::string()) +
+        " segments={" + segments + "}");
 }
 
 const SplitShape& select(ProjectionProfile weights, const auto& rows) {

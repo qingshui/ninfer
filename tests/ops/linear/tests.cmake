@@ -57,6 +57,11 @@ if(NINFER_TARGET STREQUAL "b200")
     LIBRARIES ninfer_ops)
 endif()
 
+# Registration and rejection messages of the 122B geometries; host-only, no device data.
+ninfer_add_op_test(ninfer_linear_geometry_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/geometry/test.cpp"
+  LIBRARIES ninfer_ops)
+
 ninfer_linear_suite(pair test.cpp)
 ninfer_linear_format_tests(pair q8)
 
