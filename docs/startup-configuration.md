@@ -87,7 +87,7 @@ are not opened.
 | `engine.cuda_graph` | `--cuda-graph` / `--no-cuda-graph` | bool / true | CUDA Graph decode; prefill and Vision encoding remain eager |
 | `engine.max_concurrency` | `--max-concurrency` | 0..1024 / 1 (serve: 8) | Active request lanes; 0 auto-fits from context capacity at startup (Generation) |
 | `engine.max_pending_requests` | `--max-pending-requests` | Positive uint32 / 16 | Additional waiting requests |
-| `engine.pending_timeout` | `--pending-timeout` | Positive duration / `30s` | Deadline before execution; not a generation time limit |
+| `engine.pending_timeout` | `--pending-timeout` | Positive duration / `590s` | Deadline before execution; not a generation time limit |
 
 Weight formats are stored in the artifact and are independent of `kv_dtype`. Optional components
 must be present when enabled. Supported model/deployment combinations are listed in the

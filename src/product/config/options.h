@@ -92,7 +92,11 @@ inline constexpr std::size_t kDefaultResponseStoreBytes   = 256ULL << 20;
 // through its options and description. Explicit TOML/CLI values still override the default.
 inline constexpr std::uint32_t kDefaultServeMaxConcurrency      = 0;
 inline constexpr std::uint32_t kDefaultServeMaxPendingRequests  = 1024;
-inline constexpr std::uint32_t kDefaultServePendingTimeoutMs    = 300000;
+// Admission waits queue rather than reject; the deadline only bounds how long a request may sit
+// waiting for admission. It sits just under common client request deadlines (the OpenAI SDK
+// default is ten minutes) so the server does not reject a request the client would still have
+// waited for; at a healthy drain rate the queue clears in seconds and the deadline never fires.
+inline constexpr std::uint32_t kDefaultServePendingTimeoutMs    = 590000;
 
 struct ServeOptions {
     bool help_requested  = false;
