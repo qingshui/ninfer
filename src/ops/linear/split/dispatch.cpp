@@ -81,7 +81,11 @@ const SplitShape& select(ProjectionProfile weights, const auto& rows) {
         return match(shapes, weights, rows);
     }
     case QType::FP8_E4M3FN_ROW_FP32: {
-        const std::array shapes{&kFp8RowFp32SplitN3072K2048};
+        const std::array shapes{
+#if NINFER_TARGET_B200
+            &kFp8RowFp32SplitN20480K3072,
+#endif
+            &kFp8RowFp32SplitN3072K2048};
         return match(shapes, weights, rows);
     }
 #if NINFER_TARGET_SPARK

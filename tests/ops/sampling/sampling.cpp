@@ -534,8 +534,12 @@ int real_shape_distribution_contract() {
     constexpr int samples = 4096;
     RunResult result =
         run_repeated(column, token_domain, samples, 8, config, 2000, ops::kSamplePurposeDecode);
-    return result.integrity_failures +
-           verify_distribution("sample real token-domain B=8", result.tokens, oracle);
+    // More rows than the multi-block workspace route serves run one CTA per row.
+    RunResult wide =
+        run_repeated(column, token_domain, samples, 32, config, 2000, ops::kSamplePurposeDecode);
+    return result.integrity_failures + wide.integrity_failures +
+           verify_distribution("sample real token-domain B=8", result.tokens, oracle) +
+           verify_distribution("sample real token-domain B=32", wide.tokens, oracle);
 }
 
 int rng_key_contract() {
@@ -607,19 +611,25 @@ int grammar_mask_contract() {
         for (int token : {domain - 1, domain - 2}) mask[token / 32] |= 1u << (token % 32);
         auto device_mask = to_device(mask);
         ops::SamplingConfig config;
-        config.mask       = {static_cast<const std::uint32_t*>(device_mask.data()),
-                             static_cast<int>(mask.size())};
-        const auto greedy = run_homogeneous_batch(repeat_column(column, 8), domain + 3, domain, 8,
-                                                  config, 0, ops::kSamplePurposeDecode);
-        failures += greedy.integrity_failures;
-        failures += verify_exact("masked greedy", greedy.tokens, std::vector<int>(8, domain - 1));
-        config.temperature = 0.75f;
-        config.seed        = 713179;
-        const auto oracle  = distribution_oracle(column, domain, config, nullptr, &mask);
-        const auto sampled =
-            run_repeated(column, domain, 4096, 8, config, 100, ops::kSamplePurposeDecode);
-        failures += sampled.integrity_failures;
-        failures += verify_distribution("masked distribution", sampled.tokens, oracle);
+        config.mask = {static_cast<const std::uint32_t*>(device_mask.data()),
+                       static_cast<int>(mask.size())};
+        // 8 rows take the multi-block route on a large domain; 32 rows run one CTA per row.
+        for (const int batch : {8, 32}) {
+            config.temperature = 0.0f;
+            const auto greedy  = run_homogeneous_batch(repeat_column(column, batch), domain + 3,
+                                                       domain, batch, config, 0,
+                                                       ops::kSamplePurposeDecode);
+            failures += greedy.integrity_failures;
+            failures += verify_exact("masked greedy", greedy.tokens,
+                                     std::vector<int>(batch, domain - 1));
+            config.temperature = 0.75f;
+            config.seed        = 713179;
+            const auto oracle  = distribution_oracle(column, domain, config, nullptr, &mask);
+            const auto sampled =
+                run_repeated(column, domain, 4096, batch, config, 100, ops::kSamplePurposeDecode);
+            failures += sampled.integrity_failures;
+            failures += verify_distribution("masked distribution", sampled.tokens, oracle);
+        }
     }
     return failures;
 }

@@ -2,6 +2,7 @@
 #include "context_budget.h"
 
 #include <nlohmann/json.hpp>
+#include <algorithm>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
@@ -73,9 +74,15 @@ void record(std::string_view name, const ninfer::GenerationResult& value, const 
                 {"preemptions", value.stats.scheduling.preemptions},
                 {"snapshot_restores", value.stats.scheduling.snapshot_restores},
                 {"replay_restores", value.stats.scheduling.replay_restores}};
-    for (const auto& call : value.tool_calls)
-        result["calls"].push_back(
-            {{"name", call.name}, {"arguments", Json::parse(call.arguments_json)}});
+    for (const auto& call : value.tool_calls) {
+        // An incomplete call carries an unmodified JSON prefix, which need not parse.
+        const bool complete = call.status == ninfer::ToolCallStatus::Complete;
+        Json entry{{"name", call.name},
+                   {"arguments", complete ? Json::parse(call.arguments_json)
+                                          : Json(call.arguments_json)}};
+        if (!complete) entry["incomplete"] = true;
+        result["calls"].push_back(std::move(entry));
+    }
     std::cout << result.dump() << '\n';
     if (const char* path = std::getenv("NINFER_TEST_TOOL_REPORT"))
         std::ofstream(path, std::ios::app) << result.dump() << '\n';
@@ -397,9 +404,15 @@ void pressure(ninfer::Engine& engine, bool snapshot, bool cancel, std::uint32_t 
                                         return observed;
                                     }));
         const auto completed = a.wait();
+        // The call the request had started stays visible as an incomplete argument prefix; no
+        // completed call and no framing text may come out of a cancellation.
+        const bool executable =
+            std::any_of(stopped.tool_calls.begin(), stopped.tool_calls.end(), [](const auto& call) {
+                return call.status != ninfer::ToolCallStatus::Incomplete;
+            });
         require(observed && stopped.finish_reason == ninfer::FinishReason::Cancelled &&
-                    stopped.tool_calls.empty() && stopped.content.empty(),
-                "paused cancellation published incomplete tool framing");
+                    !executable && stopped.content.empty(),
+                "paused cancellation published a completed tool call or visible framing");
         require(completed.tool_calls.size() == 1 &&
                     Json::parse(completed.tool_calls[0].arguments_json)["message"] == expected,
                 "cancellation changed another request's tool state");

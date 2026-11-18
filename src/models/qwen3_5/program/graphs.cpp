@@ -486,7 +486,7 @@ void Graphs::prepare(Resources& resources, const execution::Parameters& paramete
         for (std::uint32_t row = 0; row < segments; ++row) {
             rows.push_back(resources.state_images.staging_row(row));
             canonical.push_back({row, row * spec_.prefill_chunk, spec_.prefill_chunk, rows.back(),
-                                 rows.back()});
+                                 rows.back(), spec_.prefill_chunk});
         }
         const auto call = invocation(GraphPhase::Prefill, segments, spec_.prefill_chunk,
                                      prefill_profiles.front(), spec_.capacity);

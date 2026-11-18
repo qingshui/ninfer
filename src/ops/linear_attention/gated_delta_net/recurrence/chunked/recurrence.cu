@@ -381,7 +381,11 @@ void launch_recurrence(const RecurrenceOperands& args, const QkChunk* qk,
                        const ControlChunk* control, int value_tile, cudaStream_t stream) {
     switch (value_tile) {
     case 64:
+#if NINFER_TARGET_SPARK
         return launch<64>(args, qk, control, stream);
+#else
+        return launch_register_state(args, qk, control, stream);
+#endif
     case 32:
         return launch<32>(args, qk, control, stream);
     case 16:

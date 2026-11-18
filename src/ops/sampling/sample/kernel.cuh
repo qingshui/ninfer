@@ -65,8 +65,8 @@ __launch_bounds__(S::kSamplerBlock) __global__
     __shared__ int cand_idx[kSamplerCandidateCap];
     __shared__ float prob[kSamplerCandidateCap];
     __shared__ int n_support;
-    __shared__ float merge_val[S::kSamplerBlock * kSamplerFastCandidates];
-    __shared__ int merge_idx[S::kSamplerBlock * kSamplerFastCandidates];
+    __shared__ float merge_val[(S::kSamplerBlock / 32) * kSamplerFastCandidates];
+    __shared__ int merge_idx[(S::kSamplerBlock / 32) * kSamplerFastCandidates];
 
     if (token_domain <= S::kSamplerTileItems) {
         sampling_build_truncated_small<S>(logits, base, token_domain, cfg, red_val, red_idx,

@@ -27,6 +27,15 @@ void sm100_kv_append_attention(KvDType kv, const Tensor& q, const Tensor& k, con
                                CausalAttentionExecutionEnvelope envelope, MemoryArena& workspace,
                                Tensor& out, CudaExecutionView execution);
 
+// The groups' K/V rows are written group by group, then one launch attends for all of them. The
+// tensors are those of causal_softmax_attention_groups and carry the whole token axis.
+void sm100_kv_append_attention_groups(KvDType kv, const Tensor& q, const Tensor& k, const Tensor& v,
+                                      const Tensor& positions, const Tensor& valid_columns,
+                                      const Tensor& table_rows, float scale,
+                                      PagedKVBatchLayerView cache,
+                                      std::span<const CausalAttentionGroup> groups, Tensor& out,
+                                      CudaExecutionView execution);
+
 void sm100_kv_cached_attention(KvDType kv, const Tensor& q, const Tensor& positions, float scale,
                                const ConstPagedKVLayerView& cache,
                                CausalAttentionExecutionEnvelope envelope, MemoryArena& workspace,

@@ -1,6 +1,6 @@
 #pragma once
 
-// Epilogues and host-side launch plumbing shared by the NVFP4 and BF16 SM100 GEMMs.
+// Epilogues and host-side launch plumbing shared by the NVFP4, BF16 and FP8 SM100 GEMMs.
 
 #include "core/device.h"
 #include "ops/common/cuda/sm100/gemm_mainloop.cuh"
@@ -21,7 +21,9 @@ namespace sm = ::ninfer::ops::common::sm100;
 inline constexpr int kMaxSegments = 4;
 
 // Identity, Add and Split share one epilogue: the accumulator of weight row r, token t is
-// scaled, optionally added to the residual and written to the segment that owns row r.
+// scaled, optionally added to the residual and written to the segment that owns row r. FP8
+// operands carry their scales outside the MMA: the accumulator is multiplied by the weight row
+// scale and the activation token scale before the residual is added.
 struct PlainEpilogue {
     float alpha;
     bool add;
@@ -31,31 +33,57 @@ struct PlainEpilogue {
     int segment_count;
     int rows;
     int tokens;
+    const float* row_scales;   // [rows], FP8 only
+    const float* token_scales; // [tokens], FP8 only
 
+    // The residual chunk is loaded in the store's lane mapping and staged in shared memory.
     template <class Cfg>
     __device__ __forceinline__ void drain(const sm::EpilogueTile& t) const {
-        constexpr int C = Cfg::kTileN >= 32 ? 32 : Cfg::kTileN;
-        const int row0  = t.m_tile * Cfg::kTileM + t.warp_q * 32;
-        int segment     = 0;
+        constexpr int C    = Cfg::kTileN >= 32 ? 32 : Cfg::kTileN;
+        constexpr bool Fp8 = Cfg::kKind == sm::GemmKind::Fp8;
+        const int row0     = t.m_tile * Cfg::kTileM + t.warp_q * 32;
+        int segment        = 0;
         while (segment + 1 < segment_count && row0 >= segment_begin[segment + 1]) ++segment;
         __nv_bfloat16* out = outputs[segment];
         const int width    = segment_begin[segment + 1] - segment_begin[segment];
         const int column0  = row0 - segment_begin[segment];
         const int token0   = t.n_tile * Cfg::kTileN;
+        const float row_scale = Fp8 ? row_scales[row0 + t.lane] : 1.0f;
         auto* stage        = reinterpret_cast<__nv_bfloat16*>(t.scratch);
         for (int c0 = 0; c0 < t.valid_tokens; c0 += C) {
+            float token_scale = 0.0f;
+            if constexpr (Fp8) {
+                const int token = token0 + c0 + t.lane;
+                if (token < tokens) token_scale = token_scales[token];
+            }
+            uint4 carried[C / 8];
+            if (add) {
+#pragma unroll
+                for (int it = 0; it < C / 8; ++it) {
+                    const int token = token0 + c0 + it * 8 + (t.lane >> 2);
+                    carried[it]     = token < tokens
+                                          ? *reinterpret_cast<const uint4*>(
+                                                residual + static_cast<std::int64_t>(token) * rows +
+                                                row0 + (t.lane & 3) * 8)
+                                          : make_uint4(0, 0, 0, 0);
+                }
+            }
             std::uint32_t r[C];
             sm::tmem_load_32x32b<C>(t.tmem + c0, r);
+            if (add) {
+#pragma unroll
+                for (int it = 0; it < C / 8; ++it)
+                    *reinterpret_cast<uint4*>(stage + (it * 8 + (t.lane >> 2)) * 32 +
+                                              (t.lane & 3) * 8) = carried[it];
+                __syncwarp();
+            }
             sm::tmem_load_wait();
 #pragma unroll
             for (int i = 0; i < C; ++i) {
                 float v = __uint_as_float(r[i]) * alpha;
-                if (add) {
-                    const int token = token0 + c0 + i;
-                    if (token < tokens)
-                        v += __bfloat162float(
-                            residual[static_cast<std::int64_t>(token) * rows + row0 + t.lane]);
-                }
+                if constexpr (Fp8)
+                    v = v * row_scale * __shfl_sync(0xffffffffU, token_scale, i);
+                if (add) v += __bfloat162float(stage[i * 32 + t.lane]);
                 stage[i * 32 + t.lane] = __float2bfloat16_rn(v);
             }
             __syncwarp();
@@ -166,7 +194,8 @@ inline PlainEpilogue make_plain_epilogue(const Sm100Epilogue& e, __nv_bfloat16* 
     p.residual = e.residual;
     p.rows    = rows;
     p.tokens  = tokens;
-    if (p.add && !aligned(e.residual, 2)) reject("Add epilogue requires a residual");
+    if (p.add && !aligned(e.residual, 16))
+        reject("Add epilogue requires a 16-byte aligned residual");
     if (e.kind == Sm100Epilogue::Split) {
         const int n = static_cast<int>(e.segments.size());
         if (n < 1 || n > kMaxSegments || e.outputs.size() != e.segments.size())

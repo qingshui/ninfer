@@ -4,8 +4,8 @@
 //
 // The weight is the MMA's M operand and the tokens are its N operand (swap-AB). The weight
 // operands are consumed exactly as stored in the artifact: NVFP4 codes with
-// block_scale_k16_m128x4 scales (one 512-byte atom per 128 rows and 64 K values) or plain BF16.
-// Nothing is repacked on the execution path.
+// block_scale_k16_m128x4 scales (one 512-byte atom per 128 rows and 64 K values), plain BF16, or
+// E4M3 codes with FP32 row scales. Nothing is repacked on the execution path.
 
 #include "ops/linear/kernels/nvfp4/nvfp4_operands.h"
 
@@ -36,6 +36,16 @@ struct Sm100Bf16Operands {
     int rows, k, tokens;
 };
 
+// E4M3 codes with FP32 scales: value = code * scale. Weight scales are per row, activation scales
+// per token; the accumulator takes both before the epilogue transform.
+struct Sm100Fp8Operands {
+    const std::uint8_t* x;       // [tokens, k] row-major codes
+    const float* x_scales;       // [tokens]
+    const std::uint8_t* weight;  // [rows, k] row-major codes
+    const float* weight_scales;  // [rows]
+    int rows, k, tokens;
+};
+
 // Tile choice for one call. `tile_tokens` is the MMA's N. `cluster` is the CTA-pair width used by
 // the weight multicast (1 = independent CTAs) and `ctas_per_sm` the persistent grid multiplier.
 struct Nvfp4Sm100Tuning {
@@ -46,6 +56,7 @@ struct Nvfp4Sm100Tuning {
 
 Nvfp4Sm100Tuning nvfp4_sm100_tuning(int rows, int k, int tokens);
 Nvfp4Sm100Tuning bf16_sm100_tuning(int rows, int k, int tokens);
+Nvfp4Sm100Tuning fp8_sm100_tuning(int rows, int k, int tokens);
 
 // Operands follow Nvfp4A4Operands: x is the quantized activation (codes + K16M128x4 scales padded
 // to whole 128-token tiles), alpha = 1 / (input_scale * weight_scale).
@@ -54,5 +65,9 @@ void launch_sm100_nvfp4_gemm(const Nvfp4A4Operands& operands, const Sm100Epilogu
 
 void launch_sm100_bf16_gemm(const Sm100Bf16Operands& operands, const Sm100Epilogue& epilogue,
                             __nv_bfloat16* y, cudaStream_t stream);
+
+// SwiGLU is not offered for FP8: the weight rows would need per-part scales.
+void launch_sm100_fp8_gemm(const Sm100Fp8Operands& operands, const Sm100Epilogue& epilogue,
+                           __nv_bfloat16* y, cudaStream_t stream);
 
 } // namespace ninfer::ops::detail

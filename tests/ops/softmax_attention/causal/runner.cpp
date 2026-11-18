@@ -459,6 +459,146 @@ int run_batch_case(CudaExecutionView execution, const Geometry& geometry, KvCach
     return failures;
 }
 
+int run_group_case(CudaExecutionView execution, const Geometry& geometry, KvCacheStorage storage,
+                   const GroupAttentionCase& test_case) {
+    const auto& specs = test_case.groups;
+    struct Entry {
+        std::int32_t column, width, valid;
+    };
+    std::int32_t entries = 0, columns = 0, widest = 1;
+    for (const auto& spec : specs) {
+        const auto batch = static_cast<std::int32_t>(spec.contexts.size());
+        entries += batch;
+        columns += spec.width * batch;
+        widest = std::max(widest, spec.width);
+    }
+    // Entries take metadata rows in reverse group order, as the model lists its decode rows first.
+    std::vector<std::int32_t> first_row(specs.size());
+    for (int g = static_cast<int>(specs.size()) - 1, next = 0; g >= 0; --g) {
+        first_row[g] = next;
+        next += static_cast<std::int32_t>(specs[g].contexts.size());
+    }
+    std::vector<Entry> entry(entries);
+    std::vector<int> valid(entries), lanes(entries), positions(columns, 0),
+        virtual_positions(std::size_t(entries) * widest, 0);
+    std::vector<ops::CausalAttentionGroup> groups;
+    std::int32_t column = 0, maximum_visible = 1;
+    for (std::size_t g = 0; g < specs.size(); ++g) {
+        const auto& spec = specs[g];
+        std::uint32_t keys = 1;
+        for (std::size_t b = 0; b < spec.contexts.size(); ++b) {
+            const int row = first_row[g] + static_cast<int>(b);
+            entry[row]    = {column, spec.width, spec.valid_columns[b]};
+            valid[row]    = spec.valid_columns[b];
+            lanes[row]    = entries - 1 - row;
+            for (int j = 0; j < spec.width; ++j)
+                positions[column + j] =
+                    valid[row] == 0 ? 0 : spec.contexts[b] + std::min(j, valid[row] - 1);
+            for (int j = 0; j < valid[row]; ++j)
+                virtual_positions[std::size_t(row) * widest + j] = positions[column + j];
+            keys = std::max<std::uint32_t>(keys, spec.contexts[b] + valid[row]);
+            column += spec.width;
+        }
+        const std::uint32_t offset = column - spec.width * static_cast<std::int32_t>(spec.contexts.size());
+        groups.push_back({offset, static_cast<std::uint32_t>(spec.width),
+                          static_cast<std::uint32_t>(spec.contexts.size()),
+                          static_cast<std::uint32_t>(first_row[g]), {1U, keys}});
+        maximum_visible = std::max<std::int32_t>(maximum_visible, keys);
+    }
+    const std::size_t q_column_elements  = std::size_t(kHeadDim) * geometry.q_heads,
+                      kv_column_elements = std::size_t(kHeadDim) * geometry.kv_heads;
+    auto q = make_bf16_values(q_column_elements * columns, test_case.seed, -.25f, .25f);
+    auto k = make_bf16_values(kv_column_elements * columns, test_case.seed + 1u, -.25f, .25f);
+    auto v = make_bf16_values(kv_column_elements * columns, test_case.seed + 2u, -1.f, 1.f);
+    inject_codec_edges(geometry, columns, k, v);
+    std::vector<HostCache> initial;
+    for (int row = 0; row < entries; ++row)
+        initial.push_back(
+            make_cache(geometry, storage, maximum_visible + 3, test_case.seed + 20u + 3u * row));
+    auto expected = initial;
+    BatchDeviceCache cache(initial, test_case.mapping, maximum_visible);
+    GuardedDeviceBuffer dq(q.size() * 2), dk(k.size() * 2), dv(v.size() * 2), dp(columns * 4),
+        dvalid(entries * 4), dlanes(entries * 4), dout(q.size() * 2);
+    Tensor tq(dq.span(), DType::BF16, {kHeadDim, geometry.q_heads, columns});
+    Tensor tk(dk.span(), DType::BF16, {kHeadDim, geometry.kv_heads, columns}),
+        tv(dv.span(), DType::BF16, {kHeadDim, geometry.kv_heads, columns});
+    Tensor tp(dp.span(), DType::I32, {columns}), tvalid(dvalid.span(), DType::I32, {entries}),
+        tlanes(dlanes.span(), DType::I32, {entries});
+    Tensor tout(dout.span(), DType::BF16, {kHeadDim, geometry.q_heads, columns});
+    std::size_t capacity = 0;
+    for (const auto& group : groups)
+        capacity = std::max(capacity, ops::causal_softmax_attention_workspace_capacity_bytes(
+                                          op_geometry(geometry), storage, group.envelope,
+                                          group.batch, group.width, group.width,
+                                          execution.multiprocessor_count()));
+    GuardedDeviceBuffer scratch(std::max<std::size_t>(capacity, 256));
+    MemoryArena workspace(scratch.span());
+
+    const auto q_bits = to_bf16_bits(q), k_bits = to_bf16_bits(k), v_bits = to_bf16_bits(v);
+    dq.copy_from_host(q_bits.data(), q_bits.size() * 2);
+    dk.copy_from_host(k_bits.data(), k_bits.size() * 2);
+    dv.copy_from_host(v_bits.data(), v_bits.size() * 2);
+    dp.copy_from_host(positions.data(), positions.size() * 4);
+    dvalid.copy_from_host(valid.data(), entries * 4);
+    dlanes.copy_from_host(lanes.data(), entries * 4);
+    dout.fill(0xff);
+    scratch.fill(0x5a);
+    cuda_synchronize();
+    const auto before = cache.snapshot_bytes();
+    std::vector<double> reference(q.size(), 0.0);
+    for (int row = 0; row < entries; ++row) {
+        const auto& e = entry[row];
+        if (!e.valid) continue;
+        const std::vector<int> row_positions(positions.begin() + e.column,
+                                             positions.begin() + e.column + e.valid);
+        const auto slice = [&](const std::vector<float>& source, std::size_t stride) {
+            return std::vector<float>(source.begin() + e.column * stride,
+                                      source.begin() + (e.column + e.valid) * stride);
+        };
+        append_cache(expected[lanes[row]], slice(k, kv_column_elements), slice(v, kv_column_elements),
+                     row_positions);
+        const auto result = ideal_attention(slice(q, q_column_elements), expected[lanes[row]],
+                                            row_positions);
+        std::copy(result.begin(), result.end(), reference.begin() + e.column * q_column_elements);
+    }
+    ops::causal_softmax_attention_groups(tq, tk, tv, tp, tvalid, tlanes, groups,
+                                         op_geometry(geometry), kAttentionScale, cache.view(),
+                                         workspace, tout, execution);
+    cuda_synchronize(execution.stream());
+
+    const std::string label = std::string("causal groups ") + geometry.name + " " +
+                              cache_name(storage) + " G=" + std::to_string(specs.size()) +
+                              " entries=" + std::to_string(entries);
+    const auto output = copy_from_guarded<std::uint16_t>(dout, q.size());
+    int failures      = verify_attention(label, bf16_bits_to_double(output), reference,
+                                         attention_criterion(storage));
+    for (int row = 0; row < entries; ++row) {
+        const auto& e = entry[row];
+        bool clean    = true;
+        for (std::size_t i = std::size_t(e.column + e.valid) * q_column_elements;
+             i < std::size_t(e.column + e.width) * q_column_elements; ++i)
+            clean = clean && output[i] == 0;
+        if (!clean) {
+            std::cerr << label << ": invalid output column is not BF16 zero at row " << row << '\n';
+            ++failures;
+        }
+    }
+    failures += cache.verify(label, expected);
+    failures += cache.verify_untouched(label, before, virtual_positions, lanes, valid, widest);
+    failures += verify_input(label + " q unchanged", dq, q_bits) +
+                verify_input(label + " k unchanged", dk, k_bits) +
+                verify_input(label + " v unchanged", dv, v_bits);
+    failures += verify_positions(label + " positions unchanged", dp, positions) +
+                verify_positions(label + " counts unchanged", dvalid, valid) +
+                verify_positions(label + " lanes unchanged", dlanes, lanes);
+    failures += dout.verify_guards(label) + scratch.verify_guards(label);
+    if (workspace.used() != 0 || workspace.peak_used() > capacity) {
+        std::cerr << label << ": workspace mismatch\n";
+        ++failures;
+    }
+    return failures;
+}
+
 namespace {
 // Service profile (256,32,2): the batch ceiling is kMaximumConcurrency decode lanes. Interval
 // queries stay exact up to the ceiling and every batch above it is rejected.

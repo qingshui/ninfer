@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ops/moe/backend.h"
 #include "ops/moe/kernels/cuda/block_scaled/launch.h"
 
 namespace ninfer::ops::detail::moe_cuda::block_scaled {
@@ -32,6 +33,10 @@ Storage allocate(Arena& arena, const Plan& plan, int tokens, bool routed, int sh
         const int product_scale_stride = fp8 ? (plan.intermediate + 127) / 128
                                              : nvfp4_activation_scale_stride(plan.intermediate);
         out.product_scales = bytes(std::size_t(assignments) * product_scale_stride * scale_bytes);
+        if (!fp8 && moe_backend(hidden, experts, top_k, tokens) == MoeBackend::Tcgen05) {
+            out.gathered_codes  = bytes(std::size_t(assignments) * hidden / packing);
+            out.gathered_scales = bytes(std::size_t(assignments) * (hidden / scale_group));
+        }
         if (plan.atomic_output) {
             out.routed_sum = static_cast<float*>(arena.alloc(DType::FP32, {hidden, tokens}).data);
         } else {

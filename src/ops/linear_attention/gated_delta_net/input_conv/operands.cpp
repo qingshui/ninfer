@@ -65,6 +65,14 @@ WeightProfile describe_profile(const ProjectionProfile& weights) {
     // the Main prefill split kernels through the {qkv, z} segmentation.
     if (w.qtype == QType::BF16 && w.n == 20480 && w.k == 3072)
         return {Format::Bf16, {3072, 8192}, w.policy};
+#if NINFER_TARGET_B200
+    if (w.qtype == QType::FP8_E4M3FN_ROW_FP32 && w.n == 20480 && w.k == 3072) {
+        if (!allows_a8(w.policy))
+            throw std::invalid_argument(
+                "GDN input: the tcgen05 FP8 route requires an A8 permission");
+        return {Format::Fp8Tcgen05, {3072, 8192}, w.policy};
+    }
+#endif
     if (w.qtype == QType::FP8_E4M3FN_ROW_FP32)
         throw std::invalid_argument("GDN input: unsupported qtype fp8_e4m3fn_row_fp32");
     throw std::invalid_argument("GDN input: unsupported single-parent weight geometry");
@@ -88,6 +96,7 @@ void validate_weights(const WeightOperands& weights) {
         validate_rowsplit(*weights.first);
         break;
     case Format::Fp8:
+    case Format::Fp8Tcgen05:
         (void)common::validate_fp8_weight(*weights.first, "GDN input");
         break;
     case Format::Nvfp4:

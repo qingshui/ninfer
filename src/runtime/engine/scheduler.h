@@ -317,6 +317,11 @@ public:
         return candidates;
     }
 
+    // A branch the Engine takes together with the request it just admitted (a sample group's
+    // children) joins the admitted membership without bypassing anyone: the group was one
+    // admission, and the FIFO allowance of the requests ahead of it counted that admission once.
+    void admitted_with(const Request& sibling) { service_order_.push_back(sibling.id); }
+
     void admitted(const std::deque<RequestPtr>& fresh, const Request& admitted,
                   std::uint32_t concurrency) {
         for (const auto& skipped : fresh) {

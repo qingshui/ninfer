@@ -5,6 +5,7 @@
 #include "ops/common/numeric/convert.cuh"
 #include "ops/kv_cache/kernels/fp8.cuh"
 #include "ops/kv_cache/kernels/layout.cuh"
+#include "ops/kv_cache/kernels/write.h"
 #include "ops/kv_cache/kernels/hadamard.cuh"
 
 #include <cuda_bf16.h>
@@ -81,6 +82,56 @@ __launch_bounds__(256) __global__
     page                    = __shfl_sync(0xffffffffU, page, 0);
     write_fp8_row<Geometry>(k + input_offset, v + input_offset, cache_k, cache_v, scale_k, scale_v,
                             token, kv_head, page, position & kPageMask, lane);
+}
+
+struct Fp8GroupWriteParams {
+    const __nv_bfloat16* k;
+    const __nv_bfloat16* v;
+    const std::int32_t* positions;
+    const std::int64_t* tables;
+    const std::int32_t* valid_columns;
+    const std::int32_t* table_rows;
+    std::uint8_t* cache_k;
+    std::uint8_t* cache_v;
+    std::uint8_t* scale_k;
+    std::uint8_t* scale_v;
+    std::int32_t table_stride;
+    std::int32_t columns; // token axis columns covered by the groups
+    std::int32_t groups;  // ascending token_base
+    PagedWriteGroup group[kPagedWriteMaxGroups];
+};
+
+// One warp per (column, KV head) of the token axis; columns outside every group or beyond an
+// entry's valid columns write nothing.
+template <typename Geometry>
+__launch_bounds__(256) __global__
+    void write_fp8_groups_kernel(const __grid_constant__ Fp8GroupWriteParams p) {
+    const int unit   = blockIdx.x * 8 + (threadIdx.x >> 5);
+    const int column = unit / Geometry::KVHeads;
+    if (column >= p.columns) return;
+    int low = 0, high = p.groups - 1; // the last group that starts at or before the column
+    while (low < high) {
+        const int mid = (low + high + 1) >> 1;
+        if (p.group[mid].token_base <= column)
+            low = mid;
+        else
+            high = mid - 1;
+    }
+    const PagedWriteGroup g = p.group[low];
+    const int local         = column - g.token_base;
+    if (local < 0 || local >= g.width * g.batch) return;
+    const int entry = local / g.width;
+    const int token = local - entry * g.width;
+    const int row   = g.row + entry;
+    const int valid = p.valid_columns[row];
+    if (token >= (valid < g.width ? valid : g.width)) return;
+    const int lane     = threadIdx.x & 31;
+    const int position = p.positions[g.token_base + entry * g.width] + token;
+    const auto* table  = p.tables + static_cast<std::int64_t>(p.table_rows[row]) * p.table_stride;
+    std::int64_t page  = lane == 0 ? lookup_page(table, position) : 0;
+    page               = __shfl_sync(0xffffffffU, page, 0);
+    write_fp8_row<Geometry>(p.k, p.v, p.cache_k, p.cache_v, p.scale_k, p.scale_v, column,
+                            unit % Geometry::KVHeads, page, position & kPageMask, lane);
 }
 
 template <typename Geometry, typename Metadata>

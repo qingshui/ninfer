@@ -197,6 +197,14 @@ void add_graph_envelope_cases(OpSuite& suite, KvCacheStorage storage) {
                             MappingPattern::Fragmented, {}, short_limits);
         add_append_case(suite, geometry, storage, {1, 32768, 131072, 966u},
                         MappingPattern::Fragmented, {}, long_limits);
+#if NINFER_TARGET_B200
+        // A captured prefill chunk is one wide call that moves across envelope profiles, so its
+        // kernel topology cannot depend on how many key tiles the envelope holds.
+        constexpr std::array<std::uint32_t, 5> chunk_limits{160, 2048, 160, 1024, 160};
+        if (geometry.q_heads == 32 && geometry.kv_heads == 2)
+            add_append_case(suite, geometry, storage, {128, 17, 2048, 968u},
+                            MappingPattern::Fragmented, {}, chunk_limits);
+#endif
         BatchAttentionCase replay{16,
                                   {17, 31, 0},
                                   {7, 16, 0},
@@ -454,6 +462,61 @@ void add_service_profile_cases(OpSuite& suite, KvCacheStorage storage) {
     add_pool(full_lanes, full_pool, 2163u);
 }
 
+void add_group_case(OpSuite& suite, Geometry geometry, KvCacheStorage storage,
+                    GroupAttentionCase c, const char* name) {
+    if (!geometry_served(geometry, storage)) return;
+    suite.add(std::string("causal_groups/") + cache_name(storage) + "/" + geometry.name + "/" +
+                  name + "/seed" + std::to_string(c.seed),
+              [=] {
+                  return run_group_case(cuda_environment().context.execution_view(), geometry,
+                                        storage, c);
+              },
+              {{"format", kv_cache_storage_name(storage)}, {"execution", "eager"}});
+}
+
+// Groups on one token axis: B=1 prefill segments, then the decode rows, as one mixed flight lays
+// out its columns. Segment widths cross the 8-token query tile, and contexts cross the 64-key
+// page.
+void add_group_cases(OpSuite& suite, KvCacheStorage storage) {
+    for (const auto& geometry : kGeometries) {
+        add_group_case(
+            suite, geometry, storage,
+            {{{1, {0}, {1}},
+              {8, {63}, {8}},
+              {9, {64}, {9}},
+              {130, {200}, {130}},
+              {257, {0}, {257}},
+              {1, {0, 63, 64, 127, 300, 1023}, {1, 1, 1, 1, 1, 1}}},
+             MappingPattern::Fragmented,
+             2301u},
+            "segments_and_decode");
+        add_group_case(suite, geometry, storage,
+                       {{{33, {17}, {33}},
+                         {5, {2000}, {5}},
+                         {4, {0, 17, 63, 64, 127, 128}, {4, 3, 1, 0, 2, 4}}},
+                        MappingPattern::Identity,
+                        2302u},
+                       "verify_block");
+        add_group_case(suite, geometry, storage,
+                       {{{16, {5, 77}, {16, 9}}, {1, {1000}, {0}}}, MappingPattern::Offset, 2303u},
+                       "masked_rows");
+    }
+    // The service profile at flight scale: every decode lane of a loaded engine plus a packed
+    // prefill of twelve segments.
+    std::vector<std::int32_t> contexts, valid;
+    constexpr int pool[] = {0, 17, 63, 64, 65, 127, 128, 129, 300, 511};
+    for (int i = 0; i < 130; ++i) {
+        contexts.push_back(pool[i % 10]);
+        valid.push_back(1);
+    }
+    GroupAttentionCase flight{{}, MappingPattern::Fragmented, 2304u};
+    constexpr int widths[] = {3, 64, 200, 9, 1, 513, 31, 128, 7, 66, 8, 300};
+    for (int i = 0; i < 12; ++i)
+        flight.groups.push_back({widths[i], {pool[(i * 3) % 10]}, {widths[i]}});
+    flight.groups.push_back({1, contexts, valid});
+    add_group_case(suite, kGeometries[2], storage, flight, "flight_scale");
+}
+
 void add_storage_cases(OpSuite& suite, KvCacheStorage storage) {
     suite.add(std::string("causal_capacity/") + cache_name(storage),
               [=] {
@@ -483,6 +546,7 @@ void add_storage_cases(OpSuite& suite, KvCacheStorage storage) {
                         MappingPattern::Fragmented);
     }
     add_batch_cases(suite, storage);
+    add_group_cases(suite, storage);
     add_graph_envelope_cases(suite, storage);
     add_verify_width_cases(suite, storage);
     add_numerical_profile_cases(suite, storage);

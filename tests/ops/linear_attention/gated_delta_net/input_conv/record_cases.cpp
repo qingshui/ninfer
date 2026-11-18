@@ -44,6 +44,10 @@ std::vector<RecordCase> cases(Profile p) {
                 }
     } else if (p.format == QType::BF16) {
         result = {{2, 1, {}, 1200U}, {16, 8, ragged(16, 8), 1250U}, {4, 17, ragged(4, 17), 1270U}};
+    } else if (p.format == QType::FP8_E4M3FN_ROW_FP32) {
+        result = {{2, 1, {}, 1200U, Policy::AllowA8},
+                  {16, 8, ragged(16, 8), 1250U, Policy::AllowA8},
+                  {4, 17, ragged(4, 17), 1270U, Policy::AllowA8}};
     } else {
         const bool fp8 = p.format == QType::FP8_E4M3FN_ROW_BF16;
         for (auto policy : {Policy::A16Only, fp8 ? Policy::AllowA8 : Policy::AllowA4}) {

@@ -87,6 +87,9 @@ void launch_fp8_a8_quantize(const Tensor& x, const Weight& weight, Fp8A8Workspac
     case Fp8Activation2048Geometry::kInputRows:
         launch_quantize_exact<Fp8Activation2048Geometry>(x, workspace, stream);
         return;
+    case Fp8Activation3072Geometry::kInputRows:
+        launch_quantize_exact<Fp8Activation3072Geometry>(x, workspace, stream);
+        return;
     case Fp8Activation6656Geometry::kInputRows:
         launch_quantize_exact<Fp8Activation6656Geometry>(x, workspace, stream);
         return;
@@ -95,6 +98,9 @@ void launch_fp8_a8_quantize(const Tensor& x, const Weight& weight, Fp8A8Workspac
         return;
     case Fp8Activation6144Geometry::kInputRows:
         launch_quantize_exact<Fp8Activation6144Geometry>(x, workspace, stream);
+        return;
+    case Fp8Activation8192Geometry::kInputRows:
+        launch_quantize_exact<Fp8Activation8192Geometry>(x, workspace, stream);
         return;
     case Fp8Activation17408Geometry::kInputRows:
         launch_quantize_exact<Fp8Activation17408Geometry>(x, workspace, stream);

@@ -427,6 +427,22 @@ struct BatchAttentionCase {
     std::vector<std::vector<std::int32_t>> replay_contexts;
 };
 
+// Groups of independent entries on one token axis, listed in token order. Every entry of a group
+// has `width` columns, so contexts and valid_columns give the group's batch size.
+struct GroupSpec {
+    std::int32_t width;
+    std::vector<std::int32_t> contexts;
+    std::vector<std::int32_t> valid_columns;
+};
+
+struct GroupAttentionCase {
+    std::vector<GroupSpec> groups;
+    MappingPattern mapping;
+    std::uint32_t seed;
+};
+
+int run_group_case(CudaExecutionView execution, const Geometry& geometry, KvCacheStorage storage,
+                   const GroupAttentionCase& test_case);
 int run_append_case(CudaExecutionView execution, const Geometry& geometry, KvCacheStorage storage,
                     const AttentionCase& test_case, MappingPattern mapping,
                     std::span<const int> oracle_queries         = {},

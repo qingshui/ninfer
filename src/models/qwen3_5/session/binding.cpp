@@ -8,20 +8,6 @@
 
 namespace ninfer::models::qwen3_5::detail {
 
-void SessionImpl::initialize_captures(RequestControl& request, std::uint32_t from,
-                                      std::uint32_t through) {
-    request.capture_groups.clear();
-    request.last_saved                = from;
-    request.last_intermediate_attempt = from;
-    request.next_capture              = 0;
-    request.capture_pending           = false;
-    for (const auto& group : request.base->capture_groups) {
-        if (group.frontier > from && group.frontier <= through) {
-            request.capture_groups.push_back(group);
-        }
-    }
-}
-
 void SessionImpl::initialize_prefill(RequestControl& request, std::uint32_t base) {
     const auto& plan = *request.base;
     auto& staged     = request.prefill.emplace();
@@ -29,7 +15,7 @@ void SessionImpl::initialize_prefill(RequestControl& request, std::uint32_t base
     staged.base = staged.cursor = base;
     staged.prompt_tokens        = plan.summary.prompt_tokens;
     staged.reuse                = base ? PrefixReusePath::Checkpoint : PrefixReusePath::Root;
-    initialize_captures(request, base, plan.summary.prompt_tokens);
+    initialize_checkpoint_plan(request, base);
 }
 
 BindingPlan SessionImpl::plan_binding(const RequestBasePlan& base, runtime::LaneId lane_id,
@@ -59,6 +45,7 @@ BindingPlan SessionImpl::plan_binding(const RequestBasePlan& base, runtime::Lane
     // Root at frontier zero already covers a request paused before its first chunk.
     // Only missing committed history requires replay; a snapshot is not required.
     transaction.resume_without_replay = resume && actual->reused_tokens == resume->frontier();
+    transaction.local_device    = actual->local_device;
     transaction.take_private    = candidate.take_private;
     transaction.carried_points  = actual->private_points;
     transaction.state_action    = actual->state_action;
@@ -167,18 +154,43 @@ BindingPlan SessionImpl::plan_binding(const RequestBasePlan& base, runtime::Lane
 BindingReservation SessionImpl::start_binding(const RequestBasePlan& base, runtime::LaneId lane_id,
                                               const SourceCandidate& candidate, ResumeState* resume,
                                               ExecutionUnitKind resume_kind,
-                                              std::uint32_t resume_tokens) {
-    if (has_context_operation())
-        throw std::logic_error("binding requires a free context transaction slot");
+                                              std::uint32_t resume_tokens,
+                                              bool allow_synchronous, bool synchronous_only) {
     auto planned = plan_binding(base, lane_id, candidate, resume, resume_kind, resume_tokens);
     if (!planned.evaluation.source_valid) return {.source_valid = false};
+    const auto lane   = lane_id.value;
+    const auto action = planned.operation.state_action;
+    // A fresh request whose source needs no transfer completes before this returns: the lane is
+    // adopted on the host, and its device work and residency installation ride the first
+    // execution of the lane. Host sources, resumes and carried points keep the asynchronous
+    // completion contract.
+    const bool synchronous =
+        allow_synchronous && !resume && planned.operation.carried_points.empty() &&
+        (planned.operation.source
+             ? planned.operation.local_device &&
+                   (action == StateBindingAction::Fork || action == StateBindingAction::Move ||
+                    action == StateBindingAction::Split)
+             : action == StateBindingAction::Root);
+    if (synchronous_only && !synchronous) return {.asynchronous = true};
+    if (synchronous) {
+        // The lane cannot install its residency before the release of its previous occupant has
+        // retired, and addresses stay closed while maintenance or a pause normalization runs.
+        if (lane_releasing_[lane] || normalizing_pause_ ||
+            (context_operation_ &&
+             std::holds_alternative<MaintenanceOperation>(context_operation_->action)))
+            return {.assessment = {.status = context::ContextAvailability::Waiting}};
+    } else if (has_context_operation()) {
+        throw std::logic_error("binding requires a free context transaction slot");
+    }
     if (!planned.evaluation.assessment.ready())
         return {.capacity_possible = planned.evaluation.capacity_possible,
                 .assessment        = std::move(planned.evaluation.assessment)};
-    auto execution_reservation = executor().try_reserve(runtime::FrameKind::Context);
-    if (!execution_reservation)
-        return {.assessment = {.status = context::ContextAvailability::Waiting}};
-    const auto lane            = lane_id.value;
+    std::optional<runtime::ExecutionReservation> execution_reservation;
+    if (!synchronous) {
+        execution_reservation = executor().try_reserve(runtime::FrameKind::Context);
+        if (!execution_reservation)
+            return {.assessment = {.status = context::ContextAvailability::Waiting}};
+    }
     auto& request              = requests[lane];
     auto transaction           = std::move(planned.operation);
     transaction.resume         = resume;
@@ -229,76 +241,25 @@ BindingReservation SessionImpl::start_binding(const RequestBasePlan& base, runti
     sequences[lane].lane = lane;
     sequences[lane].id   = resume ? resume->impl_->sequence.id
                                   : SequenceHandle{next_sequence++, executor().epoch().value};
+    register_lane(lane, sequences[lane].id);
     if (++lane_epochs[lane] == 0) ++lane_epochs[lane];
     sequences[lane].residency = {{lane}, lane_epochs[lane]};
-    // A root source without penalty counts installs synchronously: the lane is adopted on the
-    // host before start_binding returns, the residency install runs silently, and the device
-    // actions (the cleared State record and the empty history mappings) ride the lane's first
-    // execution in its stream order. Every other source keeps the asynchronous completion
-    // contract.
-    const bool synchronous =
-        !resume && !source && transaction.state_action == StateBindingAction::Root &&
-        transaction.carried_points.empty() &&
-        base.impl_->sampling.presence_penalty == 0.0F &&
-        base.impl_->sampling.frequency_penalty == 0.0F;
+
+    // The transaction of an asynchronous binding belongs to the context operation; a synchronous
+    // one lives here until its lane adopts it as deferred work.
+    std::unique_ptr<PendingContext> local;
+    PendingContext* pending = nullptr;
     if (synchronous) {
-        try {
-            context::ContextTransaction migration(directory);
-            migration.add_binding(
-                kTextKvPool.index,
-                text_kv_histories->prepare_binding(nullptr, transaction.reuse_frontier,
-                                                   transaction.reservation_demand.main_frontier,
-                                                   lane, destinations.take(planned.main), false));
-            if (backend_kv_histories)
-                migration.add_binding(
-                    kBackendKvPool.index,
-                    backend_kv_histories->prepare_binding(
-                        nullptr, transaction.backend_frontier,
-                        transaction.reservation_demand.backend_frontier, lane,
-                        destinations.take(planned.backend), false));
-            const auto image = state_store->reserve_destination(std::move(state_records));
-            migration.own_state(*image);
-            migration.clear_state();
-            migration.prepare_actions();
-            install_binding(transaction);
-            state_store->complete_initialization(*image);
-            auto& state   = sequences[lane];
-            auto& binding = *migration.binding(kTextKvPool.index);
-            binding.publish_restores();
-            SequenceKVBundle kv{.text = binding.commit()};
-            if (auto* backend = migration.binding(kBackendKvPool.index)) {
-                backend->publish_restores();
-                kv.backend.emplace(backend->commit());
-            }
-            state.continuation.image = *image;
-            state.kv.emplace(std::move(kv));
-            (void)migration.state_destination().release();
-            deferred_bindings[lane].emplace(std::move(migration));
-            deferred_bindings[lane]->actions = deferred_bindings[lane]->transaction.actions();
-            context_operation_ = std::make_unique<PendingContext>(directory, ResidencyOperation{});
-            context_operation_->silent = true;
-            context_operation_->reservation.emplace(std::move(*execution_reservation));
-            ContextWork work;
-            work.bindings.push_back({{sequences[lane].id, sequences[lane].residency},
-                                     base.impl_->sampling});
-            (void)submit_context(*context_operation_, std::move(work));
-        } catch (...) {
-            abort_context();
-            if (deferred_bindings[lane]) discard_deferred_binding(lane);
-            clear_lane(sequences[lane], requests[lane]);
-            throw;
-        }
-        // A synchronous installation is complete when start_binding returns: hand the installed
-        // sequence and residency to the caller, which adopts the lane without a ContextProgress.
-        result.synchronous = true;
-        result.sequence    = sequences[lane].id;
-        result.residency   = sequences[lane].residency;
-        return result;
+        local   = std::make_unique<PendingContext>(directory, std::move(transaction));
+        pending = local.get();
+    } else {
+        context_operation_ =
+            std::make_unique<PendingContext>(directory, std::move(transaction));
+        context_operation_->reservation.emplace(std::move(*execution_reservation));
+        pending = context_operation_.get();
     }
-    context_operation_   = std::make_unique<PendingContext>(directory, std::move(transaction));
-    context_operation_->reservation.emplace(std::move(*execution_reservation));
-    auto& tx        = std::get<BindOperation>(context_operation_->action);
-    auto& migration = context_operation_->transaction;
+    auto& tx        = std::get<BindOperation>(pending->action);
+    auto& migration = pending->transaction;
     try {
         for (auto point : tx.carried_points) {
             if (point != source) tx.carried_pins.push_back(checkpoints.lease(point));
@@ -360,24 +321,59 @@ BindingReservation SessionImpl::start_binding(const RequestBasePlan& base, runti
         case StateBindingAction::Split:
             break;
         }
-        ContextWork work;
         ResidencyBinding binding{{sequences[lane].id, sequences[lane].residency},
                                  base.impl_->sampling};
-        if (resume && (binding.sampling.presence_penalty || binding.sampling.frequency_penalty)) {
-            const auto& ledger = resume->impl_->sequence.ledger;
-            if (ledger.size() < base.summary().prompt_tokens)
-                throw std::logic_error("sampling restore has no complete generated ledger");
-            binding.counts = count_builder.build(
-                std::span<const TokenId>(ledger).subspan(base.summary().prompt_tokens),
-                plan.profile->public_tokens);
+        if (!synchronous) {
+            ContextWork work;
+            if (resume && (binding.sampling.presence_penalty || binding.sampling.frequency_penalty)) {
+                const auto& ledger = resume->impl_->sequence.ledger;
+                if (ledger.size() < base.summary().prompt_tokens)
+                    throw std::logic_error("sampling restore has no complete generated ledger");
+                binding.counts = count_builder.build(
+                    std::span<const TokenId>(ledger).subspan(base.summary().prompt_tokens),
+                    plan.profile->public_tokens);
+            }
+            work.bindings.push_back(std::move(binding));
+            (void)submit_context(*context_operation_, std::move(work));
+            return result;
         }
-        work.bindings.push_back(std::move(binding));
-        (void)submit_context(*context_operation_, std::move(work));
-        return result;
+        // The source's tail page is read by the deferred actions, after the checkpoint itself may
+        // have been consumed: the prefixes stay referenced until the first flight retires.
+        std::vector<context::HistoryPrefix> retained;
+        if (source) {
+            retained.push_back(checkpoint(*source).text_prefix());
+            if (const auto* prefix = checkpoint(*source).backend_prefix())
+                retained.push_back(*prefix);
+        }
+        migration.prepare_actions();
+        ContextProgress adopted{.kind = ContextOperationKind::Bind};
+        complete_binding(tx, migration, adopted, true);
+        auto& deferred   = deferred_bindings[lane].emplace(std::move(migration));
+        deferred.actions = deferred.transaction.actions();
+        deferred.retained    = std::move(retained);
+        deferred.source_lease = std::move(tx.source_lease);
+        deferred.install      = std::move(binding);
     } catch (...) {
-        abort_context();
+        if (!synchronous) {
+            abort_context();
+        } else {
+            // The residency was never installed, and a lane that adopted its work discards it.
+            sequences[lane].residency = {};
+            if (deferred_bindings[lane]) {
+                discard_deferred_binding(lane);
+            } else {
+                try {
+                    local->transaction.discard();
+                } catch (...) {}
+            }
+            clear_lane(sequences[lane], requests[lane]);
+        }
         throw;
     }
+    result.synchronous = true;
+    result.sequence    = sequences[lane].id;
+    result.residency   = sequences[lane].residency;
+    return result;
 }
 
 void SessionImpl::install_binding(BindOperation& tx) {
@@ -405,7 +401,6 @@ void SessionImpl::install_binding(BindOperation& tx) {
             state.continuation.metadata.text_kv_valid           = tx.reuse_frontier;
             state.continuation.metadata.backend_kv_valid        = tx.backend_frontier;
             state.continuation.metadata.dflash_context_frontier = tx.reuse_frontier;
-            initialize_captures(request, tx.reuse_frontier, request.replay_target);
         }
         request.sampling_host = request.base->sampling;
     } else {
@@ -423,7 +418,7 @@ void SessionImpl::install_binding(BindOperation& tx) {
 }
 
 void SessionImpl::complete_binding(BindOperation& tx, context::ContextTransaction& migration,
-                                   ContextProgress& out) {
+                                   ContextProgress& out, bool deferred) {
     if (tx.resume) {
         out.recovery = {
             .route           = !tx.resume_without_replay ? GenerationRecoveryRoute::Replay
@@ -468,9 +463,13 @@ void SessionImpl::complete_binding(BindOperation& tx, context::ContextTransactio
         tx.source.reset();
         if (tx.resume && tx.resume->impl_->snapshot == old) tx.resume->impl_->snapshot.reset();
     }
-    SequenceKVBundle kv{.text = migration.binding(kTextKvPool.index)->commit()};
-    if (auto* backend = migration.binding(kBackendKvPool.index))
+    auto& text_binding = *migration.binding(kTextKvPool.index);
+    if (deferred) text_binding.publish_restores();
+    SequenceKVBundle kv{.text = text_binding.commit()};
+    if (auto* backend = migration.binding(kBackendKvPool.index)) {
+        if (deferred) backend->publish_restores();
         kv.backend.emplace(backend->commit());
+    }
     state.kv.emplace(std::move(kv));
     for (const auto& [from, to] : tx.carried_clones) checkpoints.publish(to, checkpoint(from));
     if (!tx.take_private) {

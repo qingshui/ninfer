@@ -49,7 +49,6 @@ SessionImpl::matching_execution(const PendingBatch& pending) const noexcept {
     return current;
 }
 
-namespace {
 ContinuationMetadata forward_metadata(ContinuationMetadata value, std::uint32_t count,
                                       SpeculativeBackend backend, bool backend_pool) {
     if (!count) return value;
@@ -63,26 +62,12 @@ ContinuationMetadata forward_metadata(ContinuationMetadata value, std::uint32_t 
     return value;
 }
 
-// One prefill segment of a completed execution, reported before its settlement is adopted.
-PrefillRowProgress prefill_row(const SessionImpl& session, const SessionImpl::Execution& current,
-                               std::size_t b) {
-    const auto& request = session.requests[session.lane(current.members[b])];
-    const auto end      = current.completed[b].execution_frontier;
-    PrefillRowProgress row;
-    row.summary = {request.base->summary.prompt_tokens, request.prefill->base,
-                   request.prefill->reuse};
-    row.processed_prompt_tokens = current.columns[b];
-    row.capture_ready =
-        request.capture_reservation && request.capture_reservation->frontier == end;
-    row.complete = end == request.base->summary.prompt_tokens;
-    return row;
-}
-
+namespace {
 void prepare_identity(SequenceState& state, std::size_t count, std::optional<std::uint32_t> split) {
     if (state.prefix_identity.size() != state.ledger.size() ||
         state.prefix_digests.size() != state.ledger.size())
         throw std::logic_error("generated identity does not match its ledger");
-    state.ledger.reserve(state.ledger.size() + count);
+    qwen::reserve_for_growth(state.ledger, state.ledger.size() + count);
     state.prefix_identity.prepare_generated(count, state.continuation.metadata.rope_delta, split);
     state.prefix_digests.prepare_generated(count, state.continuation.metadata.rope_delta, split);
 }
@@ -138,7 +123,7 @@ void SessionImpl::receive_result(runtime::ResultReady<ExecutionTypes>&& event) {
             current.completed.push_back(forward_metadata(current.bases[b].metadata,
                                                          current.columns[b], speculative_backend,
                                                          has_backend_pool()));
-            progress.prefill.rows.push_back(prefill_row(*this, current, b));
+            progress.prefill.rows.push_back(prefill_row(current, b));
             // Only a non-final segment without its own decision row must not have finished the
             // prompt; a final one reports complete and samples below.
             if (progress.prefill.rows.back().complete && !produces)
@@ -167,14 +152,7 @@ void SessionImpl::receive_result(runtime::ResultReady<ExecutionTypes>&& event) {
             PrefillProgress progress;
             progress.rows.reserve(current.members.size());
             for (std::size_t b = 0; b < current.members.size(); ++b) {
-                progress.rows.push_back(prefill_row(*this, current, b));
-                // A member that carries a decision row re-derives its capture readiness when the
-                // commit adopts its settlement; a resting member settles in the same commit but
-                // reports no decision row, so its row offers the capture here exactly as a mixed
-                // execution's segment does.
-                const bool produces = b < current.producing.size() && current.producing[b];
-                if (forward->generated && produces)
-                    progress.rows.back().capture_ready = false;
+                progress.rows.push_back(prefill_row(current, b));
             }
             if (forward->generated) {
                 // The batch carries one decision row per final segment, in segment order.
@@ -203,12 +181,10 @@ void SessionImpl::receive_result(runtime::ResultReady<ExecutionTypes>&& event) {
         } else if (current.kind == OperationKind::Replay) {
             const auto& request = requests[lane(current.members[0])];
             const auto end      = current.completed[0].execution_frontier;
-            const bool capture =
-                request.capture_reservation && request.capture_reservation->frontier == end;
             current.completion.emplace(
                 SessionEvent{current.ticket, current.members,
-                             ReplayProgress{capture, current.columns[0],
-                                            end == request.replay_target && !capture, end}});
+                             ReplayProgress{false, current.columns[0], end == request.replay_target,
+                                            end}});
         } else if (current.kind == OperationKind::Control) {
             current.completion.emplace(
                 SessionEvent{current.ticket, current.members, ControlComplete{}});
@@ -273,8 +249,6 @@ void SessionImpl::commit_completed_unit(Execution& current) {
                    current.columns[b] != 0 || current.kind == OperationKind::Normalize,
                    recovery[b]);
         const auto end = current.completed[b].execution_frontier;
-        request.capture_pending =
-            request.capture_reservation && request.capture_reservation->frontier == end;
         if (current.kind == OperationKind::Prefill) request.prefill->cursor = end;
         if (current.kind == OperationKind::Replay) request.replay_cursor = end;
         if (current.kind == OperationKind::Control)
@@ -308,7 +282,7 @@ CommitResult SessionImpl::commit(PendingBatch&& pending,
     CommitResult result;
     result.row_count = decisions.size();
     result.rows.resize(decisions.size());
-    result.capture_ready.resize(decisions.size());
+    result.capture_ready.assign(decisions.size(), false);
     // Lane-indexed recovery marks; one bool per lane of the resolved concurrency.
     const auto recovery        = std::make_unique<bool[]>(max_concurrency);
     const auto segment_recovery = std::make_unique<bool[]>(max_concurrency);
@@ -389,12 +363,10 @@ CommitResult SessionImpl::commit(PendingBatch&& pending,
             if (std::find(current.pending_members.begin(), current.pending_members.end(),
                           static_cast<std::uint32_t>(b)) != current.pending_members.end())
                 continue;
-            const auto l  = lane(current.members[b]);
-            auto& request = requests[l];
+            const auto l   = lane(current.members[b]);
+            auto& request  = requests[l];
             const auto end = current.completed[b].execution_frontier;
             adopt_unit(l, current.completed[b], current.columns[b] != 0, segment_recovery[b]);
-            request.capture_pending =
-                request.capture_reservation && request.capture_reservation->frontier == end;
             request.prefill->cursor = end;
         }
     }
@@ -415,18 +387,8 @@ CommitResult SessionImpl::commit(PendingBatch&& pending,
                                       .subspan(b * pending.stride_, d.accepted_tokens);
             append_identity(state, accepted, d.prefix_execution_split_after);
             request.lifecycle = d.terminal ? Lifecycle::Finishable : Lifecycle::Active;
-            request.capture_pending =
-                request.capture_reservation &&
-                request.capture_reservation->frontier ==
-                    current.completed[m].execution_frontier;
         }
-        if (d.terminal) {
-            request.capture_pending = false;
-            request.capture_reservation.reset();
-            request.prefill.reset();
-        } else if (current.kind == OperationKind::Prefill && !request.capture_pending) {
-            request.prefill.reset();
-        }
+        if (d.terminal || current.kind == OperationKind::Prefill) request.prefill.reset();
         auto& stats = request.speculative_stats;
         if ((current.kind == OperationKind::Decode || current.kind == OperationKind::Mixed) &&
             speculative_backend != SpeculativeBackend::None) {
@@ -447,8 +409,7 @@ CommitResult SessionImpl::commit(PendingBatch&& pending,
                                   : d.failed   ? runtime::CommitDisposition::FailedReleased
                                   : d.terminal ? runtime::CommitDisposition::Finishable
                                                : runtime::CommitDisposition::Active;
-        row.speculative         = stats;
-        result.capture_ready[b] = !d.terminal && request.capture_pending;
+        row.speculative = stats;
     }
     pending.ticket_ = {};
     return result;
@@ -502,8 +463,6 @@ void SessionImpl::adopt_segments(Execution& current,
         auto& request  = requests[l];
         const auto end = current.completed[b].execution_frontier;
         adopt_unit(l, current.completed[b], current.columns[b] != 0, recovery[b]);
-        request.capture_pending =
-            request.capture_reservation && request.capture_reservation->frontier == end;
         request.prefill->cursor = end;
     }
 }
@@ -513,6 +472,14 @@ void SessionImpl::retire(runtime::DeviceRetired event) {
         if (!release_result) throw std::logic_error("residency retired before release result");
         release_ticket.reset();
         release_result = false;
+        // A lane whose release left may install a new residency, unless another release of it is
+        // already queued.
+        for (const auto released : releasing_ticket_lanes_)
+            if (std::none_of(releases.begin(), releases.end(), [&](const auto& pending) {
+                    return pending.lane.value == released;
+                }))
+                lane_releasing_[released] = 0;
+        releasing_ticket_lanes_.clear();
         if (after_releases && releases.empty()) {
             events.push_back(std::move(*after_releases));
             after_releases.reset();
@@ -542,6 +509,7 @@ void SessionImpl::retire(runtime::DeviceRetired event) {
     }
     auto current = std::move(*owner);
     execution_slot(event.ticket.frame).reset();
+    for (const auto l : current.lanes) --lane_busy_[l];
     current.preparation->mark_completed();
     current.preparation->publish();
     if (current.settlement) {
@@ -562,13 +530,21 @@ void SessionImpl::retire(runtime::DeviceRetired event) {
         const auto l  = lane(current.members[b]);
         auto& request = requests[l];
         if (current.kind == OperationKind::Replay &&
-            request.replay_cursor == request.replay_target && !request.capture_pending) {
+            request.replay_cursor == request.replay_target) {
             request.lifecycle = request.resume_lifecycle;
             if (request.lifecycle == Lifecycle::Prefilling)
-                initialize_captures(request, request.replay_target,
-                                    request.base->summary.prompt_tokens);
+                initialize_checkpoint_plan(request, request.replay_target);
         }
     }
+    // The flight wrote its checkpoints' State images and its commit advanced the KV they retain;
+    // a lane that this very retirement clears publishes nothing.
+    std::vector<std::uint8_t> clearing(current.members.size(), 0);
+    for (std::size_t row = 0; row < current.pending_members.size(); ++row)
+        if (current.discarded ||
+            (!current.decisions.empty() &&
+             (current.decisions[row].cancelled || current.decisions[row].failed)))
+            clearing[current.pending_members[row]] = 1;
+    publish_flight_checkpoints(current, clearing);
     if (current.kind != OperationKind::Normalize && current.kind != OperationKind::Score)
         events.push_back({current.ticket, current.members,
                           runtime::ExecutionComplete{event.execution, current.members.size()}});
@@ -578,10 +554,7 @@ void SessionImpl::retire(runtime::DeviceRetired event) {
         const auto l  = lane(current.members[b]);
         auto& state   = sequences[l];
         auto& request = requests[l];
-        if (current.discarded ||
-            (!current.decisions.empty() &&
-             (current.decisions[row].cancelled || current.decisions[row].failed)))
-            clear_lane(state, request);
+        if (clearing[b]) clear_lane(state, request);
     }
     if (current.completion) events.push_back(std::move(*current.completion));
     if (current.kind == OperationKind::Normalize && normalizing_pause_)

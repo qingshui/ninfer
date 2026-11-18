@@ -144,6 +144,13 @@ std::string Metrics::render(const EngineSnapshot& snapshot, const ServiceSnapsho
     COUNTER(root_selections, "root_selections_total", "Initial bindings without checkpoint reuse.");
     COUNTER(checkpoint_selections, "checkpoint_selections_total",
             "Initial bindings with checkpoint reuse.");
+    COUNTER(fork_batches, "fork_batches_total", "Session fork calls that started sample groups.");
+    COUNTER(forked_branches, "forked_branches_total",
+            "Sample branches started by a fork, parents included.");
+    COUNTER(inflight_checkpoints_published, "inflight_checkpoints_published_total",
+            "Checkpoints written inside flights and published at their retirement.");
+    COUNTER(inflight_checkpoints_skipped, "inflight_checkpoints_skipped_total",
+            "Planned flight checkpoints skipped for lack of Context or commit coverage.");
     COUNTER(speculative_rounds, "spec_decode_rounds_total",
             "Native speculative verification rounds.");
     COUNTER(speculative_draft_tokens, "spec_decode_draft_tokens_total",

@@ -151,6 +151,14 @@ TextRun::TextRun(TextExecutionView execution, TextInputs inputs, TextStateUpdate
         validate_segments(mixed->segments, static_cast<std::int32_t>(steps.token_offset), rows,
                           config.gdn.has_value(), static_cast<std::int32_t>(steps.row_offset),
                           static_cast<std::int32_t>(steps.rows));
+        // Every segment is an independent B=1 entry planned for the keys it sees. The decode rows
+        // are the [W,B] tail of the token axis and attend with their own envelope.
+        mixed_groups_.reserve(mixed->segments.size() + 1);
+        for (const auto& segment : mixed->segments)
+            mixed_groups_.push_back({segment.token_offset, segment.tokens, 1, segment.row,
+                                     {segment.keys, segment.keys}});
+        mixed_groups_.push_back(
+            {steps.token_offset, steps.width, steps.rows, steps.row_offset, steps.envelope});
         if (config.gdn) validate_segment_table(mixed->table, mixed->segments.size());
         if (config.gdn) {
             const auto step_rows = static_cast<std::int32_t>(steps.rows);
@@ -271,11 +279,16 @@ void TextRun::attention(const BlockParameters& block, std::uint32_t compact_laye
     const auto scale = static_cast<float>(1.0 / std::sqrt(double(attn.head_dim)));
     const auto cache = view_.cache.batch_layer_view(compact_layer);
     const auto* packed = std::get_if<PackedSequenceUpdate>(&update_);
-    const auto* mixed  = std::get_if<MixedUpdate>(&update_);
-    if (packed || mixed) {
+    if (std::holds_alternative<MixedUpdate>(update_)) {
+        ops::causal_softmax_attention_groups(q, k, value, inputs_.cache_positions,
+                                             inputs_.valid_columns, inputs_.kv_table_rows,
+                                             mixed_groups_, {dim, heads, kv}, scale, cache, work,
+                                             a, cuda);
+    } else if (packed) {
         // Each segment is an independent B=1 sequence, so it uses the existing Op with its own
-        // positions, table row and valid length. The envelope bounds every segment's visible keys.
-        for (const auto& segment : packed ? packed->segments : mixed->segments) {
+        // positions, table row and valid length. The traversal may be captured into a graph whose
+        // launch geometry is baked, so its segments share one envelope.
+        for (const auto& segment : packed->segments) {
             const auto begin  = static_cast<std::int32_t>(segment.token_offset);
             const auto length = static_cast<std::int32_t>(segment.tokens);
             const auto row    = static_cast<std::int32_t>(segment.row);
@@ -287,24 +300,6 @@ void TextRun::attention(const BlockParameters& block, std::uint32_t compact_laye
                 qs, ks, vs, inputs_.cache_positions.slice(0, begin, length),
                 inputs_.valid_columns.slice(0, row, 1), inputs_.kv_table_rows.slice(0, row, 1),
                 {dim, heads, kv}, scale, cache, envelope_, work, as, cuda);
-        }
-        if (mixed) {
-            // The decode rows are the [W,B] tail of the token axis and attend with their own
-            // envelope.
-            const auto& steps = mixed->steps;
-            const auto begin  = static_cast<std::int32_t>(steps.token_offset);
-            const auto count  = static_cast<std::int32_t>(steps.width * steps.rows);
-            const auto w      = static_cast<std::int32_t>(steps.width);
-            const auto b      = static_cast<std::int32_t>(steps.rows);
-            const auto first  = static_cast<std::int32_t>(steps.row_offset);
-            Tensor qs         = q.slice(2, begin, count).view({dim, heads, w, b});
-            Tensor ks         = k.slice(2, begin, count).view({dim, kv, w, b});
-            Tensor vs         = value.slice(2, begin, count).view({dim, kv, w, b});
-            Tensor as         = a.slice(2, begin, count).view({dim, heads, w, b});
-            ops::causal_softmax_attention(
-                qs, ks, vs, inputs_.cache_positions.slice(0, begin, count).view({w, b}),
-                inputs_.valid_columns.slice(0, first, b), inputs_.kv_table_rows.slice(0, first, b),
-                {dim, heads, kv}, scale, cache, steps.envelope, work, as, cuda);
         }
     } else {
         ops::causal_softmax_attention(qb, kb, vb, inputs_.cache_positions, inputs_.valid_columns,

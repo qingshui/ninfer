@@ -49,10 +49,12 @@ void dispatch_tile(int tile_tokens, const Sm100Bf16Operands& p, const Epilogue& 
 }
 } // namespace
 
-Nvfp4Sm100Tuning bf16_sm100_tuning(int, int, int tokens) {
+Nvfp4Sm100Tuning bf16_sm100_tuning(int rows, int, int tokens) {
     if (tokens <= 16) return {16, 1, 1};
     if (tokens <= 32) return {32, 1, 1};
     if (tokens <= 64) return {64, 1, 1};
+    // 256-token tiles cut operand traffic per MAC; they need enough tiles to fill the SMs.
+    if (tokens >= 3072 && rows >= 1024) return {256, 1, 1};
     return {128, 1, 1};
 }
 

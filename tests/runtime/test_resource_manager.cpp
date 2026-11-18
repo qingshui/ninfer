@@ -857,6 +857,39 @@ void test_shared_publication_preserves_distinct_placements() {
             "retiring one placement removed another placement's recovery point");
 }
 
+void test_trim_retained_releases_least_worth_first() {
+    Fixture f(0);
+    const auto old_shared = f.program.add({1, 2, 3});
+    const auto lineage    = f.program.add({7, 8, 9, 10}, {}, Role::Continuation);
+    const auto new_shared = f.program.add({4, 5, 6});
+    f.publish(old_shared);
+    f.publish(lineage);
+    f.publish(new_shared);
+    require(f.cache.retained_points() == 3, "retained points did not count both kinds");
+    f.cache.trim_retained(f.program, 5);
+    require(f.cache.retained_points() == 3, "a target above the retained count released a point");
+    f.cache.trim_retained(f.program, 2);
+    require(!f.program.valid_checkpoint(lineage) && f.program.valid_checkpoint(old_shared) &&
+                f.program.valid_checkpoint(new_shared),
+            "a finished lineage did not leave before the shared prefixes");
+    f.cache.trim_retained(f.program, 1);
+    require(!f.program.valid_checkpoint(old_shared) && f.program.valid_checkpoint(new_shared),
+            "the oldest shared prefix did not leave before a newer one");
+    f.cache.trim_retained(f.program, 0);
+    require(f.cache.retained_points() == 0 && !f.program.valid_checkpoint(new_shared),
+            "trimming to zero kept a retained point");
+
+    Fixture g(0);
+    const auto adopted = g.program.add({1, 2, 3});
+    const auto unused  = g.program.add({4, 5, 6});
+    g.publish(adopted);
+    g.publish(unused);
+    g.use_shared(adopted);
+    g.cache.trim_retained(g.program, 1);
+    require(g.program.valid_checkpoint(adopted) && !g.program.valid_checkpoint(unused),
+            "a shared prefix a request adopted left before one nobody used");
+}
+
 void test_candidates_expand_sources_and_target_placements() {
     Fixture f(0);
     f.program.available_placements = {{0}, {1}};
@@ -2421,6 +2454,7 @@ int main() {
     try {
         test_shared_publication_deduplicates_complete_snapshots();
         test_shared_publication_preserves_distinct_placements();
+        test_trim_retained_releases_least_worth_first();
         test_candidates_expand_sources_and_target_placements();
         test_private_resume_snapshot_uses_committed_recovery_target();
         test_resume_waiting_retains_private_points_but_borrows_snapshot();

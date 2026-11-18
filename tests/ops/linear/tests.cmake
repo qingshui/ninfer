@@ -55,6 +55,10 @@ if(NINFER_TARGET STREQUAL "b200")
   ninfer_add_op_test(ninfer_linear_sm100_test
     SOURCES "${CMAKE_CURRENT_LIST_DIR}/sm100/test.cpp"
     LIBRARIES ninfer_ops)
+  # GDN qkvz / out projections with E4M3 row-scaled weights through the public Ops.
+  ninfer_add_op_test(ninfer_linear_fp8_b200_test
+    SOURCES "${CMAKE_CURRENT_LIST_DIR}/fp8_b200/test.cpp"
+    LIBRARIES ninfer_ops)
 endif()
 
 # Registration and rejection messages of the 122B geometries; host-only, no device data.

@@ -78,6 +78,9 @@ struct Storage {
     void* input_scales          = nullptr;
     std::uint8_t* product_codes = nullptr;
     void* product_scales        = nullptr;
+    // Hidden-state codes and scales in packed-slot order (tcgen05 gate/up reads them directly).
+    std::uint8_t* gathered_codes = nullptr;
+    void* gathered_scales        = nullptr;
     float* contributions        = nullptr;
     float* vector_activation    = nullptr;
     float* routed_sum           = nullptr;
@@ -105,6 +108,14 @@ void launch_shared(const Tensor& x, const ScaledSwiGLUTerm& shared, const Expert
 bool launch_shared_dense(const Tensor& x, const ScaledSwiGLUTerm& shared, const ExpertRoutes& routes,
                          MoeEpilogue mode, Tensor& destination, const Storage& storage,
                          const Plan& plan, CudaExecutionView execution, bool prepared);
+
+// The complete Op's control launch normally produces the shared activation beside the router
+// logits. For calls large enough to fill a dense GEMM, B200 writes it with the sm100 BF16 SwiGLU
+// GEMM instead and the control kernel keeps only the router rows. Returns false when the control
+// kernel must produce the activation as well.
+bool launch_control_shared_gate_up_dense(const Tensor& x, const MoeWeights& weights,
+                                         const Storage& storage, const Plan& plan,
+                                         CudaExecutionView execution);
 #endif
 
 void launch_control_shared(const Tensor& x, const MoeWeights& weights, const ExpertRoutes& routes,

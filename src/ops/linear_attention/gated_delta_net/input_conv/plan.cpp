@@ -5,6 +5,7 @@
 namespace ninfer::ops::detail::gdn_input {
 
 ProjectionPlan select_projection_plan(const WeightProfile& weights, std::int32_t columns) {
+    if (weights.format == Format::Fp8Tcgen05) return {Compute::A8};
     if (weights.format == Format::Fp8 && allows_a8(weights.policy) && columns >= 17)
         return {Compute::A8};
     if (weights.format == Format::Nvfp4 && allows_a4(weights.policy)) return {Compute::A4};

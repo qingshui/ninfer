@@ -4,6 +4,7 @@
 
 #include "models/common/qwen/frontend/prepared_prompt.h"
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -12,6 +13,13 @@
 #include <vector>
 
 namespace ninfer::models::qwen {
+
+// Capacity for a sequence that grows by a few tokens per step: reserve(n) alone allocates exactly n,
+// so a vector that is full reallocates and copies at every step.
+template <class Vector>
+void reserve_for_growth(Vector& vector, std::size_t count) {
+    if (count > vector.capacity()) vector.reserve(std::max(count, 2 * vector.capacity()));
+}
 
 class ResidentPrefixIdentity {
 public:

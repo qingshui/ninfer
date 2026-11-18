@@ -50,6 +50,17 @@ __device__ __forceinline__ uint4 int8_dequant8(const std::int8_t* codes, float s
                    pack(c[4] * scale, c[5] * scale), pack(c[6] * scale, c[7] * scale));
 }
 
+// A policy whose V decode needs no split from its load: the staged value is the decoded vector.
+template <class Policy>
+struct FusedV {
+    using VRaw = uint4;
+    __device__ static __forceinline__ VRaw load_v8_raw(const Sm100KvCache& c, std::int64_t record,
+                                                       int head, int row, int d) {
+        return Policy::load_v8(c, record, head, row, d);
+    }
+    __device__ static __forceinline__ uint4 decode_v8(const VRaw& raw) { return raw; }
+};
+
 template <KvDType Kv>
 struct KvPolicy;
 
@@ -57,7 +68,7 @@ struct KvPolicy;
 // BF16: K bf16, V fp16.
 // ---------------------------------------------------------------------------------------------
 template <>
-struct KvPolicy<KvDType::Bf16> {
+struct KvPolicy<KvDType::Bf16> : FusedV<KvPolicy<KvDType::Bf16>> {
     static constexpr bool kRotate       = false;
     static constexpr bool kNativeFp8    = false;
     static constexpr bool kInverseRotate = false;
@@ -78,7 +89,7 @@ struct KvPolicy<KvDType::Bf16> {
 // INT8 G64 with FP16 scales: decoded = code * scale. K rotated, V in original coordinates.
 // ---------------------------------------------------------------------------------------------
 template <>
-struct KvPolicy<KvDType::Int8> {
+struct KvPolicy<KvDType::Int8> : FusedV<KvPolicy<KvDType::Int8>> {
     static constexpr bool kRotate        = true;
     static constexpr bool kNativeFp8     = false;
     static constexpr bool kInverseRotate = false;
@@ -117,21 +128,34 @@ struct KvPolicy<KvDType::Fp8> {
         const auto code = kv::Fp8G128Layout::code_offset(record, head, d, row);
         return common::load_vec<uint4>(static_cast<const std::uint8_t*>(c.keys) + code);
     }
-    __device__ static __forceinline__ void load_k_scales(const Sm100KvCache& c, std::int64_t record,
-                                                         int head, int row, float& s0, float& s1) {
+    // The K scale pair of one key row (E4M3 128-feature groups 0 and 1), still encoded.
+    __device__ static __forceinline__ unsigned load_k_scale_pair(const Sm100KvCache& c,
+                                                                 std::int64_t record, int head,
+                                                                 int row) {
         const auto scale = kv::Fp8G128Layout::scale_offset(record, head, 0, row);
-        const unsigned pair =
-            common::load_vec<std::uint16_t>(static_cast<const std::uint8_t*>(c.key_scales) + scale);
+        return common::load_vec<std::uint16_t>(static_cast<const std::uint8_t*>(c.key_scales) +
+                                               scale);
+    }
+    __device__ static __forceinline__ void decode_k_scales(unsigned pair, float& s0, float& s1) {
         s0 = common::ue8m0_to_float(static_cast<std::uint8_t>(pair & 255u));
         s1 = common::ue8m0_to_float(static_cast<std::uint8_t>(pair >> 8));
     }
-    __device__ static __forceinline__ uint4 load_v8(const Sm100KvCache& c, std::int64_t record,
-                                                    int head, int row, int d) {
+
+    // Eight V codes and their group scale as loaded: the FP16 expansion waits until the loads of
+    // the whole tile are in flight.
+    struct VRaw {
+        int2 codes;
+        unsigned scale;
+    };
+    __device__ static __forceinline__ VRaw load_v8_raw(const Sm100KvCache& c, std::int64_t record,
+                                                       int head, int row, int d) {
         const auto code  = kv::Fp8G128Layout::code_offset(record, head, d, row);
         const auto scale = kv::Fp8G128Layout::scale_offset(record, head, d / 128, row);
-        const int4 value = common::fp8_dequant_f16x8(
-            static_cast<const std::uint8_t*>(c.values) + code,
-            static_cast<const std::uint8_t*>(c.value_scales)[scale]);
+        return {common::load_vec<int2>(static_cast<const std::uint8_t*>(c.values) + code),
+                static_cast<unsigned>(static_cast<const std::uint8_t*>(c.value_scales)[scale])};
+    }
+    __device__ static __forceinline__ uint4 decode_v8(const VRaw& raw) {
+        const int4 value = common::fp8_dequant_f16x8(raw.codes, static_cast<std::uint8_t>(raw.scale));
         return make_uint4(value.x, value.y, value.z, value.w);
     }
 };
@@ -140,7 +164,7 @@ struct KvPolicy<KvDType::Fp8> {
 // NVFP4 G16 with UE4M3 scales. K and V rotated.
 // ---------------------------------------------------------------------------------------------
 template <>
-struct KvPolicy<KvDType::Nvfp4> {
+struct KvPolicy<KvDType::Nvfp4> : FusedV<KvPolicy<KvDType::Nvfp4>> {
     static constexpr bool kRotate        = true;
     static constexpr bool kNativeFp8     = false;
     static constexpr bool kInverseRotate = true;
@@ -172,7 +196,7 @@ struct KvPolicy<KvDType::Nvfp4> {
 // K8V4: K is FP8 G128 (expanded to bf16), V is NVFP4 G16. K and V rotated.
 // ---------------------------------------------------------------------------------------------
 template <>
-struct KvPolicy<KvDType::K8V4> {
+struct KvPolicy<KvDType::K8V4> : FusedV<KvPolicy<KvDType::K8V4>> {
     static constexpr bool kRotate        = true;
     static constexpr bool kNativeFp8     = false;
     static constexpr bool kInverseRotate = true;

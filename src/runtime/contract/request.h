@@ -27,6 +27,9 @@ struct ResolvedExecutionOptions {
     // source is independent of adopting one.
     bool publish_prefix_continuation      = true;
     ThinkingControlOptions thinking;
+    // Branches the Engine started from this prompt, this request included. A Session that can
+    // fork a prompt prefills it once for a request that shares it (sample_count > 1).
+    std::uint32_t sample_count = 1;
 };
 
 struct ResolvedRequestOptions {

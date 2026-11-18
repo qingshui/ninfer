@@ -116,6 +116,11 @@ add_test(NAME ninfer_qwen3_5_agent_continuation_real_test
 set_tests_properties(ninfer_qwen3_5_agent_continuation_real_test PROPERTIES
   ENVIRONMENT "NINFER_PREFIX_REAL_SCENARIO=agent-continuation")
 
+add_test(NAME ninfer_qwen3_5_zero_suffix_real_test
+  COMMAND ninfer_qwen3_5_prefix_real_test)
+set_tests_properties(ninfer_qwen3_5_zero_suffix_real_test PROPERTIES
+  ENVIRONMENT "NINFER_PREFIX_REAL_SCENARIO=zero-suffix")
+
 # A real-model test owns the single GPU while its artifact is resident.
 set(ninfer_qwen3_5_real_tests
   ninfer_qwen3_5_loading_real_test
@@ -125,6 +130,7 @@ set(ninfer_qwen3_5_real_tests
   ninfer_qwen3_5_prefix_real_test
   ninfer_qwen3_5_terminal_publication_real_test
   ninfer_qwen3_5_agent_continuation_real_test
+  ninfer_qwen3_5_zero_suffix_real_test
   ninfer_qwen3_5_preemption_real_test
   ninfer_qwen3_5_fairness_real_test
   ninfer_qwen3_5_grammar_real_test
@@ -144,12 +150,6 @@ set_tests_properties(${ninfer_qwen3_5_real_tests} PROPERTIES
 set_tests_properties(
   ninfer_qwen3_5_state_image_test
   PROPERTIES SKIP_RETURN_CODE 77 LABELS "gpu")
-
-ninfer_add_test(ninfer_qwen3_5_capture_nonblocking_test
-  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_capture_nonblocking.cpp"
-  LIBRARIES ninfer_model_execution ninfer_model_loading ninfer_core)
-set_tests_properties(ninfer_qwen3_5_capture_nonblocking_test
-  PROPERTIES SKIP_RETURN_CODE 77 LABELS "gpu;real")
 
 ninfer_add_test(ninfer_qwen3_5_packed_forward_contract_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_packed_forward_contract.cpp"

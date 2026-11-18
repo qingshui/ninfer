@@ -23,8 +23,11 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <span>
 #include <stdexcept>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace ninfer::ops {
 namespace {
@@ -202,6 +205,79 @@ void validate_batched_attention_tensors(const Tensor& q, const Tensor& positions
     }
 }
 
+void validate_group_tensors(const Tensor& q, const Tensor& k, const Tensor& v,
+                           const Tensor& positions, const Tensor& valid_columns,
+                           const Tensor& kv_table_rows,
+                           std::span<const CausalAttentionGroup> groups,
+                           AttentionHeadGeometry geometry, float scale,
+                           const ConstPagedKVBatchLayerView& cache, const Tensor& out,
+                           const char* op, Device device) {
+    require_causal_geometry(geometry, op);
+    if (q.dtype != DType::BF16 || k.dtype != DType::BF16 || v.dtype != DType::BF16 ||
+        out.dtype != DType::BF16) {
+        throw std::invalid_argument(std::string(op) + ": q/k/v/out must be BF16");
+    }
+    if (positions.dtype != DType::I32 || valid_columns.dtype != DType::I32 ||
+        kv_table_rows.dtype != DType::I32) {
+        throw std::invalid_argument(std::string(op) + ": metadata must be I32");
+    }
+    if (!std::isfinite(scale) || std::abs(scale - kExpectedScale) > 1.0e-6f) {
+        throw std::invalid_argument(std::string(op) + ": scale must be 1/sqrt(256)");
+    }
+    const std::int32_t q_heads  = geometry.query_heads;
+    const std::int32_t kv_heads = geometry.kv_heads;
+    const std::int32_t tokens   = q.ne[2];
+    const std::int32_t rows     = valid_columns.ne[0];
+    if (tokens <= 0 || rows <= 0 || groups.empty()) {
+        throw std::invalid_argument(std::string(op) + ": empty token axis, rows or groups");
+    }
+    common::operand::shape(q, {kHeadDim, q_heads, tokens, 1}, op, "q");
+    common::operand::shape(k, {kHeadDim, kv_heads, tokens, 1}, op, "k");
+    common::operand::shape(v, {kHeadDim, kv_heads, tokens, 1}, op, "v");
+    common::operand::shape(out, {kHeadDim, q_heads, tokens, 1}, op, "out");
+    common::operand::shape(positions, {tokens, 1, 1, 1}, op, "positions");
+    common::operand::shape(valid_columns, {rows, 1, 1, 1}, op, "valid columns");
+    common::operand::shape(kv_table_rows, {rows, 1, 1, 1}, op, "KV table rows");
+    common::operand::contiguous_nonnull(q, op, "q", device);
+    common::operand::contiguous_nonnull(k, op, "k", device);
+    common::operand::contiguous_nonnull(v, op, "v", device);
+    common::operand::contiguous_nonnull(out, op, "out", device);
+    common::operand::contiguous_nonnull(positions, op, "positions", device);
+    common::operand::contiguous_nonnull(valid_columns, op, "valid columns", device);
+    common::operand::contiguous_nonnull(kv_table_rows, op, "KV table rows", device);
+    const std::uint32_t capacity = validate_batch_cache(cache, kv_heads, op, device);
+
+    std::uint64_t next_column = 0;
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> row_ranges;
+    row_ranges.reserve(groups.size());
+    for (const auto& g : groups) {
+        const auto& envelope = g.envelope;
+        if (g.width == 0 || g.batch == 0 || g.batch > static_cast<std::uint32_t>(maximum_batch_size(geometry)) ||
+            (g.batch > 1 && g.width > static_cast<std::uint32_t>(kMaximumVerifyTokens))) {
+            throw std::invalid_argument(std::string(op) + ": unsupported B/W domain");
+        }
+        const std::uint64_t columns = static_cast<std::uint64_t>(g.width) * g.batch;
+        if (g.token_offset < next_column || g.token_offset + columns > static_cast<std::uint64_t>(tokens) ||
+            static_cast<std::uint64_t>(g.row) + g.batch > static_cast<std::uint64_t>(rows) ||
+            cache.k_pages.records.page_offsets.ne[1] < static_cast<std::int32_t>(g.batch)) {
+            throw std::invalid_argument(std::string(op) + ": group is outside the token axis or rows");
+        }
+        if (envelope.min_visible_keys == 0 || envelope.min_visible_keys > envelope.max_visible_keys ||
+            envelope.max_visible_keys > kCausalAttentionMaximumVisibleKeys ||
+            envelope.max_visible_keys > capacity) {
+            throw std::invalid_argument(std::string(op) + ": invalid execution envelope");
+        }
+        next_column = g.token_offset + columns;
+        row_ranges.emplace_back(g.row, g.batch);
+    }
+    std::sort(row_ranges.begin(), row_ranges.end());
+    for (std::size_t i = 1; i < row_ranges.size(); ++i) {
+        if (row_ranges[i].first < row_ranges[i - 1].first + row_ranges[i - 1].second) {
+            throw std::invalid_argument(std::string(op) + ": groups share metadata entries");
+        }
+    }
+}
+
 } // namespace
 
 std::size_t causal_softmax_attention_workspace_capacity_bytes(
@@ -334,6 +410,50 @@ void causal_softmax_attention(const Tensor& q, const Tensor& k, const Tensor& v,
     detail::k8v4_kv_append_attention(q, k, v, positions, valid_columns, kv_table_rows, scale, cache,
                                      envelope, workspace, out, execution);
 #endif
+}
+
+void causal_softmax_attention_groups(const Tensor& q, const Tensor& k, const Tensor& v,
+                                     const Tensor& positions, const Tensor& valid_columns,
+                                     const Tensor& kv_table_rows,
+                                     std::span<const CausalAttentionGroup> groups,
+                                     AttentionHeadGeometry geometry, float scale,
+                                     PagedKVBatchLayerView cache, MemoryArena& workspace,
+                                     Tensor& out, CudaExecutionView execution) {
+    if (workspace.device() != execution.device()) {
+        throw std::invalid_argument(
+            "causal_softmax_attention_groups: workspace belongs to another device");
+    }
+    constexpr const char* op = "causal_softmax_attention_groups";
+    validate_group_tensors(q, k, v, positions, valid_columns, kv_table_rows, groups, geometry, scale,
+                           cache, out, op, execution.device());
+
+#if NINFER_TARGET_B200
+    if (detail::attention_backend(detail::kv_dtype(cache.storage), geometry.query_heads,
+                                  geometry.kv_heads, kHeadDim) ==
+        detail::AttentionBackend::Tcgen05) {
+        detail::sm100_kv_append_attention_groups(detail::kv_dtype(cache.storage), q, k, v,
+                                                 positions, valid_columns, kv_table_rows, scale,
+                                                 cache, groups, out, execution);
+        return;
+    }
+#endif
+    const std::int32_t q_heads  = geometry.query_heads;
+    const std::int32_t kv_heads = geometry.kv_heads;
+    for (const auto& g : groups) {
+        const auto begin   = static_cast<std::int32_t>(g.token_offset);
+        const auto width   = static_cast<std::int32_t>(g.width);
+        const auto batch   = static_cast<std::int32_t>(g.batch);
+        const auto row     = static_cast<std::int32_t>(g.row);
+        const auto columns = width * batch;
+        const Tensor qg    = q.slice(2, begin, columns).view({kHeadDim, q_heads, width, batch});
+        const Tensor kg    = k.slice(2, begin, columns).view({kHeadDim, kv_heads, width, batch});
+        const Tensor vg    = v.slice(2, begin, columns).view({kHeadDim, kv_heads, width, batch});
+        Tensor og          = out.slice(2, begin, columns).view({kHeadDim, q_heads, width, batch});
+        causal_softmax_attention(qg, kg, vg, positions.slice(0, begin, columns).view({width, batch}),
+                                 valid_columns.slice(0, row, batch),
+                                 kv_table_rows.slice(0, row, batch), geometry, scale, cache,
+                                 g.envelope, workspace, og, execution);
+    }
 }
 
 void causal_softmax_attention_cached(const Tensor& q, const Tensor& positions,

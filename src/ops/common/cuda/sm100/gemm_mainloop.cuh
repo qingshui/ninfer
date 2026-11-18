@@ -30,7 +30,7 @@
 
 namespace ninfer::ops::common::sm100 {
 
-enum class GemmKind { Nvfp4, Bf16 };
+enum class GemmKind { Nvfp4, Bf16, Fp8 };
 
 __host__ __device__ constexpr int pow2_at_least(int value, int minimum) {
     int r = minimum;
@@ -42,25 +42,29 @@ __host__ __device__ constexpr int pow2_at_least(int value, int minimum) {
 //   Kind    operand format
 //   TileN   tokens per tile (the MMA's N)
 //   Parts   weight tiles multiplied against the same activation tile (2 for gate/up SwiGLU)
-template <GemmKind Kind, int TileN, int Parts = 1>
+//   EpilogueWarps  warps that drain the accumulator: four, one per TMEM lane quadrant, or eight,
+//                  two per quadrant that each drain half of the tile's columns
+template <GemmKind Kind, int TileN, int Parts = 1, int EpilogueWarps = 4>
 struct GemmConfig {
     static_assert(TileN == 16 || TileN == 32 || TileN == 64 || TileN == 128 || TileN == 256);
     static_assert(Parts == 1 || Parts == 2);
+    static_assert(EpilogueWarps == 4 || EpilogueWarps == 8);
 
     static constexpr GemmKind kKind    = Kind;
     static constexpr bool kScaled      = Kind == GemmKind::Nvfp4;
     static constexpr int kTileM        = 128;
     static constexpr int kTileN        = TileN;
     static constexpr int kParts        = Parts;
-    static constexpr int kThreads      = 256;
-    static constexpr int kEpilogueWarps = 4;
+    static constexpr int kEpilogueWarps = EpilogueWarps;
+    static constexpr int kThreads      = 32 * (4 + EpilogueWarps);
 
-    // One stage is a 128-byte-wide K slab of every operand: 256 E2M1 values or 64 BF16 values.
+    // One stage is a 128-byte-wide K slab of every operand: 256 E2M1 values, 128 E4M3 values or
+    // 64 BF16 values.
     static constexpr int kSlabBytes    = 128;
     static constexpr int kMmaPerStage  = 4; // 32 bytes of K per instruction
     static constexpr int kMmaKBytes    = 32;
     // TMA box inner extent in elements of the operand's tensor map, and the K step per stage.
-    static constexpr int kBoxInner     = Kind == GemmKind::Nvfp4 ? 128 : 64;
+    static constexpr int kBoxInner     = Kind == GemmKind::Bf16 ? 64 : 128;
 
     // Block scales: one 512-byte atom per 128 rows/tokens per 64 K values. A stage holds four.
     static constexpr int kScaleAtomBytes = 512;
@@ -101,6 +105,9 @@ struct GemmConfig {
     __host__ __device__ static constexpr std::uint32_t idesc() {
         if constexpr (kScaled)
             return make_umma_idesc_mxf4nvf4(kTileM, TileN);
+        else if constexpr (Kind == GemmKind::Fp8)
+            return make_umma_idesc_f8f6f4(kTileM, TileN, UmmaF8F6F4Format::E4M3,
+                                          UmmaF8F6F4Format::E4M3);
         else
             return make_umma_idesc_f16(kTileM, TileN, UmmaF16Format::BF16, UmmaF16Format::BF16);
     }
@@ -302,6 +309,8 @@ __global__ __launch_bounds__(Cfg::kThreads, 1) void sm100_gemm_kernel(
                                 const std::uint32_t sf_j = sf_buf + j * Cfg::kSfColsPerMma;
                                 umma_mxf4nvf4_ss<1>(d, a_desc, b_desc, idesc, sf_j + p * 4,
                                                     sf_j + Cfg::kParts * 4, accumulate);
+                            } else if constexpr (Cfg::kKind == GemmKind::Fp8) {
+                                umma_f8f6f4_ss<1>(d, a_desc, b_desc, idesc, accumulate);
                             } else {
                                 umma_f16_ss<1>(d, a_desc, b_desc, idesc, accumulate);
                             }

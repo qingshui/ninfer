@@ -75,6 +75,9 @@ public:
     // fork_frontier - 1 and every child decodes the last prompt token with its own sampling.
     // Zero when the request cannot fork.
     [[nodiscard]] std::uint32_t fork_frontier() const noexcept;
+    // The prompt frontiers where a flight may write a checkpoint for this request, ascending.
+    // The Context decides at reservation time which of them it writes.
+    [[nodiscard]] std::span<const std::uint32_t> checkpoint_frontiers() const noexcept;
 
 private:
     explicit RequestBasePlan(std::shared_ptr<detail::RequestBasePlanImpl> impl) noexcept;
@@ -134,6 +137,9 @@ struct BindingReservation {
     // The binding is complete when start_binding returns: the lane is already schedulable and no
     // ContextProgress will follow. False keeps the asynchronous completion contract.
     bool synchronous       = false;
+    // Set when the caller asked for a synchronous binding only and this one needs a context
+    // operation. Nothing was reserved or started.
+    bool asynchronous      = false;
     // The installed sequence of the bound lane, present only when `synchronous`.
     std::optional<SequenceHandle> sequence;
     // The installed residency of the bound lane, present only when `synchronous`.
@@ -145,12 +151,22 @@ struct BindingReservation {
     explicit operator bool() const noexcept { return reserved; }
 };
 
-// The children one successful fork installed, in the order of the requested lanes. `reserved`
-// covers the whole group; an unreserved result names no child and carries the assessment the
-// admission measured.
-struct ForkResult {
+// One sample group at its fork frontier: `parent` is branch 0 and keeps its lane, `children` are
+// the free lanes of the other branches, in branch order. `sampling`, when not empty, is parallel
+// to `children` and names the sampling parameters each child decodes with; empty repeats the
+// parent's. A group without children only moves its parent to decoding.
+struct ForkGroupRequest {
+    SequenceHandle parent;
+    std::vector<runtime::LaneId> children;
+    std::vector<ResolvedSamplingParameters> sampling;
+};
+
+// The children one group installed, in the order of the requested lanes. `reserved` covers the
+// whole group: an unreserved result names no child, leaves the parent as it was and carries the
+// assessment the admission measured.
+struct ForkGroupResult {
     std::vector<SequenceHandle> children;
-    bool reserved          = false;
+    bool reserved = false;
     ContextAssessment assessment;
 };
 
@@ -255,12 +271,22 @@ struct PrefillRowProgress {
     bool complete                         = false;
 
     std::optional<PendingBatch> pending;
+    // A checkpoint never waits for a context operation; always false.
     bool capture_ready = false;
 };
 
 // Rows follow the execution members.
 struct PrefillProgress {
     std::vector<PrefillRowProgress> rows;
+};
+
+// The checkpoints that the retired flights of a sequence published and that nobody took yet. A
+// flight publishes its checkpoints when it retires, so they are taken at that flight's
+// ExecutionComplete event. `skipped` counts the planned checkpoints skipped since the last take
+// because the Context could not hold them without reclaiming.
+struct FlightCheckpoints {
+    std::vector<CheckpointHandle> published;
+    std::uint32_t skipped = 0;
 };
 
 // One admitted prefill segment of an execution. `produces_token` marks a final window: its row
@@ -353,16 +379,7 @@ struct ReplayProgress {
     std::uint32_t frontier         = 0;
 };
 
-struct CapturePreparation {
-    std::uint32_t frontier = 0;
-    bool reserved          = false;
-    ContextAssessment assessment;
-    std::vector<CheckpointHandle> retired_points;
-    context::HostWriteRequirements host;
-    runtime::CheckpointOrigin origin = runtime::CheckpointOrigin::Semantic;
-    SharedCandidateEvidence evidence = SharedCandidateEvidence::None;
-};
-enum class ContextOperationKind : std::uint8_t { Bind, Capture, Demote, Pause, Maintenance };
+enum class ContextOperationKind : std::uint8_t { Bind, Demote, Pause, Maintenance };
 
 struct ContextProgress {
     ContextOperationKind kind = ContextOperationKind::Bind;
@@ -374,7 +391,6 @@ struct ContextProgress {
     RecoveryProgress recovery;
     std::vector<CheckpointHandle> private_points;
     std::vector<CheckpointHandle> retired_checkpoints;
-    std::vector<CheckpointHandle> captured_checkpoints;
     std::vector<runtime::ContextTransferObservation> transfers;
     runtime::ContextOperationCounts operations;
     SpeculativeStats request_speculative;
@@ -477,23 +493,19 @@ public:
                            std::optional<SequenceHandle> pending_backup = std::nullopt);
     // Reservations stay owned by their lane through commit. Failure leaves prior permits intact.
     [[nodiscard]] ResourceReservation reserve_units(std::span<const ExecutionUnit> units);
-    [[nodiscard]] bool reclaim_capture_reservation(const ContextAssessment&);
     void release_units(std::span<const SequenceHandle> sequences) noexcept;
     [[nodiscard]] BindingReservation
     start_binding(const RequestBasePlan& base, runtime::LaneId lane, const SourceCandidate& source,
                   ResumeState* resume           = nullptr,
                   ExecutionUnitKind resume_kind = ExecutionUnitKind::Decode,
-                  std::uint32_t resume_tokens   = 1);
-    [[nodiscard]] bool start_capture(SequenceHandle sequence);
-    [[nodiscard]] bool capture_is_input(SequenceHandle sequence) const;
-    [[nodiscard]] std::optional<std::uint32_t>
-        capture_reservation_frontier(SequenceHandle sequence) const;
-    [[nodiscard]] bool capture_is_shared(SequenceHandle) const;
-    [[nodiscard]] std::vector<std::uint32_t> capture_frontiers(SequenceHandle) const;
-    [[nodiscard]] std::optional<CapturePreparation>
-    prepare_capture(SequenceHandle sequence, std::span<const CheckpointHandle> host_victims = {});
-    void skip_capture(SequenceHandle sequence,
-                      runtime::CaptureSkip reason = runtime::CaptureSkip::Unavailable);
+                  std::uint32_t resume_tokens   = 1, bool synchronous_only = false);
+    // Checkpoints are written inside the flights that carry them: reserve_units reserves a window's
+    // checkpoints without reclaiming and the retirement of the flight publishes them.
+    // take_flight_checkpoints hands the published ones to the caller at that flight's
+    // ExecutionComplete event, and empty for a sequence that is no longer valid. They never open a
+    // context operation or ask the caller to wait for the Session to rest.
+    [[nodiscard]] bool captures_in_flight() const noexcept { return true; }
+    [[nodiscard]] FlightCheckpoints take_flight_checkpoints(SequenceHandle);
     // Finite physical actions, each including every optional holder needed for its release.
     [[nodiscard]] ContextReclaimPlan plan_reclaim(std::span<const CheckpointHandle> allowed,
                                                   std::span<const CheckpointHandle> excluded,
@@ -534,17 +546,17 @@ public:
     // DFlash segments still run alone. `constrained` is empty or parallel to `sequences`.
     [[nodiscard]] std::optional<PrefillStart>
     start_prefill(std::span<const SequenceHandle> sequences, std::span<const bool> constrained);
-    // Upper bound on the children one fork call admits; zero when this Session never forks.
+    // Upper bound on the children of one fork group; zero when this Session never forks.
     [[nodiscard]] std::uint32_t sample_fork_limit() const noexcept;
-    // Installs one child sequence in each of `children`'s lanes from `parent`, which rests at
-    // its base plan's fork_frontier. Children share the parent's whole-page KV, copy its tail
-    // page and GDN/conv state through the stream order of their first execution, and return
-    // synchronously: an unreserved result names no child. The parent keeps its own lane.
-    // `sampling`, when not empty, is parallel to `children` and names the sampling parameters
-    // each child decodes with; empty repeats the parent's.
-    [[nodiscard]] ForkResult
-    fork(SequenceHandle parent, std::span<const runtime::LaneId> children,
-         std::span<const ResolvedSamplingParameters> sampling = {});
+    // Forks every group of `groups` and returns one result per group, in order. A parent rests
+    // at its base plan's fork_frontier with no execution pending and its children's lanes are
+    // empty; any other state throws std::logic_error before the group changes. A group is
+    // installed whole or not at all. An installed group's parent and children are Active and
+    // decode the last prompt token as ordinary sequences: the children share the parent's
+    // whole-page KV and take its tail page and State through the stream order of their first
+    // execution (the parent and every child write a State image of their own, so none waits for
+    // another), and no context frame is reserved. Children may be empty.
+    [[nodiscard]] std::vector<ForkGroupResult> fork_batch(std::span<const ForkGroupRequest> groups);
     // Upper bound on the decode rows one start_mixed call carries; zero when this Session never
     // mixes (offloaded experts, masked draft windows, scoring, a single lane).
     [[nodiscard]] std::uint32_t mixed_decode_limit() const noexcept;

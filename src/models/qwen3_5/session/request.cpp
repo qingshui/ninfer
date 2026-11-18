@@ -25,21 +25,6 @@ void validate_sampling(const ResolvedSamplingParameters& sampling) {
 
 } // namespace
 
-bool RequestBasePlanImpl::accepts_capture(std::uint32_t frontier) const noexcept {
-    if (frontier == 0 || frontier > summary.prompt_tokens) { return false; }
-    if (vision && !vision->can_checkpoint(frontier)) return false;
-    return true;
-}
-
-CaptureGroup RequestBasePlanImpl::capture_group(std::uint32_t frontier) const {
-    if (!capture_backing || !accepts_capture(frontier)) {
-        throw std::logic_error("capture identity requires a legal prompt frontier");
-    }
-    return {.identity = capture_backing,
-            .key      = {prefix_digests.at(frontier), frontier, prefix_identity_tag},
-            .frontier = frontier};
-}
-
 RequestBasePlan SessionImpl::plan_request(qwen::PreparedPromptData&& prompt,
                                           const runtime::ResolvedExecutionOptions& options) {
     if (prompt.token_ids.empty()) { throw std::invalid_argument("prompt must contain tokens"); }
@@ -117,12 +102,14 @@ RequestBasePlan SessionImpl::plan_request(qwen::PreparedPromptData&& prompt,
         }
         previous = frontier;
     }
-    // A sample fork splits a text-only prompt with penalty-free sampling and no masked draft
-    // state: the parent prefills through prompt_tokens - 1, each child decodes the last prompt
-    // token with its own sampling, and the parent's whole-page KV is shared. Vision, penalty
-    // counts and masked draft windows keep the ordinary single-sequence path.
-    if (!base->vision && !prompt.identity.rewrite_checkpoint && base->summary.prompt_tokens >= 2 &&
-        base->sampling.presence_penalty == 0.0F && base->sampling.frequency_penalty == 0.0F &&
+    // The branches of a sample group fork a text-only prompt with no masked draft state: the
+    // parent prefills through prompt_tokens - 1, each child decodes the last prompt token with its
+    // own sampling, and the parent's whole-page KV is shared. Penalty counts do not block the fork:
+    // they count generated tokens only, so every branch installs its own empty row. A rewrite
+    // checkpoint does not either: no flight writes an input-replay point, so the prompt's recovery
+    // frontier needs no private state of a branch that forks past it. Vision and masked draft
+    // windows keep the ordinary single-sequence path, and so does a request nobody shares.
+    if (options.sample_count > 1 && !base->vision && base->summary.prompt_tokens >= 2 &&
         !is_masked_draft_backend(speculative_backend) && !causal_scoring) {
         base->fork_frontier = base->summary.prompt_tokens - 1;
     }
@@ -133,34 +120,38 @@ RequestBasePlan SessionImpl::plan_request(qwen::PreparedPromptData&& prompt,
         backing->digests     = base->prefix_digests;
         backing->ledger      = prepared.token_ids;
         backing->prefix_identity.assign(prepared);
-        base->capture_backing = std::move(backing);
-        const auto add        = [&](std::uint32_t frontier, runtime::CheckpointRole role,
-                             SharedCandidateEvidence evidence = SharedCandidateEvidence::None) {
-            if (!base->accepts_capture(frontier)) { return; }
-            auto it =
-                std::find_if(base->capture_groups.begin(), base->capture_groups.end(),
-                                    [frontier](const auto& group) { return group.frontier == frontier; });
-            if (it == base->capture_groups.end()) {
-                base->capture_groups.push_back(base->capture_group(frontier));
-                it = std::prev(base->capture_groups.end());
+        base->capture_backing = backing;
+        // A flight can write a checkpoint at a SharedPrefix point that carries evidence, strictly
+        // before the end of the request's prefill; the flight cuts its traversal there. The end of
+        // the prefill is left to the continuation checkpoint a finished request publishes.
+        // Vision windows and draft windows keep state that only a single-row execution owns.
+        if (!base->vision && !is_masked_draft_backend(speculative_backend) && !causal_scoring) {
+            const auto end = base->prefill_end();
+            for (const auto& opportunity : prepared.context_cache.opportunities) {
+                const auto frontier = opportunity.frontier;
+                if (opportunity.kind == PromptCacheMarkerKind::PrivateLongAnchor ||
+                    opportunity.evidence == SharedCandidateEvidence::None || frontier == 0 ||
+                    frontier >= end)
+                    continue;
+                auto it = std::find_if(base->checkpoint_candidates.begin(),
+                                       base->checkpoint_candidates.end(), [&](const auto& other) {
+                                           return other.frontier == frontier;
+                                       });
+                if (it == base->checkpoint_candidates.end()) {
+                    base->checkpoint_candidates.push_back(
+                        {.identity = backing,
+                         .key      = {base->prefix_digests.at(frontier), frontier,
+                                      base->prefix_identity_tag},
+                         .frontier = frontier});
+                    it = std::prev(base->checkpoint_candidates.end());
+                }
+                it->evidence |= opportunity.evidence;
             }
-            it->evidence |= evidence;
-            if (std::find(it->roles.begin(), it->roles.end(), role) == it->roles.end()) {
-                it->roles.push_back(role);
-            }
-        };
-        const auto& rewrite = prepared.identity.rewrite_checkpoint;
-        add(rewrite ? rewrite->recovery_frontier : base->summary.prompt_tokens,
-            runtime::CheckpointRole::InputReplay);
-        for (const auto& opportunity : prepared.context_cache.opportunities) {
-            add(opportunity.frontier,
-                opportunity.kind == PromptCacheMarkerKind::PrivateLongAnchor
-                    ? runtime::CheckpointRole::LongAnchor
-                    : runtime::CheckpointRole::SharedPrefix,
-                opportunity.evidence);
+            std::sort(base->checkpoint_candidates.begin(), base->checkpoint_candidates.end(),
+                      [](const auto& a, const auto& b) { return a.frontier < b.frontier; });
+            for (const auto& candidate : base->checkpoint_candidates)
+                base->checkpoint_frontiers.push_back(candidate.frontier);
         }
-        std::sort(base->capture_groups.begin(), base->capture_groups.end(),
-                  [](const auto& a, const auto& b) { return a.frontier < b.frontier; });
     }
     return RequestBasePlan(std::move(base));
 }
@@ -424,6 +415,15 @@ ResourceReservation SessionImpl::reserve_units(std::span<const ExecutionUnit> un
         }
         throw;
     }
+    // Checkpoints are reserved once the units hold their KV, so they never compete with a unit's
+    // own growth.
+    for (const auto& unit : units) {
+        if (unit.kind != ExecutionUnitKind::Prefill) continue;
+        const auto lane = this->lane(unit.sequence);
+        auto& request   = requests[lane];
+        if (!request.permit || request.recovery) continue;
+        plan_flight_checkpoints(lane, request.permit->main_frontier);
+    }
     return {.status = runtime::UnitReservationStatus::Granted};
 }
 
@@ -451,6 +451,8 @@ void SessionImpl::release_units(std::span<const SequenceHandle> handles) noexcep
                                          : 0);
             }
             request.permit.reset();
+            // A checkpoint is reserved for the window of a permit; both leave together.
+            request.reserved_checkpoints.clear();
         }
     } catch (...) { std::terminate(); }
 }

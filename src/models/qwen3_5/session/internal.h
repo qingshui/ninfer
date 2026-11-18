@@ -8,6 +8,8 @@
 #include "models/common/qwen/recovery_store.h"
 #include "models/common/qwen/vision/control.h"
 
+#include "core/platform.h"
+
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
@@ -15,6 +17,8 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace ninfer::models::qwen3_5::detail {
@@ -38,14 +42,17 @@ struct PreparedCaptureBacking {
     qwen::ResidentPrefixIdentity prefix_identity;
 };
 
-struct CaptureGroup {
+// A prompt frontier a flight may checkpoint.
+struct CheckpointCandidate {
     std::shared_ptr<const PreparedCaptureBacking> identity;
     PrefixShortlistKey key;
-    std::uint32_t frontier = 0;
-    std::vector<runtime::CheckpointRole> roles;
-    runtime::CheckpointOrigin origin = runtime::CheckpointOrigin::Semantic;
+    std::uint32_t frontier           = 0;
     SharedCandidateEvidence evidence = SharedCandidateEvidence::None;
 };
+
+// Whether a packed or mixed traversal can carry a window that crosses a prefix execution
+// boundary. The varlen Ops split such a window; a target without them runs it alone.
+inline constexpr bool kSplitPacking = NINFER_TARGET_SPARK == 0;
 
 struct RequestBasePlanImpl {
     std::shared_ptr<const qwen::PreparedPromptData> prompt;
@@ -53,7 +60,13 @@ struct RequestBasePlanImpl {
     models::frontend::PreparedContextCache context_cache;
     ResolvedSamplingParameters sampling;
     std::shared_ptr<const qwen::VisionExecutionInput> vision;
-    std::vector<CaptureGroup> capture_groups;
+    // The prompt frontiers a flight may checkpoint: SharedPrefix points that carry evidence and
+    // lie strictly before the end of the request's prefill. A checkpoint inside a window is an
+    // execution frontier of its flight: the window's traversal is cut there. Ascending.
+    std::vector<CheckpointCandidate> checkpoint_candidates;
+    // The frontiers of `checkpoint_candidates`, ascending: what the engine's demand tracking
+    // observes a request crossing.
+    std::vector<std::uint32_t> checkpoint_frontiers;
     std::shared_ptr<const PreparedCaptureBacking> capture_backing;
     qwen::PrefixShortlistDigests prefix_digests;
     std::uint32_t prefix_identity_tag = 0;
@@ -61,9 +74,20 @@ struct RequestBasePlanImpl {
     std::uint32_t fork_frontier = 0;
     bool allow_prefix_reuse     = false;
 
-    [[nodiscard]] bool accepts_capture(std::uint32_t frontier) const noexcept;
-    [[nodiscard]] CaptureGroup capture_group(std::uint32_t frontier) const;
+    // The frontier where the request's prefill ends: its fork frontier when it forks, else its
+    // prompt.
+    [[nodiscard]] std::uint32_t prefill_end() const noexcept {
+        return fork_frontier ? fork_frontier : summary.prompt_tokens;
+    }
 };
+
+// The metadata of a lane after `count` more tokens of forward progress.
+[[nodiscard]] ContinuationMetadata forward_metadata(ContinuationMetadata value,
+                                                    std::uint32_t count, SpeculativeBackend backend,
+                                                    bool backend_pool);
+
+// Most checkpoints one request places in flights: the system prompt and the last shared message.
+inline constexpr std::size_t kMaxFlightCheckpoints = 2;
 // How far past its frontier a decode unit reserves KV growth when the pool allows it. A pool that
 // cannot hold the whole horizon still grants the unit's own minimum, and a pool that cannot hold
 // the minimum is reclaimed up to the horizon, so one reclaim serves many decode steps. The
@@ -128,43 +152,6 @@ struct SequenceState {
     }
 };
 
-struct CaptureReservation {
-    SessionImpl* owner = nullptr;
-    std::vector<std::pair<CheckpointHandle, runtime::CheckpointRole>> points;
-    context::StateId state;
-    std::optional<context::RecordReservation> host;
-    std::uint32_t frontier = 0;
-    ~CaptureReservation();
-};
-
-struct RequestControl {
-    Lifecycle lifecycle = Lifecycle::Empty;
-    ResolvedSamplingParameters sampling_host;
-    SpeculativeStats speculative_stats;
-    std::shared_ptr<const RequestBasePlanImpl> base;
-    std::optional<UnitDemand> permit;
-    std::optional<RecoveryPermit> recovery;
-    std::unique_ptr<CaptureReservation> capture_reservation;
-    std::uint32_t replay_target = 0;
-    std::uint32_t replay_cursor = 0;
-    Lifecycle resume_lifecycle  = Lifecycle::Empty;
-    bool publish_continuation   = true;
-    std::vector<CaptureGroup> capture_groups;
-    std::size_t next_capture = 0;
-    std::uint32_t last_saved = 0, last_intermediate_attempt = 0;
-    bool capture_pending = false;
-
-    struct Prefill {
-        qwen::PreparedPromptData prompt;
-        std::uint32_t base          = 0;
-        std::uint32_t cursor        = 0;
-        std::uint32_t prompt_tokens = 0;
-        PrefixReusePath reuse       = PrefixReusePath::Root;
-    };
-
-    std::optional<Prefill> prefill;
-};
-
 using Snapshot = context::ContextSnapshot<ContinuationMetadata, PreparedCaptureBacking>;
 
 struct CheckpointState {
@@ -207,6 +194,68 @@ struct CheckpointState {
 
 using Checkpoints = context::CheckpointStore<CheckpointState>;
 
+// One checkpoint a flight of a lane writes. Its catalog point and its device State image are held
+// from the reservation until the flight that carries it retires and publishes the point; a
+// checkpoint that never publishes returns both.
+struct FlightCheckpoint {
+    SessionImpl* owner = nullptr;
+    CheckpointCandidate candidate;
+    Checkpoints::Reservation point;
+    context::StateId image;
+
+    FlightCheckpoint() = default;
+    FlightCheckpoint(FlightCheckpoint&& other) noexcept
+        : owner(std::exchange(other.owner, nullptr)), candidate(std::move(other.candidate)),
+          point(std::move(other.point)), image(std::exchange(other.image, {})) {}
+    FlightCheckpoint& operator=(FlightCheckpoint&& other) noexcept {
+        if (this != &other) {
+            release();
+            owner     = std::exchange(other.owner, nullptr);
+            candidate = std::move(other.candidate);
+            point     = std::move(other.point);
+            image     = std::exchange(other.image, {});
+        }
+        return *this;
+    }
+    FlightCheckpoint(const FlightCheckpoint&)            = delete;
+    FlightCheckpoint& operator=(const FlightCheckpoint&) = delete;
+    ~FlightCheckpoint() { release(); }
+
+    // Returns the State image; the catalog point returns with the reservation.
+    void release() noexcept;
+};
+
+struct RequestControl {
+    Lifecycle lifecycle = Lifecycle::Empty;
+    ResolvedSamplingParameters sampling_host;
+    SpeculativeStats speculative_stats;
+    std::shared_ptr<const RequestBasePlanImpl> base;
+    std::optional<UnitDemand> permit;
+    std::optional<RecoveryPermit> recovery;
+    std::uint32_t replay_target = 0;
+    std::uint32_t replay_cursor = 0;
+    Lifecycle resume_lifecycle  = Lifecycle::Empty;
+    bool publish_continuation   = true;
+    // At most kMaxFlightCheckpoints candidates the request's prefill still passes, ascending. A
+    // candidate leaves the plan when a flight carries it or when the Context cannot hold it.
+    std::vector<CheckpointCandidate> checkpoint_plan;
+    // Reserved for a window of this lane that no flight carries yet, ascending by frontier.
+    std::vector<FlightCheckpoint> reserved_checkpoints;
+    // Published by a retired flight and not yet taken through take_flight_checkpoints.
+    std::vector<CheckpointHandle> unreported_checkpoints;
+    std::uint32_t skipped_checkpoints = 0;
+
+    struct Prefill {
+        qwen::PreparedPromptData prompt;
+        std::uint32_t base          = 0;
+        std::uint32_t cursor        = 0;
+        std::uint32_t prompt_tokens = 0;
+        PrefixReusePath reuse       = PrefixReusePath::Root;
+    };
+
+    std::optional<Prefill> prefill;
+};
+
 struct PreparedCheckpoint {
     Checkpoints::Reservation record;
     std::shared_ptr<const PreparedCaptureBacking> identity;
@@ -240,6 +289,8 @@ struct BindOperation {
     StateBindingAction state_action = StateBindingAction::Root;
     bool consume_source             = false;
     bool take_private               = false;
+    // The source needs no Host restore: its State and KV replicas are on the Device.
+    bool local_device               = false;
     bool resume_without_replay      = false;
     bool source_tail_hidden         = false;
 };
@@ -249,14 +300,6 @@ struct BindingPlan {
     BindOperation operation;
     ContextDemand demand;
     context::ContextDemandId state, main, backend, backup;
-};
-
-struct CaptureOperation {
-    static constexpr auto kind     = ContextOperationKind::Capture;
-    std::uint32_t lane             = 0;
-    std::uint32_t frontier         = 0;
-    std::uint32_t backend_frontier = 0;
-    std::vector<std::pair<CheckpointHandle, runtime::CheckpointRole>> points;
 };
 
 struct MaintenanceOperation {
@@ -281,16 +324,9 @@ struct PauseOperation {
     bool preserve_state_device = true;
 };
 
-// The silent tail of a synchronous lane installation: the operation only carries residency
-// bindings to the rank program (host-side marking; no device work without penalty counts) and
-// publishes no ContextProgress. The installed lanes are already schedulable when it runs.
-struct ResidencyOperation {
-    static constexpr auto kind = ContextOperationKind::Bind;
-};
-
 struct PendingContext {
-    using Action = std::variant<BindOperation, CaptureOperation, DemoteOperation, PauseOperation,
-                                MaintenanceOperation, ResidencyOperation>;
+    using Action =
+        std::variant<BindOperation, DemoteOperation, PauseOperation, MaintenanceOperation>;
 
     PendingContext(context::ContextDirectory& directory, Action value)
         : transaction(directory), action(std::move(value)) {}
@@ -307,9 +343,6 @@ struct PendingContext {
     context::ContextActionCursor cursor;
     bool submitted  = false;
     bool last_batch = false;
-    // The operation's result retires silently: it completes an already-synchronous binding and
-    // publishes no ContextProgress.
-    bool silent = false;
     std::vector<runtime::ContextTransferObservation> preceding_transfers;
 
     [[nodiscard]] std::optional<std::uint32_t> lane() const noexcept {
@@ -368,22 +401,21 @@ public:
     // Reservations stay owned by their lane through commit. Failure leaves prior permits intact.
     [[nodiscard]] ResourceReservation reserve_units(std::span<const ExecutionUnit> units);
     [[nodiscard]] runtime::ContextStart start_maintenance(const ContextAssessment&);
-    [[nodiscard]] bool reclaim_capture_reservation(const ContextAssessment&);
     void release_units(std::span<const SequenceHandle> sequences) noexcept;
     [[nodiscard]] BindingPlan plan_binding(const RequestBasePlan&, runtime::LaneId,
                                            const SourceCandidate&, const ResumeState*,
                                            ExecutionUnitKind, std::uint32_t) const;
+    // A binding whose source needs no transfer completes before this returns: its device work
+    // rides the first execution of the lane. `allow_synchronous` false keeps the asynchronous
+    // completion contract for a caller that waits on the binding's context operation.
+    // `synchronous_only` declines, before anything starts, a binding that needs a context
+    // operation (`BindingReservation::asynchronous`).
     [[nodiscard]] BindingReservation
     start_binding(const RequestBasePlan& base, runtime::LaneId lane, const SourceCandidate& source,
                   ResumeState* resume           = nullptr,
                   ExecutionUnitKind resume_kind = ExecutionUnitKind::Decode,
-                  std::uint32_t resume_tokens   = 1);
-    [[nodiscard]] bool start_capture(SequenceHandle sequence);
-    [[nodiscard]] bool capture_is_input(SequenceHandle sequence) const;
-    [[nodiscard]] std::optional<CapturePreparation>
-    prepare_capture(SequenceHandle sequence, std::span<const CheckpointHandle> host_victims = {});
-    void skip_capture(SequenceHandle sequence,
-                      runtime::CaptureSkip reason = runtime::CaptureSkip::Unavailable);
+                  std::uint32_t resume_tokens   = 1, bool allow_synchronous = true,
+                  bool synchronous_only = false);
     // Finite physical actions, each including every optional holder needed for its release.
     [[nodiscard]] ContextReclaimPlan plan_reclaim(std::span<const CheckpointHandle> allowed,
                                                   std::span<const CheckpointHandle> excluded,
@@ -422,9 +454,9 @@ public:
     [[nodiscard]] std::optional<PrefillStart> start_prefill(std::span<const SequenceHandle>,
                                                             std::span<const bool> constrained);
     [[nodiscard]] std::uint32_t sample_fork_limit() const noexcept;
-    [[nodiscard]] ForkResult
-    fork(SequenceHandle parent, std::span<const runtime::LaneId> children,
-         std::span<const ResolvedSamplingParameters> sampling = {});
+    [[nodiscard]] std::vector<ForkGroupResult> fork_batch(std::span<const ForkGroupRequest> groups);
+    [[nodiscard]] ForkGroupResult fork_group(const ForkGroupRequest& group,
+                                             std::uint32_t parent_lane);
     [[nodiscard]] std::uint32_t mixed_decode_limit() const noexcept;
     [[nodiscard]] bool prefill_mixable(SequenceHandle) const;
     [[nodiscard]] std::optional<MixedStart>
@@ -528,6 +560,12 @@ public:
         // Prefill segments first, then decode rows. Every per-member vector follows this order; a
         // Mixed execution's pending batch and decisions cover the members from `decode_begin` on.
         std::vector<SequenceHandle> members;
+        // The lane of every member, frozen at submission; the busy counters follow it.
+        std::vector<std::uint32_t> lanes;
+        // The checkpoints each member's window writes, parallel to `members` (a member without
+        // one has an empty entry; the vector may be shorter than `members`). They publish when
+        // the flight retires after its commit and return their resources otherwise.
+        std::vector<std::vector<FlightCheckpoint>> checkpoints;
         // Whether each member carries a decision row of the execution's pending batch: decode
         // rows and final prefill segments produce; non-final segments do not.
         std::vector<bool> producing;
@@ -561,8 +599,8 @@ public:
     [[nodiscard]] std::optional<Execution>& execution_slot(runtime::FrameId);
     [[nodiscard]] Execution* find_execution(runtime::ExecutionTicket) noexcept;
     [[nodiscard]] const Execution* find_execution(runtime::ExecutionTicket) const noexcept;
-    // Whether any execution is in flight. Context operations, pauses, captures and scoring need
-    // the Session without one.
+    // Whether any execution is in flight. Context maintenance, pauses and scoring need the Session
+    // without one.
     [[nodiscard]] bool executing() const noexcept;
     // Whether an execution that owns the whole Session (a vision window, a normalization or a
     // score) is in flight: nothing else starts beside it.
@@ -580,6 +618,17 @@ public:
 
     std::optional<Scoring> scoring;
 
+    // Sequence identity to lane. An entry can outlive its lane's occupant; the lookup validates it
+    // against the lane tables, and registering a lane drops the entry its previous occupant held.
+    std::unordered_map<std::uint64_t, std::uint32_t> lane_index_;
+    std::vector<std::uint64_t> lane_identity_;
+    // Executions in flight that carry each lane.
+    std::vector<std::uint32_t> lane_busy_;
+    // Lanes whose residency release has not retired. A new residency of such a lane cannot
+    // install before the release leaves, or the release would find the new installation.
+    std::vector<std::uint8_t> lane_releasing_;
+    std::vector<std::uint32_t> releasing_ticket_lanes_;
+    void register_lane(std::uint32_t lane, SequenceHandle) noexcept;
     [[nodiscard]] std::uint32_t lane(SequenceHandle) const;
     [[nodiscard]] bool valid_sequence(SequenceHandle) const noexcept;
     [[nodiscard]] SequenceHandle sequence_handle(std::uint32_t) const noexcept;
@@ -631,15 +680,36 @@ public:
     [[nodiscard]] std::optional<runtime::ExecutionTicket>
     submit_execution(Execution&&, runtime::ExecutionReservation, Work&&);
 
-    // Device work a synchronous lane installation deferred: its actions ride the stream order of
-    // the lane's first execution instead of a context operation. The transaction keeps every
-    // borrowed source (the fork parent's State image and tail page) alive until that execution
-    // retires, where `publish` runs; `retained` holds the fork parent's KV prefixes for the same
-    // window.
+    // Holds a frozen State image that several lanes read as the source of their first write. The
+    // reference returns when the last holder retires; the image is freed once its readers finish.
+    struct StateAnchor {
+        context::StateDirectory* states = nullptr;
+        context::StateId image;
+        StateAnchor(context::StateDirectory& owner, context::StateId frozen)
+            : states(&owner), image(frozen) {
+            states->retain_checkpoint_reference(image);
+        }
+        StateAnchor(const StateAnchor&)            = delete;
+        StateAnchor& operator=(const StateAnchor&) = delete;
+        ~StateAnchor() {
+            if (!states->release_checkpoint_owner(image)) std::terminate();
+        }
+    };
+
+    // Device work a lane installation deferred: its actions and its residency installation ride
+    // the stream order of the lane's first execution instead of a context operation. The
+    // transaction keeps every borrowed source (a checkpoint's tail page, a fork parent's tail page)
+    // alive until that execution retires, where `publish` runs; `retained` holds the fork parent's
+    // KV prefixes and `source_lease` the checkpoint the lane bound from for the same window.
     struct DeferredBinding {
         context::ContextTransaction transaction;
         context::ContextActions actions;
         std::vector<context::HistoryPrefix> retained;
+        std::optional<ResidencyBinding> install;
+        Checkpoints::Lease source_lease;
+        std::shared_ptr<StateAnchor> anchor;
+        // Set once a flight carries the actions and the installation.
+        bool submitted = false;
         explicit DeferredBinding(context::ContextTransaction&& prepared)
             : transaction(std::move(prepared)) {}
         DeferredBinding(DeferredBinding&&) = default;
@@ -662,21 +732,39 @@ public:
     [[nodiscard]] std::optional<CheckpointHandle> detach_checkpoint(SequenceState&,
                                                                     PreparedCheckpoint = {});
     void initialize_prefill(RequestControl&, std::uint32_t base);
-    void initialize_captures(RequestControl&, std::uint32_t from, std::uint32_t through);
-    enum class CaptureReservationStatus { Ready, NeedsContext, Unavailable };
-    [[nodiscard]] CaptureReservationStatus
-    reserve_capture_destination(std::uint32_t, std::uint32_t,
-                                std::span<const CheckpointHandle> host_victims = {});
-    void prepare_capture_boundary(std::uint32_t);
+
+    // In-flight checkpoints. A Prefill unit's window may carry the candidates of its request's plan
+    // that lie inside it: reserve_units reserves each one's catalog point and State image without
+    // reclaiming (a shortage skips the candidate and is counted), the window carries it to the
+    // flight, and the flight's retirement publishes it.
+    void initialize_checkpoint_plan(RequestControl&, std::uint32_t base);
+    void plan_flight_checkpoints(std::uint32_t lane, std::uint32_t window_end);
+    [[nodiscard]] bool checkpoint_present(const PrefixShortlistKey&) const;
+    void attach_checkpoints(Execution&, InputWindow&, SequenceState&, std::uint32_t begin,
+                            std::uint32_t end);
+    void publish_flight_checkpoints(Execution&, std::span<const std::uint8_t> clearing);
+    void publish_flight_checkpoint(FlightCheckpoint&, SequenceState&, RequestControl&);
+    [[nodiscard]] FlightCheckpoints take_flight_checkpoints(SequenceHandle);
+    // Returns the lane's reserved checkpoints and releases the ones it published but nobody took.
+    void drop_lane_checkpoints(RequestControl&) noexcept;
+    // The prompt positions strictly inside (begin, end) where the window's traversal is cut: the
+    // prefix execution frontiers and the columns of the checkpoints reserved for the lane.
+    // Ascending and distinct.
+    [[nodiscard]] std::vector<std::uint32_t> window_splits(const SequenceState&, std::uint32_t begin,
+                                                           std::uint32_t end) const;
+    [[nodiscard]] std::uint32_t split_count(const SequenceState&, std::uint32_t begin,
+                                            std::uint32_t end) const;
+    [[nodiscard]] PrefillRowProgress prefill_row(const Execution&, std::size_t member);
     void abort_context() noexcept;
     void cancel_context() noexcept;
     [[nodiscard]] bool prepare_backup(context::ContextTransaction&, CheckpointState&,
                                       bool shared_device, bool& preserve_state_device,
                                       context::ContextReservation&, const context::HostDemandIds&);
     void install_binding(BindOperation&);
-    void complete_binding(BindOperation&, context::ContextTransaction&, ContextProgress&);
-    void publish_capture(CaptureOperation&, context::ContextTransaction&,
-                         runtime::ContextOperationCounts&);
+    // `deferred` completes a binding whose device work has not run yet: the History bindings
+    // publish their restores before the lane adopts them.
+    void complete_binding(BindOperation&, context::ContextTransaction&, ContextProgress&,
+                          bool deferred = false);
     [[nodiscard]] bool begin_pause(SequenceHandle, runtime::PauseAction);
     [[nodiscard]] bool continue_pause_ready(SequenceHandle, runtime::PauseAction);
     void continue_pause_after_normalize(SequenceHandle);

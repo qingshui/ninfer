@@ -261,12 +261,11 @@ def test_attention_qkv_scale_mismatch_is_rejected_and_o_proj_is_independent(tmp_
     assert _job(prepared, "text/layers/1/attention/output").spec.format == "nvfp4"
 
 
-def test_unquantized_roles_stay_cast_direct_and_vocabulary_uses_q8(tmp_path):
+def test_unquantized_roles_stay_cast_direct_and_embedding_uses_q8(tmp_path):
     _, _, prepared = _prepare(tmp_path)
     for name in (
-        "text/layers/0/gdn/query",
         "text/layers/0/gdn/a_projection",
-        "text/layers/0/gdn/output",
+        "text/layers/0/gdn/b_projection",
         "text/layers/0/gdn/norm",
         "text/layers/0/gdn/convolution",
         "text/layers/0/moe/router",
@@ -276,8 +275,25 @@ def test_unquantized_roles_stay_cast_direct_and_vocabulary_uses_q8(tmp_path):
         "text/final_norm",
     ):
         assert _job(prepared, name).method_name == "cast_direct", name
-    for name in ("text/token_embedding", "text/output_head"):
-        assert _job(prepared, name).spec.format == "q8_g32_fp16", name
+    assert _job(prepared, "text/token_embedding").spec.format == "q8_g32_fp16"
+    head = _job(prepared, "text/output_head")
+    assert head.spec.format == "bf16" and head.method_name == "cast_direct"
+
+
+def test_gdn_projections_are_row_scaled_fp8_with_a8_permission(tmp_path):
+    model, recipe, prepared = _prepare(tmp_path)
+    for layer, kind in enumerate(LAYERS):
+        if kind != "linear_attention":
+            continue
+        for role in ("query", "key", "value", "z", "output"):
+            name = f"text/layers/{layer}/gdn/{role}"
+            job = _job(prepared, name)
+            assert job.spec.format == "fp8_e4m3fn_row_fp32", name
+            assert job.method_name == "fp8_row_fp32_maxabs", name
+            assert {
+                recipe.policies[(name, input_name)]
+                for input_name in model.parameters[name].inputs
+            } == {"AllowA8"}, name
 
 
 def _convert(tmp_path, tensors):

@@ -372,6 +372,24 @@ int rejection_case() {
     return failures;
 }
 
+// Random rows with up to three boundaries each; `period` is the mean column spacing of the
+// candidate boundaries.
+Spec random_spec(const std::string& name, int hv, int rows, int max_length, int period,
+                 std::uint32_t seed) {
+    std::mt19937 generator(seed);
+    Spec spec{name, 16, hv, {}, {}, true, false};
+    for (int row = 0; row < rows; ++row) {
+        const int length = 1 + static_cast<int>(generator() % max_length);
+        spec.lengths.push_back(length);
+        std::vector<int> columns;
+        for (int column = 1; column < length; ++column)
+            if (generator() % period == 0 && columns.size() < 3) columns.push_back(column);
+        for (int column : columns)
+            spec.boundaries.push_back({row, column, generator() % 10 < 7});
+    }
+    return spec;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -398,18 +416,11 @@ int main(int argc, char** argv) {
     });
     // Many rows and boundaries: row scans cross warp boundaries and rows mix both routes.
     suite.add("gdn_varlen/many-rows", [] {
-        std::mt19937 generator(2024);
-        Spec spec{"many", 16, 32, {}, {}, true, false};
-        for (int row = 0; row < 48; ++row) {
-            const int length = 1 + static_cast<int>(generator() % 45);
-            spec.lengths.push_back(length);
-            std::vector<int> columns;
-            for (int column = 1; column < length; ++column)
-                if (generator() % 9 == 0 && columns.size() < 3) columns.push_back(column);
-            for (int column : columns)
-                spec.boundaries.push_back({row, column, generator() % 10 < 7});
-        }
-        return run_case(spec, 15);
+        return run_case(random_spec("many", 32, 48, 45, 9, 2024), 15);
+    });
+    // The 64-value register-state kernel over rows long enough to wrap its three-stage ring.
+    suite.add("gdn_varlen/hv64-many-rows", [] {
+        return run_case(random_spec("hv64-many", 64, 10, 220, 40, 2025), 16);
     });
     suite.add("gdn_varlen/rejection", [] { return rejection_case(); });
     return suite.main(argc, argv);

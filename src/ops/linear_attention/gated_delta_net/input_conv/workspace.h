@@ -21,8 +21,9 @@ Scratch allocate_workspace(Allocator& allocator, const WeightProfile& weights, P
     if (materialized_snapshot)
         out.projected = allocator.alloc(DType::BF16, {weights.geometry.channels(), columns}, 256);
     if (plan.compute == Compute::A8)
-        out.fp8 = allocate_fp8_a8_workspace(allocator, columns, weights.geometry.input_rows,
-                                            fp8_gdn_input_partial_capacity_bytes(columns));
+        out.fp8 = allocate_fp8_a8_workspace(
+            allocator, columns, weights.geometry.input_rows,
+            weights.format == Format::Fp8 ? fp8_gdn_input_partial_capacity_bytes(columns) : 0);
     if (plan.compute == Compute::A4)
         out.nvfp4 = allocate_nvfp4_a4_workspace(allocator, columns, weights.geometry.input_rows);
     return out;

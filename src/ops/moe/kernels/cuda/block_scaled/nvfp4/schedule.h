@@ -28,14 +28,18 @@ enum class Nvfp4CachePolicy {
     RetainInputsBypassL1 = 14,
 };
 
-// B200 (sm_100a) tcgen05 tile choice for the grouped NVFP4 GEMMs. `tile_tokens` is the MMA's N:
-// the tokens of one expert that share a tile (16, 32, 64 or 128; 0 lets the b200 plan choose from
-// the token count). `cluster` is the CTA-group width and `ctas_per_sm` the persistent grid
-// multiplier; the grouped kernels run one independent CTA per SM, so both must be 1.
+// B200 (sm_100a) tcgen05 tile choice for the grouped NVFP4 GEMMs. A tile width is the MMA's N: the
+// tokens of one expert that share a tile (16, 32, 64 or 128; 0 lets the b200 plan choose from the
+// token count). The gate/up and down projections have separate widths because their accumulators
+// differ: gate/up keeps two parts per tile and runs out of tensor memory for a second accumulator
+// buffer (the epilogue overlapping the next tile's MMAs) above width 64. `cluster` is the CTA-group
+// width and `ctas_per_sm` the persistent grid multiplier; the grouped kernels run one independent
+// CTA per SM, so both must be 1.
 struct Nvfp4Sm100Tuning {
-    int tile_tokens = 0;
-    int cluster     = 1;
-    int ctas_per_sm = 1;
+    int gate_up_tile_tokens = 0;
+    int down_tile_tokens    = 0;
+    int cluster             = 1;
+    int ctas_per_sm         = 1;
 };
 
 struct Nvfp4Tuning {

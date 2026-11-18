@@ -52,9 +52,7 @@ void validate_operands(const Tensor& x, const Weight& w, const Tensor& residual,
     operand::disjoint(operand::range(x.data, x.bytes(), "linear_add"),
                       operand::range(residual.data, residual.bytes(), "linear_add"), "linear_add");
 
-    if (w.qtype == QType::FP8_E4M3FN_ROW_FP32)
-        throw std::invalid_argument("linear_add: unsupported weight format");
-    if (w.qtype == QType::FP8_E4M3FN_ROW_BF16) {
+    if (w.qtype == QType::FP8_E4M3FN_ROW_BF16 || w.qtype == QType::FP8_E4M3FN_ROW_FP32) {
         (void)common::validate_fp8_weight(w, "linear_add");
         return;
     }
@@ -85,8 +83,8 @@ std::size_t linear_add_workspace_capacity_bytes(QType type, std::int32_t rows, s
     validate_policy(policy);
     if (first <= 0 || last < first)
         throw std::invalid_argument("linear_add: invalid token interval");
-    if (type == QType::FP8_E4M3FN_ROW_BF16)
-        return detail::fp8_linear_add_workspace_capacity_bytes(rows, k, policy, first, last);
+    if (type == QType::FP8_E4M3FN_ROW_BF16 || type == QType::FP8_E4M3FN_ROW_FP32)
+        return detail::fp8_linear_add_workspace_capacity_bytes(type, rows, k, policy, first, last);
     if (type == QType::NVFP4)
         return detail::nvfp4_linear_add_workspace_capacity_bytes(rows, k, policy, first, last);
     (void)select_a16(type, rows, k, first);
@@ -106,7 +104,7 @@ void linear_add(const Tensor& x, const Weight& w, Tensor& residual, LinearPolicy
     if (workspace.device() != execution.device()) {
         throw std::invalid_argument("linear_add: workspace belongs to another device");
     }
-    if (w.qtype == QType::FP8_E4M3FN_ROW_BF16)
+    if (w.qtype == QType::FP8_E4M3FN_ROW_BF16 || w.qtype == QType::FP8_E4M3FN_ROW_FP32)
         return detail::fp8_linear_add_dispatch(x, w, residual, policy, workspace,
                                                execution.stream());
     if (w.qtype == QType::NVFP4)

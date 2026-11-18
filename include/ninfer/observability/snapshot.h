@@ -129,6 +129,15 @@ struct RuntimeStats {
     std::uint64_t flight_host_submit_ns  = 0;
     std::uint64_t flight_gpu_ns          = 0;
     std::vector<FlightRecord> recent_flights;
+    // Sample groups of a Session that forks them in one call per iteration: branches holding a
+    // lane until their group forks, the fork calls, and the branches they installed.
+    std::uint32_t forking_requests = 0;
+    std::uint64_t fork_batches     = 0;
+    std::uint64_t forked_branches  = 0;
+    // Checkpoints written inside flights and registered when their flight retired, and planned
+    // ones skipped because the Context could not hold them without reclaiming.
+    std::uint64_t inflight_checkpoints_published = 0;
+    std::uint64_t inflight_checkpoints_skipped   = 0;
 };
 
 enum class ContextCostPresetSource : std::uint8_t {

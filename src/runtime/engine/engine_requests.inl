@@ -331,6 +331,7 @@ void EngineCore<Instance>::release_request(const std::shared_ptr<Request>& reque
         capture_decisions_[lane].reset();
         reserved_units_[lane].reset();
         slots_[lane].reset();
+        ++slots_epoch_;
     }
     request->sequence.reset();
     request->lane.reset();
@@ -365,8 +366,7 @@ void EngineCore<Instance>::complete_error(const std::shared_ptr<Request>& reques
     if (!prepare_completion(request)) { return; }
     record_completion(request, FinishReason::None, true);
     release_request(request);
-    publish_runtime_stats();
-    publish_completion(request, {}, std::move(error));
+    held_completions_.push_back({request, {}, std::move(error)});
 }
 
 template <class Instance>
@@ -448,8 +448,19 @@ void EngineCore<Instance>::complete_success(const std::shared_ptr<Request>& requ
     result.stats.engine_timing       = request->host_timing.public_snapshot();
     result.stats.first_output_timing = request->first_output_timing;
     record_completion(request, reason, false);
+    held_completions_.push_back({request, std::move(result), {}});
+}
+
+template <class Instance>
+void EngineCore<Instance>::flush_completions() {
+    if (held_completions_.empty()) { return; }
+    std::vector<HeldCompletion> held;
+    held.swap(held_completions_);
     publish_runtime_stats();
-    publish_completion(request, std::move(result));
+    for (auto& completion : held) {
+        publish_completion(completion.request, std::move(completion.result),
+                           std::move(completion.error));
+    }
 }
 
 template <class Instance>
@@ -467,6 +478,10 @@ void EngineCore<Instance>::complete_cancelled(const std::shared_ptr<Request>& re
 
 template <class Instance>
 void EngineCore<Instance>::apply_settlement(const DeferredSettlement& settlement) {
+    if (settlement.publication_only) {
+        resources_.publish(*instance_.session, settlement.owner, *settlement.checkpoint);
+        return;
+    }
     if (settlement.finished) {
         if (settlement.checkpoint) {
             resources_.publish(*instance_.session, settlement.owner, *settlement.checkpoint);
@@ -493,6 +508,18 @@ void EngineCore<Instance>::settle_resources(DeferredSettlement&& settlement) {
         return;
     }
     deferred_settlements_.push_back(std::move(settlement));
+}
+
+template <class Instance>
+void EngineCore<Instance>::publish_flight_checkpoint(const std::shared_ptr<Request>& request,
+                                                     Checkpoint checkpoint) {
+    settle_resources(DeferredSettlement{
+        .request_id        = request->id,
+        .owner             = request->continuation_owner,
+        .checkpoint        = checkpoint,
+        .publication_order = request->publication_order,
+        .publication_only  = true,
+    });
 }
 
 template <class Instance>

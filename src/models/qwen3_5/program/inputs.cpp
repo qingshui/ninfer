@@ -272,8 +272,9 @@ void RankProgramImpl::initialize_packed_forward(ComputeOperation& operation,
         frame.host_ingress->valid_columns[i] = static_cast<std::int32_t>(columns);
         for (int axis = 0; axis < 3; ++axis)
             frame.host_ingress->previous_rope[axis * count + i] = row.tail_rope_position[axis];
-        operation.segments.push_back(
-            {i, total, columns, row.state_offsets.source, row.state_offsets.destination});
+        operation.segments.push_back({i, total, columns, row.state_offsets.source,
+                                      row.state_offsets.destination,
+                                      static_cast<std::uint32_t>(row.main_frontier + columns)});
         if (work.sample != SamplePurpose::None && work.sampling[i].produces_token) {
             frame.host_ingress->sampling[producing] =
                 sampling_config(row, work.sampling[i], producing);
@@ -434,8 +435,9 @@ void RankProgramImpl::initialize_mixed(ComputeOperation& operation, const MixedW
         bind_row(*frame.host_ingress, rows + i, row);
         frame.host_ingress->valid_columns[rows + i] = static_cast<std::int32_t>(columns);
         for (int axis = 0; axis < 3; ++axis) previous_rope(i, axis) = row.tail_rope_position[axis];
-        operation.segments.push_back(
-            {rows + i, total, columns, row.state_offsets.source, row.state_offsets.destination});
+        operation.segments.push_back({rows + i, total, columns, row.state_offsets.source,
+                                      row.state_offsets.destination,
+                                      static_cast<std::uint32_t>(row.main_frontier + columns)});
         // A final segment carries one decision row behind the decode rows: its sampling config and
         // sampled position sit at the compact rows [rows + produced, rows + count of finals).
         if (work.prefill.sampling[i].produces_token) {

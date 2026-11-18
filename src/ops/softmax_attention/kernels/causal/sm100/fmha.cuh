@@ -90,28 +90,53 @@ struct FmhaParams {
     int key_shift;
 };
 
-// What one CTA owns: query rows [row_begin, row_begin + 128), keys [split_start, end).
-struct Work {
-    int kv_head, split, batch, row_begin, live, split_start, end, n_tiles;
+// Entries of different widths on one token axis in a single launch (one split, BF16 output). Group
+// g is `batch` consecutive entries of `width` columns starting at column token_base; entry b of the
+// group uses cache metadata row `row + b`. The group owns the CTAs
+// [cta_base, cta_base + batch * KVHeads * row_tiles(width)), and cta_base ascends.
+inline constexpr int kMaxGroups = 72;
+
+struct Group {
+    int token_base, width, row, batch, cta_base;
 };
 
-__device__ __forceinline__ Work make_work(const FmhaParams& p) {
+struct GroupParams {
+    FmhaParams base;
+    int groups;
+    Group group[kMaxGroups];
+};
+
+__host__ __device__ constexpr int row_tiles_of(int width) {
+    return (width * kGroup + kSm100TileQ - 1) / kSm100TileQ;
+}
+
+// What one CTA owns: query rows [row_begin, row_begin + 128) of one entry, keys
+// [split_start, end). The entry's columns are [token_base, token_base + width) of the token axis and
+// its valid length and table row are entry `row` of the cache metadata. `batch` addresses the split
+// partials, which only a launch with one width uses.
+struct Work {
+    int kv_head, split, batch, row, token_base, width, row_begin, live, split_start, end, n_tiles;
+};
+
+__device__ __forceinline__ Work make_work(const FmhaParams& p, int kv_head, int tile, int split,
+                                          int batch, int row, int token_base, int width) {
     Work w{};
-    w.kv_head   = static_cast<int>(blockIdx.x) % Geometry::KVHeads;
-    // Later query tiles see longer histories; launch them first.
-    const int tile = p.row_tiles - 1 - static_cast<int>(blockIdx.x) / Geometry::KVHeads;
-    w.split     = static_cast<int>(blockIdx.y);
-    w.batch     = static_cast<int>(blockIdx.z);
-    w.row_begin = tile * kSm100TileQ;
-    int live    = p.width;
+    w.kv_head    = kv_head;
+    w.split      = split;
+    w.batch      = batch;
+    w.row        = row;
+    w.token_base = token_base;
+    w.width      = width;
+    w.row_begin  = tile * kSm100TileQ;
+    int live     = width;
     if (p.cache.valid_columns != nullptr) {
-        live = p.cache.valid_columns[w.batch];
-        live = live < 0 ? 0 : (live < p.width ? live : p.width);
+        live = p.cache.valid_columns[row];
+        live = live < 0 ? 0 : (live < width ? live : width);
     }
     w.live = live;
-    const std::int32_t* positions = p.positions + static_cast<std::int64_t>(w.batch) * p.width;
+    const std::int32_t* positions = p.positions + token_base;
     const int first_pos = positions[0];
-    const int last_pos  = positions[p.width - 1];
+    const int last_pos  = positions[width - 1];
     w.split_start = w.end = w.n_tiles = 0;
     const int tile_tokens_end =
         min(live, (w.row_begin + kSm100TileQ + kGroup - 1) / kGroup); // exclusive
@@ -134,6 +159,35 @@ __device__ __forceinline__ Work make_work(const FmhaParams& p) {
     w.end                 = min(split_end, positions[tile_tokens_end - 1] + 1);
     w.n_tiles = w.end > w.split_start ? (w.end - w.split_start + kSm100TileKv - 1) / kSm100TileKv : 0;
     return w;
+}
+
+__device__ __forceinline__ Work make_work(const FmhaParams& p) {
+    // Later query tiles see longer histories; launch them first.
+    const int tile  = p.row_tiles - 1 - static_cast<int>(blockIdx.x) / Geometry::KVHeads;
+    const int batch = static_cast<int>(blockIdx.z);
+    return make_work(p, static_cast<int>(blockIdx.x) % Geometry::KVHeads, tile,
+                     static_cast<int>(blockIdx.y), batch, batch, batch * p.width, p.width);
+}
+
+__device__ __forceinline__ Work make_work(const GroupParams& r) {
+    const int cta = static_cast<int>(blockIdx.x);
+    int low = 0, high = r.groups - 1; // the last group that starts at or before this CTA
+    while (low < high) {
+        const int mid = (low + high + 1) >> 1;
+        if (r.group[mid].cta_base <= cta)
+            low = mid;
+        else
+            high = mid - 1;
+    }
+    const Group& g       = r.group[low];
+    const int row_tiles  = row_tiles_of(g.width);
+    const int per_entry  = Geometry::KVHeads * row_tiles;
+    const int local      = cta - g.cta_base;
+    const int entry      = local / per_entry;
+    const int within     = local - entry * per_entry;
+    const int tile       = row_tiles - 1 - within / Geometry::KVHeads;
+    return make_work(r.base, within % Geometry::KVHeads, tile, 0, 0, g.row + entry,
+                     g.token_base + entry * g.width, g.width);
 }
 
 // Byte offset of 16-byte slot `slot` of row `row` inside a 128B-swizzled chunk of 128-byte rows.
@@ -211,17 +265,11 @@ __device__ __forceinline__ void fill_q(const FmhaParams& p, const Work& w,
                                        const Shared<Cfg<Kv>>& sh, int ltid) {
     using C        = Cfg<Kv>;
     const int warp = ltid >> 5, lane = ltid & 31;
-    for (int row = warp; row < C::kRows; row += 4) {
-        const int global_row = w.row_begin + row;
-        const int token      = global_row / kGroup;
-        const int head       = w.kv_head * kGroup + global_row % kGroup;
-        const bool valid     = token < w.live;
-        const __nv_bfloat16* src =
-            p.q + causal_q_index<Geometry>(head, 0, valid ? token + w.batch * p.width : 0);
-        float v[8];
-#pragma unroll
-        for (int r = 0; r < 8; ++r) v[r] = valid ? __bfloat162float(src[lane + 32 * r]) : 0.0f;
-        if constexpr (C::Policy::kRotate) kv::normalized_hadamard_d256_inplace(v, lane);
+    // `valid` is uniform over the warp. A row past the live tokens stays zero and skips the transform.
+    const auto finish = [&](int row, float (&v)[8], bool valid) {
+        if constexpr (C::Policy::kRotate) {
+            if (valid) kv::normalized_hadamard_d256_inplace(v, lane);
+        }
         if constexpr (!C::kNative) {
 #pragma unroll
             for (int r = 0; r < 8; ++r) {
@@ -232,9 +280,11 @@ __device__ __forceinline__ void fill_q(const FmhaParams& p, const Work& w,
             }
         } else {
             float amax = 0.0f;
+            if (valid) {
 #pragma unroll
-            for (int r = 0; r < 8; ++r) amax = fmaxf(amax, fabsf(v[r]));
-            amax            = common::warp_max(amax, 0xffffffffu);
+                for (int r = 0; r < 8; ++r) amax = fmaxf(amax, fabsf(v[r]));
+                amax = common::warp_max(amax, 0xffffffffu);
+            }
             const float qs  = amax > 0.0f ? amax / common::kFp8E4M3MaxFinite : 0.0f;
             const float inv = qs > 0.0f ? 1.0f / qs : 0.0f;
 #pragma unroll
@@ -245,52 +295,109 @@ __device__ __forceinline__ void fill_q(const FmhaParams& p, const Work& w,
             }
             if (lane == 0) sh.q_scale[row] = qs;
         }
+    };
+    // The loads of kBatch rows are in flight together: one memory round trip serves them all.
+    constexpr int kBatch = 4;
+    for (int row0 = warp; row0 < C::kRows; row0 += 4 * kBatch) {
+        float v[kBatch][8];
+        bool valid[kBatch];
+#pragma unroll
+        for (int b = 0; b < kBatch; ++b) {
+            const int global_row = w.row_begin + row0 + 4 * b;
+            const int token      = global_row / kGroup;
+            const int head       = w.kv_head * kGroup + global_row % kGroup;
+            valid[b]             = token < w.live;
+            const __nv_bfloat16* src =
+                p.q + causal_q_index<Geometry>(head, 0, valid[b] ? token + w.token_base : 0);
+#pragma unroll
+            for (int r = 0; r < 8; ++r)
+                v[b][r] = valid[b] ? __bfloat162float(src[lane + 32 * r]) : 0.0f;
+        }
+#pragma unroll
+        for (int b = 0; b < kBatch; ++b) finish(row0 + 4 * b, v[b], valid[b]);
     }
 }
 
-// Loader warps: keys [k0, k0 + 64) of this split into one K/V stage. Rows at or beyond `end` are
-// zero so padded cache pages never feed non-finite values into P.V.
+// One loader thread's share of a K/V tile, held in registers between its global loads and its
+// shared-memory stores. Issuing every load of a tile before the first store makes a tile cost one
+// memory round trip, and lets the next tile's loads run while the MMA and softmax work on this one.
 template <KvDType Kv>
-__device__ __forceinline__ void fill_kv(const FmhaParams& p, const Work& w, int tile, int stage,
-                                        const Shared<Cfg<Kv>>& sh, int ltid) {
+struct TileRegs {
+    using C                      = Cfg<Kv>;
+    using VRaw                   = typename C::Policy::VRaw;
+    static constexpr int kVecK   = C::kNative ? 16 : 32;
+    static constexpr int kVecV   = 32;
+    static constexpr int kKIters = C::kKeys * kVecK / 128;
+    static constexpr int kVIters = C::kKeys * kVecV / 128;
+    static_assert(kKIters * 128 == C::kKeys * kVecK && kVIters * 128 == C::kKeys * kVecV);
+    uint4 k[kKIters];
+    VRaw v[kVIters];
+    unsigned k_pair; // encoded K scale pair of key row ltid (native FP8)
+    bool k_valid;
+};
+
+// Loader warps: global loads of keys [k0, k0 + 64) of this split. Rows at or beyond `end` are zero
+// so padded cache pages never feed non-finite values into P.V. Nothing is decoded here: a decode
+// that consumes a load would stall the issue of the loads behind it.
+template <KvDType Kv>
+__device__ __forceinline__ void load_kv(const FmhaParams& p, const Work& w, int tile,
+                                        std::int64_t record, int ltid, TileRegs<Kv>& regs) {
     using C      = Cfg<Kv>;
     using Policy = typename C::Policy;
+    using Regs   = TileRegs<Kv>;
     const int k0 = w.split_start + tile * C::kKeys;
-    const std::int64_t* table =
-        p.cache.tables +
-        static_cast<std::int64_t>(p.cache.table_rows ? p.cache.table_rows[w.batch] : 0) *
-            p.cache.table_stride;
-    const std::int64_t record = table[k0 >> 6];
-    unsigned char* k_dst      = sh.k_stage(stage);
-    unsigned char* v_dst      = sh.v_stage(stage);
-    constexpr int kVecK       = C::kNative ? 16 : 32;
-    constexpr int kVecV       = 32;
-    const uint4 zero          = make_uint4(0, 0, 0, 0);
-
-#pragma unroll 4
-    for (int i = ltid; i < C::kKeys * kVecK; i += 128) {
-        const int key_l = i / kVecK, vi = i % kVecK;
-        const bool valid = k0 + key_l < w.end;
-        uint4 value      = zero;
-        if constexpr (C::kNative) {
-            if (valid) value = Policy::load_k16(p.cache, record, w.kv_head, key_l, vi * 16);
-        } else {
-            if (valid) value = Policy::load_k8(p.cache, record, w.kv_head, key_l, vi * 8);
+#pragma unroll
+    for (int it = 0; it < Regs::kKIters; ++it) {
+        const int i     = ltid + it * 128;
+        const int key_l = i / Regs::kVecK, vi = i % Regs::kVecK;
+        regs.k[it]      = make_uint4(0, 0, 0, 0);
+        if (k0 + key_l < w.end) {
+            if constexpr (C::kNative)
+                regs.k[it] = Policy::load_k16(p.cache, record, w.kv_head, key_l, vi * 16);
+            else
+                regs.k[it] = Policy::load_k8(p.cache, record, w.kv_head, key_l, vi * 8);
         }
-        *reinterpret_cast<uint4*>(k_dst + (vi >> 3) * 8192 + sw128(key_l, vi & 7)) = value;
     }
-#pragma unroll 4
-    for (int i = ltid; i < C::kKeys * kVecV; i += 128) {
-        const int key_l = i / kVecV, vi = i % kVecV;
-        const bool valid = k0 + key_l < w.end;
-        uint4 value      = zero;
-        if (valid) value = Policy::load_v8(p.cache, record, w.kv_head, key_l, vi * 8);
-        *reinterpret_cast<uint4*>(v_dst + (vi >> 3) * 8192 + sw128(key_l, vi & 7)) = value;
+#pragma unroll
+    for (int it = 0; it < Regs::kVIters; ++it) {
+        const int i     = ltid + it * 128;
+        const int key_l = i / Regs::kVecV, vi = i % Regs::kVecV;
+        regs.v[it]      = typename Regs::VRaw{};
+        if (k0 + key_l < w.end)
+            regs.v[it] = Policy::load_v8_raw(p.cache, record, w.kv_head, key_l, vi * 8);
+    }
+    if constexpr (C::kNative) {
+        regs.k_valid = ltid < C::kKeys && k0 + ltid < w.end;
+        regs.k_pair  = regs.k_valid ? Policy::load_k_scale_pair(p.cache, record, w.kv_head, ltid) : 0u;
+    }
+}
+
+// Loader warps: the staged tile into one K/V stage.
+template <KvDType Kv>
+__device__ __forceinline__ void store_kv(const TileRegs<Kv>& regs, int stage,
+                                         const Shared<Cfg<Kv>>& sh, int ltid) {
+    using C              = Cfg<Kv>;
+    using Policy         = typename C::Policy;
+    using Regs           = TileRegs<Kv>;
+    unsigned char* k_dst = sh.k_stage(stage);
+    unsigned char* v_dst = sh.v_stage(stage);
+#pragma unroll
+    for (int it = 0; it < Regs::kKIters; ++it) {
+        const int i     = ltid + it * 128;
+        const int key_l = i / Regs::kVecK, vi = i % Regs::kVecK;
+        *reinterpret_cast<uint4*>(k_dst + (vi >> 3) * 8192 + sw128(key_l, vi & 7)) = regs.k[it];
+    }
+#pragma unroll
+    for (int it = 0; it < Regs::kVIters; ++it) {
+        const int i     = ltid + it * 128;
+        const int key_l = i / Regs::kVecV, vi = i % Regs::kVecV;
+        *reinterpret_cast<uint4*>(v_dst + (vi >> 3) * 8192 + sw128(key_l, vi & 7)) =
+            Policy::decode_v8(regs.v[it]);
     }
     if constexpr (C::kNative) {
         if (ltid < C::kKeys) {
             float s0 = 0.0f, s1 = 0.0f;
-            if (k0 + ltid < w.end) Policy::load_k_scales(p.cache, record, w.kv_head, ltid, s0, s1);
+            if (regs.k_valid) Policy::decode_k_scales(regs.k_pair, s0, s1);
             sh.k_scale[stage * 2 * C::kKeys + 2 * ltid]     = s0;
             sh.k_scale[stage * 2 * C::kKeys + 2 * ltid + 1] = s1;
         }
@@ -393,7 +500,7 @@ __device__ __forceinline__ void softmax_role(const FmhaParams& p, const Work& w,
     const int row_g    = w.row_begin + tid;
     const int token    = row_g / kGroup;
     const bool row_ok  = token < w.live;
-    const std::int32_t* positions = p.positions + static_cast<std::int64_t>(w.batch) * p.width;
+    const std::int32_t* positions = p.positions + w.token_base;
     const int qabs     = row_ok ? positions[token] : -1;
     const int limit    = min(qabs + 1, w.end);
     const std::uint32_t t_lane = tmem + (static_cast<std::uint32_t>(warp * 32) << 16);
@@ -506,11 +613,11 @@ __device__ __forceinline__ void softmax_role(const FmhaParams& p, const Work& w,
 __device__ __forceinline__ void write_empty(const FmhaParams& p, const Work& w, int tid) {
     const int row_g = w.row_begin + tid;
     const int token = row_g / kGroup;
-    if (token >= p.width) return;
+    if (token >= w.width) return;
     const int head = w.kv_head * kGroup + row_g % kGroup;
     if (p.splits == 1) {
         auto* out = reinterpret_cast<uint4*>(
-            p.out + causal_q_index<Geometry>(head, 0, token + w.batch * p.width));
+            p.out + causal_q_index<Geometry>(head, 0, token + w.token_base));
 #pragma unroll
         for (int i = 0; i < 32; ++i) out[i] = make_uint4(0, 0, 0, 0);
     } else if (token < w.live) {
@@ -545,7 +652,7 @@ __device__ __forceinline__ void epilogue(const FmhaParams& p, const Work& w,
     const int row_g  = w.row_begin + tid;
     const int token  = row_g / kGroup;
     const int head   = w.kv_head * kGroup + row_g % kGroup;
-    const bool in_range = token < p.width;
+    const bool in_range = token < w.width;
     const bool row_ok   = token < w.live;
 
     if (p.splits > 1) {
@@ -579,7 +686,7 @@ __device__ __forceinline__ void epilogue(const FmhaParams& p, const Work& w,
     const float inv = row_ok && l > 0.0f ? __frcp_rn(l) : 0.0f;
     if constexpr (!C::Policy::kInverseRotate) {
         __nv_bfloat16* out =
-            p.out + causal_q_index<Geometry>(head, 0, in_range ? token + w.batch * p.width : 0);
+            p.out + causal_q_index<Geometry>(head, 0, in_range ? token + w.token_base : 0);
 #pragma unroll 2
         for (int cc = 0; cc < C::kD / 32; ++cc) {
             std::uint32_t r[32];
@@ -625,11 +732,11 @@ __device__ __forceinline__ void epilogue(const FmhaParams& p, const Work& w,
             for (int i = 0; i < 8; ++i)
                 v[i] = scratch[r * C::kScratchStride + lane + 32 * i] * inv2;
             kv::normalized_hadamard_d256_inplace(v, lane);
-            if (token2 < p.width) {
+            if (token2 < w.width) {
 #pragma unroll
                 for (int i = 0; i < 8; ++i)
                     causal_store_output(p.out + causal_q_index<Geometry>(
-                                                    head2, lane + 32 * i, token2 + w.batch * p.width),
+                                                    head2, lane + 32 * i, token2 + w.token_base),
                                         v[i]);
             }
         }
@@ -637,14 +744,13 @@ __device__ __forceinline__ void epilogue(const FmhaParams& p, const Work& w,
 }
 
 template <KvDType Kv>
-__global__ __launch_bounds__(Cfg<Kv>::kThreads, 1) void fmha_kernel(const __grid_constant__ FmhaParams p) {
+__device__ __forceinline__ void run_cta(const FmhaParams& p, const Work& w) {
     using C = Cfg<Kv>;
     extern __shared__ __align__(16) unsigned char raw[];
     const unsigned raw_address = common::smem_addr(raw);
     unsigned char* base        = raw + (((raw_address + 1023u) & ~1023u) - raw_address);
     const Shared<C> sh         = make_shared<C>(base);
 
-    const Work w = make_work(p);
     if (w.n_tiles < 0) return;
     const int tid  = static_cast<int>(threadIdx.x);
     const int warp = tid >> 5;
@@ -682,15 +788,29 @@ __global__ __launch_bounds__(Cfg<Kv>::kThreads, 1) void fmha_kernel(const __grid
         mma_role<Kv>(sh, tmem, w.n_tiles);
     } else if (warp >= C::kLoaderWarp0) {
         const int ltid = tid - C::kLoaderWarp0 * 32;
+        static_assert(C::kKeys == 64, "a cache record holds 64 keys");
+        const std::int64_t* table =
+            p.cache.tables +
+            static_cast<std::int64_t>(p.cache.table_rows ? p.cache.table_rows[w.row] : 0) *
+                p.cache.table_stride;
+        const int page0 = w.split_start >> 6;
+        // The first tile's loads overlap the Q preparation. A tile's page record is read two tiles
+        // before the tile's loads need it.
+        TileRegs<Kv> regs;
+        std::int64_t record_next = w.n_tiles > 1 ? table[page0 + 1] : 0;
+        load_kv<Kv>(p, w, 0, table[page0], ltid, regs);
         fill_q<Kv>(p, w, sh, ltid);
         sm::fence_proxy_async_shared();
         sm::mbarrier_arrive(sh.q_full);
         for (int j = 0; j < w.n_tiles; ++j) {
             const int stage = j & 1;
+            const std::int64_t record_after = j + 2 < w.n_tiles ? table[page0 + j + 2] : 0;
             sm::mbarrier_wait(&sh.kv_empty[stage], ((j >> 1) & 1) ^ 1u);
-            fill_kv<Kv>(p, w, j, stage, sh, ltid);
+            store_kv<Kv>(regs, stage, sh, ltid);
             sm::fence_proxy_async_shared();
             sm::mbarrier_arrive(&sh.kv_full[stage]);
+            if (j + 1 < w.n_tiles) load_kv<Kv>(p, w, j + 1, record_next, ltid, regs);
+            record_next = record_after;
         }
     }
     __syncthreads();
@@ -698,6 +818,16 @@ __global__ __launch_bounds__(Cfg<Kv>::kThreads, 1) void fmha_kernel(const __grid
         sm::fence_after_thread_sync();
         sm::tmem_dealloc<1>(tmem, C::kTmemAlloc);
     }
+}
+
+template <KvDType Kv>
+__global__ __launch_bounds__(Cfg<Kv>::kThreads, 1) void fmha_kernel(const __grid_constant__ FmhaParams p) {
+    run_cta<Kv>(p, make_work(p));
+}
+
+template <KvDType Kv>
+__global__ __launch_bounds__(Cfg<Kv>::kThreads, 1) void fmha_group_kernel(const __grid_constant__ GroupParams r) {
+    run_cta<Kv>(r.base, make_work(r));
 }
 
 } // namespace ninfer::ops::detail::sm100_fmha

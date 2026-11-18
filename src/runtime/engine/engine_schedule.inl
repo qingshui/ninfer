@@ -154,7 +154,7 @@ EngineCore<Instance>::find_group(std::uint64_t id) const noexcept {
         std::lock_guard lock(queue_mutex_);
         const auto it = std::find_if(groups_.begin(), groups_.end(),
                                      [id](const auto& group) { return group->id == id; });
-        if (it != groups_.end()) { found = *it; }
+        if (it != groups_.end() && (*it)->sealed) { found = *it; }
     }
     return found;
 }
@@ -254,6 +254,7 @@ void EngineCore<Instance>::resolve_context_progress(
         }
         finish_engine_phase(boundary, EngineHostPhase::Boundary);
         slots_[control->destination.value] = request;
+        ++slots_epoch_;
         boundary = begin_host_phase();
     } else if (context_owner_) {
         const auto request = context_owner_;
@@ -276,11 +277,14 @@ void EngineCore<Instance>::resolve_context_progress(
                       [](const auto& a, const auto& b) { return a->id < b->id; });
             finish_engine_phase(boundary, EngineHostPhase::Boundary);
             slots_[lane].reset();
+            ++slots_epoch_;
             request->lane.reset();
             request->residency.reset();
             request->sequence.reset();
             request_admission_check();
             boundary = begin_host_phase();
+        } else if constexpr (kInFlightCapture) {
+            throw std::logic_error("context operation completed for a request that is not pausing");
         } else {
             if (progress.published) {
                 ++cumulative_stats_.active_captures_completed;
@@ -306,9 +310,11 @@ ReclaimProgress EngineCore<Instance>::reclaim(const ContextAssessment& assessmen
     if (assessment.ready()) return ReclaimProgress::Retry;
     if (assessment.waiting()) return ReclaimProgress::Deferred;
     if (assessment.impossible()) return ReclaimProgress::Blocked;
-    if (instance_.session->reclaim_capture_reservation(assessment)) {
-        request_admission_check();
-        return ReclaimProgress::Changed;
+    if constexpr (!kInFlightCapture) {
+        if (instance_.session->reclaim_capture_reservation(assessment)) {
+            request_admission_check();
+            return ReclaimProgress::Changed;
+        }
     }
     const auto progress =
         cursor ? resources_.reclaim(*instance_.session, assessment, excluded, *cursor)
@@ -574,8 +580,7 @@ void EngineCore<Instance>::order_binding_sources(
 }
 
 // Creates one queued request: the queue accounting and identity, the output session, the
-// Request record and its pending entry. `queued` false keeps an engine-internal helper out of
-// the pending queue (it never has a consumer).
+// Request record and its pending entry.
 template <class Instance>
 [[nodiscard]] std::shared_ptr<typename EngineCore<Instance>::Request>
 EngineCore<Instance>::create_request(PreparedPrompt prompt, ResolvedRequestOptions options,
@@ -583,7 +588,10 @@ EngineCore<Instance>::create_request(PreparedPrompt prompt, ResolvedRequestOptio
                                      OutputConsumerMode consumer_mode,
                                      GenerationObservationOptions observation,
                                      Clock::time_point pending_deadline,
-                                     Clock::time_point submitted, bool queued) {
+                                     Clock::time_point submitted, SampleGroup* group,
+                                     std::uint32_t branch) {
+    // Only the branches of a sample group share their prompt with sibling requests.
+    if (group == nullptr) { options.execution.sample_count = 1; }
     std::uint64_t request_id        = 0;
     std::uint64_t publication_order = 0;
     {
@@ -658,9 +666,12 @@ EngineCore<Instance>::create_request(PreparedPrompt prompt, ResolvedRequestOptio
             throw RequestError(RequestErrorKind::Unavailable,
                                "inference engine is unavailable");
         }
-        if (queued) {
-            pending_.push_back(request);
-            ++submitted_requests_;
+        pending_.push_back(request);
+        ++submitted_requests_;
+        if (group != nullptr) {
+            request->sample_group_id = group->id;
+            request->branch_index    = branch;
+            group->members.push_back(request);
         }
     }
     queue_cv_.notify_all();
@@ -702,6 +713,7 @@ void EngineCore<Instance>::adopt_bound_request(
     cumulative_stats_.prompt_tokens += summary.prompt_tokens;
     cumulative_stats_.last_selected_frontier_tokens = summary.reused_prompt_tokens;
     slots_[lane] = request;
+    ++slots_epoch_;
 }
 
 template <class Instance>
@@ -733,16 +745,6 @@ EngineCore<Instance>::admit_request(const std::shared_ptr<Request>& request, boo
             request->admission_generation = admission_generation_;
         }
         try {
-            // A request the Session could fork keeps a prompt clone for its parent helper,
-            // stashed before the plan consumes the prompt. Penalty counts can never fork, so
-            // they never pay the copy.
-            const auto& sampling_seed = request->options.execution.sampling;
-            if (!restoring && !request->sample_helper &&
-                instance_.session->sample_fork_limit() > 0 && max_concurrency_ >= 2 &&
-                sampling_seed.presence_penalty == 0.0F &&
-                sampling_seed.frequency_penalty == 0.0F && !request->fork_prompt && request->prompt) {
-                request->fork_prompt = instance_.frontend.clone(request->prompt);
-            }
             ensure_base_plan(request);
         } catch (const RequestError&) {
             // Planning has not bound a sequence or submitted device work. A native
@@ -757,42 +759,21 @@ EngineCore<Instance>::admit_request(const std::shared_ptr<Request>& request, boo
             request_admission_check();
             return AdmissionStatus::Admitted;
         }
-        if (!restoring && !request->sample_helper &&
-            request->base_plan->fork_frontier() != 0) {
-            // A forkable request can only reach its first token through the fork: its prefill
-            // rests at the fork frontier and each branch decodes the last prompt token.
-            if (instance_.session->sample_fork_limit() == 0 || max_concurrency_ < 2) {
-                const auto error = std::make_exception_ptr(RequestError(
-                    RequestErrorKind::Unavailable,
-                    "sample fork requires a second engine lane"));
-                {
-                    std::lock_guard lock(queue_mutex_);
-                    std::erase(pending_, request);
-                }
-                request->fork_prompt.reset();
-                complete_error(request, error);
-                request_admission_check();
-                return AdmissionStatus::Admitted;
-            }
-            auto group = find_group(request->sample_group_id);
-            if (!group) {
-                // An ordinary submission of a forkable request is a one-branch group.
-                group          = std::make_shared<SampleGroup>();
-                group->members = {request};
-                {
-                    std::lock_guard lock(queue_mutex_);
-                    group->id = next_group_id_++;
-                    groups_.push_back(group);
-                }
-                request->sample_group_id = group->id;
-                request->branch_index    = 0;
-            }
-            if (!group->forking && !group->parent) {
-                const auto outcome = engage_fork_group(group, request);
-                if (outcome == Engagement::Engaged) return AdmissionStatus::Admitted;
+        std::shared_ptr<SampleGroup> group;
+        if (!restoring && request->sample_group_id) {
+            group = find_group(request->sample_group_id);
+            // A group is admitted once all of its branches exist.
+            if (!group) { return AdmissionStatus::Deferred; }
+        }
+        if constexpr (kInFlightCapture) {
+            // A forkable request belongs to a sample group: its prefill rests at the fork frontier
+            // and every branch decodes the last prompt token.
+            if (!restoring && request->base_plan->fork_frontier() != 0) {
+                if (!group) { throw std::logic_error("a forkable request has no sample group"); }
+                const auto outcome = engage_fork_group(*group, request);
                 if (outcome == Engagement::Failed) {
                     const auto error = std::make_exception_ptr(RequestError(
-                        RequestErrorKind::Unavailable, "sample group could not take its lanes"));
+                        RequestErrorKind::Unavailable, "sample group exceeds the fork limit"));
                     {
                         std::lock_guard lock(queue_mutex_);
                         std::erase(pending_, request);
@@ -801,27 +782,19 @@ EngineCore<Instance>::admit_request(const std::shared_ptr<Request>& request, boo
                     request_admission_check();
                     return AdmissionStatus::Admitted;
                 }
-                return AdmissionStatus::Deferred;
+                if (outcome == Engagement::Waiting) { return AdmissionStatus::Deferred; }
+                // The group's lanes are free: the request binds as its parent.
+                group.reset();
             }
-            return AdmissionStatus::Deferred;
         }
-        request->fork_prompt.reset();
-        if (!restoring && request->sample_group_id) {
-            // A non-forking group gains all of its lanes together: a member waits until the
-            // lanes its unadmitted branches still need are free.
-            if (const auto group = find_group(request->sample_group_id);
-                group && !group->forking) {
-                std::size_t remaining = 0;
-                {
-                    std::lock_guard lock(queue_mutex_);
-                    for (const auto& member : group->members) {
-                        if (std::find(pending_.begin(), pending_.end(), member) != pending_.end()) {
-                            ++remaining;
-                        }
-                    }
-                }
-                if (remaining > free_lane_count()) { return AdmissionStatus::Deferred; }
+        if (group) {
+            // A group that does not fork gains all of its lanes together: a member waits until the
+            // lanes its still queued branches need are free.
+            std::uint32_t remaining = 0;
+            for (const auto& member : group->members) {
+                if (member->is_queued()) { ++remaining; }
             }
+            if (remaining > free_lane_count()) { return AdmissionStatus::Deferred; }
         }
         const auto retained = resources_.retained_source(request->id);
         const auto revoked  = resources_.source_revocations(request->id);
@@ -887,35 +860,51 @@ EngineCore<Instance>::admit_request(const std::shared_ptr<Request>& request, boo
             deferred = true;
             break;
         }
-        // While flights compute, only a binding that completes synchronously (a penalty-free
-        // root source of a fresh request) may start; every other binding, and the reclamation
-        // a not-ready capacity assessment needs, belongs to a quiescent iteration.
+        // While flights compute, a Session with in-flight capture starts only the bindings it
+        // completes synchronously, and reclaims capacity without waiting. Any other Session starts
+        // only a fresh penalty-free root binding; every other binding, and the reclamation a
+        // not-ready capacity assessment needs, belongs to a quiescent iteration.
         const bool quiescent = compute_flights() == 0;
-        const auto& sampling = decision_request->options.execution.sampling;
-        const bool predicted_synchronous =
-            !restoring && !decision_request->suspended && !choice.source.checkpoint &&
-            sampling.presence_penalty == 0.0F && sampling.frequency_penalty == 0.0F;
-        if (!quiescent && !predicted_synchronous) { return AdmissionStatus::Deferred; }
+        if constexpr (!kInFlightCapture) {
+            const auto& sampling = decision_request->options.execution.sampling;
+            const bool predicted_synchronous =
+                !restoring && !decision_request->suspended && !choice.source.checkpoint &&
+                sampling.presence_penalty == 0.0F && sampling.frequency_penalty == 0.0F;
+            if (!quiescent && !predicted_synchronous) { return AdmissionStatus::Deferred; }
+        }
         // A new selection replaces its old waiting reference before capacity is
         // checked. The replacement is retained before any old point is released.
         if (resources_.has_source_record(decision_request->id)) {
             retain_admission_source(decision_request, choice, restoring);
         }
         auto binding_started = Clock::now();
-        const auto bind      = [&](const auto& source) {
-            return instance_.session->start_binding(
-                *decision_request->base_plan, LaneId{*lane}, source,
-                restoring ? &*decision_request->suspended : nullptr,
-                decision_request->resume_phase == EngineRequestState::Prefill ? UnitKind::Prefill
-                     : decision_request->resume_phase == EngineRequestState::ControlReady ? UnitKind::Control
-                                                                                         : UnitKind::Decode,
-                decision_request->resume_phase == EngineRequestState::Prefill ? 0U
-                     : decision_request->resume_phase == EngineRequestState::ControlReady
-                         ? static_cast<std::uint32_t>(
-                              decision_request->output.pending_control_tokens().size())
-                         : 1U);
+        const auto resume_state = restoring ? &*decision_request->suspended : nullptr;
+        const auto resume_kind =
+            decision_request->resume_phase == EngineRequestState::Prefill ? UnitKind::Prefill
+            : decision_request->resume_phase == EngineRequestState::ControlReady ? UnitKind::Control
+                                                                                  : UnitKind::Decode;
+        const auto resume_tokens =
+            decision_request->resume_phase == EngineRequestState::Prefill ? 0U
+            : decision_request->resume_phase == EngineRequestState::ControlReady
+                ? static_cast<std::uint32_t>(
+                      decision_request->output.pending_control_tokens().size())
+                : 1U;
+        const auto bind = [&](const auto& source) {
+            if constexpr (kInFlightCapture) {
+                return instance_.session->start_binding(*decision_request->base_plan,
+                                                        LaneId{*lane}, source, resume_state,
+                                                        resume_kind, resume_tokens, !quiescent);
+            } else {
+                return instance_.session->start_binding(*decision_request->base_plan,
+                                                        LaneId{*lane}, source, resume_state,
+                                                        resume_kind, resume_tokens);
+            }
         };
         auto reservation = bind(choice.source);
+        if constexpr (kInFlightCapture) {
+            // The binding needs a context operation; it waits for a quiescent iteration.
+            if (reservation.asynchronous) { return AdmissionStatus::Deferred; }
+        }
         if (!reservation && !reservation.source_valid) {
             if (!restoring) {
                 decision_request->admission.fallback_reason =
@@ -928,13 +917,15 @@ EngineCore<Instance>::admit_request(const std::shared_ptr<Request>& request, boo
             continue;
         }
         if (!reservation) {
-            if (!quiescent) {
-                // Capacity reclamation is a quiescent-iteration path; this source waits.
-                retain_admission_source(decision_request, choice, restoring);
-                if (!waiting_choice) { waiting_choice = choice; }
-                deferred = true;
-                ++decision.current;
-                continue;
+            if constexpr (!kInFlightCapture) {
+                if (!quiescent) {
+                    // Capacity reclamation is a quiescent-iteration path; this source waits.
+                    retain_admission_source(decision_request, choice, restoring);
+                    if (!waiting_choice) { waiting_choice = choice; }
+                    deferred = true;
+                    ++decision.current;
+                    continue;
+                }
             }
             assessment = reservation.assessment;
             retain_admission_source(decision_request, choice, restoring);
@@ -1048,6 +1039,9 @@ EngineCore<Instance>::admit_request(const std::shared_ptr<Request>& request, boo
                                      bound_choice});
             context_owner_ = bound_request;
         }
+        if constexpr (kInFlightCapture) {
+            if (!restoring) { claim_fork_children(bound_request); }
+        }
         return AdmissionStatus::Admitted;
     }
     if (waiting_choice &&
@@ -1073,265 +1067,205 @@ EngineCore<Instance>::admit_request(const std::shared_ptr<Request>& request, boo
     return restoring ? AdmissionStatus::Blocked : AdmissionStatus::Deferred;
 }
 
-// Engages a forking sample group: the parent helper is created from the first member's stashed
-// prompt clone, the members take their child lanes in the Forking state and leave the queue,
-// and the parent joins the pending queue to bind through the ordinary admission path.
+// Decides whether `parent` can head a fork group now. The parent is the group's first queued
+// branch: the other queued branches wait for their turn and then take their lanes as children.
 template <class Instance>
 typename EngineCore<Instance>::Engagement
-EngineCore<Instance>::engage_fork_group(const std::shared_ptr<SampleGroup>& group,
-                                        const std::shared_ptr<Request>& first) {
-    const std::uint32_t members = static_cast<std::uint32_t>(group->members.size());
-    if (members > instance_.session->sample_fork_limit() || members + 1 > max_concurrency_) {
+EngineCore<Instance>::engage_fork_group(const SampleGroup& group,
+                                        const std::shared_ptr<Request>& parent) {
+    std::uint32_t queued = 0;
+    for (const auto& member : group.members) {
+        if (!member->is_queued()) { continue; }
+        if (queued++ == 0 && member != parent) { return Engagement::Waiting; }
+    }
+    if (queued != 0 && queued - 1 > instance_.session->sample_fork_limit()) {
         return Engagement::Failed;
     }
-    if (!first->fork_prompt) { return Engagement::Failed; }
-    if (free_lane_count() < members + 1) { return Engagement::Waiting; }
-    PreparedPrompt parent_prompt = std::move(*first->fork_prompt);
-    first->fork_prompt.reset();
-    for (const auto& member : group->members) { member->fork_prompt.reset(); }
-
-    std::shared_ptr<Request> parent;
-    try {
-        parent = create_request(std::move(parent_prompt), first->options, first->prompt_summary,
-                                first->prepare_seconds, OutputConsumerMode::Aggregate, {},
-                                first->deadline, Clock::now());
-    } catch (const RequestError&) {
-        // The helper did not queue: the group keeps waiting for the queue's verdict on a later
-        // pass.
-        return Engagement::Waiting;
-    }
-    parent->sample_helper   = true;
-    parent->sample_group_id = group->id;
-    try {
-        ensure_base_plan(parent);
-    } catch (const RequestError&) {
-        // A native rejection of the shared plan ends the whole group: the members fail with
-        // the same verdict on their next pass.
-        complete_helper(parent);
-        return Engagement::Waiting;
-    } catch (...) {
-        complete_helper(parent);
-        throw;
-    }
-    if (parent->base_plan->fork_frontier() == 0) {
-        // The parent's plan carries no fork frontier although the member's did; the members
-        // re-route on their own passes.
-        complete_helper(parent);
-        return Engagement::Failed;
-    }
-
-    // The members take their child lanes together and leave the queue; their branch prefills
-    // arrive with the fork, so their prompt begins at the fork frontier.
-    std::vector<std::uint32_t> child_lanes;
-    child_lanes.reserve(members);
-    const auto admission_now = Clock::now();
-    {
-        std::lock_guard lock(queue_mutex_);
-        for (std::size_t branch = 0; branch < members; ++branch) {
-            const auto lane = free_lane();
-            if (!lane) throw std::logic_error("fork group lost its reserved lanes");
-            child_lanes.push_back(*lane);
-        }
-        for (const auto& member : group->members) {
-            scheduler_.admitted(pending_, *member, max_concurrency_);
-            std::erase(pending_, member);
-        }
-    }
-    for (std::uint32_t branch = 0; branch < members; ++branch) {
-        const auto& member = group->members[branch];
-        const auto lane    = child_lanes[branch];
-        member->admitted_at = admission_now;
-        member->host_timing.queue_wait_ns =
-            elapsed_ns(member->submitted, *member->admitted_at);
-        member->queue_wait_recorded = true;
-        member->admitted_begin =
-            BeginSummary{.prompt_tokens        = member->base_plan->summary().prompt_tokens,
-                         .reused_prompt_tokens = parent->base_plan->fork_frontier(),
-                         .prefix_reuse_path    = PrefixReusePath::Root};
-        member->model_state = EngineRequestState::Forking;
-        member->lane        = LaneId{lane};
-        slots_[lane]        = member;
-        publish_generation_start(member, *member->admitted_begin);
-    }
-    group->child_lanes = std::move(child_lanes);
-    group->parent      = parent;
-    group->forking     = true;
-    request_admission_check();
-    return Engagement::Engaged;
+    return free_lane_count() >= queued ? Engagement::Ready : Engagement::Waiting;
 }
 
-// Forks every engaged group whose parent rests at its fork frontier, adopts the children as
-// their members' sequences, and ends the parent helper once its silent residency operation
-// retired. A parent whose completion had to wait ends on a later iteration.
+// The parent is bound: the group's other queued branches leave the queue and take one free lane
+// each in the Forking state. They hold no sequence until the fork installs them, and their
+// prompt starts at the fork frontier the parent shares.
 template <class Instance>
-void EngineCore<Instance>::advance_sample_groups(HostPhaseMeasurement& boundary) {
-    std::vector<std::shared_ptr<SampleGroup>> snapshot;
-    {
-        std::lock_guard lock(queue_mutex_);
-        snapshot = groups_;
+void EngineCore<Instance>::claim_fork_children(const std::shared_ptr<Request>& parent) {
+    const auto frontier = parent->base_plan->fork_frontier();
+    // A parent that starts at or past its fork frontier prefills the whole prompt itself.
+    if (frontier == 0 || !parent->admitted_begin ||
+        parent->admitted_begin->reused_prompt_tokens >= frontier) {
+        return;
     }
-    for (const auto& group : snapshot) {
-        if (!group->forking) { continue; }
-        const auto parent = group->parent;
-        if (!parent || !parent->sequence) { continue; }
-        if (group->forked) {
-            // The children are adopted; only the parent's end had to wait for the context slot
-            // or its own retirement.
-            if (instance_.session->has_context_operation() ||
-                parent->capture_pending ||
-                instance_.session->execution_pending(*parent->sequence)) {
-                continue;
-            }
-            complete_helper(parent);
+    const auto group = find_group(parent->sample_group_id);
+    if (!group) { throw std::logic_error("fork parent lost its sample group"); }
+    ForkGroup fork{.parent = parent};
+    const auto now      = Clock::now();
+    std::uint32_t lane = 0;
+    for (const auto& member : group->members) {
+        if (member == parent || !member->is_queued()) { continue; }
+        try {
+            ensure_base_plan(member);
+        } catch (const RequestError&) {
+            // The branch's own plan was rejected: it ends alone and the group goes on.
+            const auto error = std::current_exception();
             {
                 std::lock_guard lock(queue_mutex_);
-                std::erase(groups_, group);
+                std::erase(pending_, member);
             }
-            request_admission_check();
+            complete_error(member, error);
             continue;
         }
-        if (parent->model_state != EngineRequestState::Prefill) { continue; }
-        const auto fork_frontier = parent->base_plan->fork_frontier();
-        const std::uint32_t reused =
-            parent->admitted_begin ? parent->admitted_begin->reused_prompt_tokens : 0;
-        if (parent->computed_prompt_tokens + reused != fork_frontier) {
-            continue;
+        while (lane < max_concurrency_ && (slots_[lane] || materializing_[lane])) { ++lane; }
+        // The branches without a lane stay queued and head another fork group later.
+        if (lane == max_concurrency_) { break; }
+        {
+            std::lock_guard lock(queue_mutex_);
+            scheduler_.admitted_with(*member);
+            std::erase(pending_, member);
         }
-        if (parent->capture_pending ||
-            instance_.session->execution_pending(*parent->sequence) ||
-            instance_.session->has_context_operation()) {
-            continue;
+        member->admitted_at                = now;
+        member->host_timing.queue_wait_ns  = elapsed_ns(member->submitted, now);
+        member->queue_wait_recorded        = true;
+        member->model_state                = EngineRequestState::Forking;
+        member->lane                       = LaneId{lane};
+        slots_[lane]                       = member;
+        ++slots_epoch_;
+        publish_generation_start(
+            member, BeginSummary{.prompt_tokens = member->base_plan->summary().prompt_tokens,
+                                 .reused_prompt_tokens = frontier,
+                                 .prefix_reuse_path    = PrefixReusePath::Root});
+        fork.children.push_back(member);
+        fork.child_lanes.push_back(lane);
+    }
+    fork_groups_.push_back(std::move(fork));
+}
+
+// Forks, with one Session call, every engaged group whose parent rests at its fork frontier
+// with nothing pending, and adopts the installed children. The parent and its children decode
+// the last prompt token as ordinary sequences from the next flight on. A group the Context
+// cannot hold yet is retried by the next iteration.
+template <class Instance>
+void EngineCore<Instance>::fork_ready_groups() {
+    if constexpr (kInFlightCapture) {
+        using GroupRequest = typename ModelContract::ForkGroupRequest;
+        std::vector<GroupRequest> requests;
+        std::vector<std::size_t> ready;
+        for (std::size_t index = 0; index < fork_groups_.size(); ++index) {
+            const auto& group  = fork_groups_[index];
+            const auto& parent = group.parent;
+            if (!parent->is_prefilling() || !parent->sequence ||
+                parent->cancelled.load(std::memory_order_acquire) ||
+                instance_.session->context_blocks(*parent->sequence) ||
+                instance_.session->execution_pending(*parent->sequence) ||
+                parent->admitted_begin->reused_prompt_tokens + parent->computed_prompt_tokens !=
+                    parent->base_plan->fork_frontier()) {
+                continue;
+            }
+            GroupRequest request{.parent = *parent->sequence};
+            for (std::size_t branch = 0; branch < group.children.size(); ++branch) {
+                request.children.push_back(LaneId{group.child_lanes[branch]});
+                request.sampling.push_back(group.children[branch]->options.execution.sampling);
+            }
+            requests.push_back(std::move(request));
+            ready.push_back(index);
         }
-        std::vector<LaneId> children;
-        std::vector<ResolvedSamplingParameters> sampling;
-        children.reserve(group->child_lanes.size());
-        sampling.reserve(group->child_lanes.size());
-        for (std::uint32_t branch = 0; branch < group->members.size(); ++branch) {
-            children.push_back(LaneId{group->child_lanes[branch]});
-            sampling.push_back(group->members[branch]->options.execution.sampling);
-        }
-        ForkResult forked;
+        if (ready.empty()) { return; }
+        std::vector<typename ModelContract::ForkGroupResult> results;
         {
             ExecutionCallScope call(*this);
-            forked = instance_.session->fork(*parent->sequence, children, sampling);
+            results = instance_.session->fork_batch(requests);
             call.finish();
         }
-        if (!forked.reserved) {
-            continue;
+        ++cumulative_stats_.fork_batches;
+        if (results.size() != ready.size()) {
+            throw std::logic_error("fork_batch changed its group membership");
         }
-        if (forked.children.size() != children.size()) {
-            throw std::logic_error("fork changed the requested child membership");
+        std::vector<std::size_t> forked;
+        bool reclaimed = false;
+        for (std::size_t i = 0; i < ready.size(); ++i) {
+            if (!results[i].reserved) {
+                // The Context cannot hold this group yet: reclaim what its assessment lacks
+                // (one group per iteration) and let the next iteration retry the fork.
+                if (!reclaimed) {
+                    reclaimed = true;
+                    (void)reclaim(results[i].assessment, false);
+                }
+                continue;
+            }
+            const auto& group  = fork_groups_[ready[i]];
+            const auto& parent = group.parent;
+            if (results[i].children.size() != group.children.size()) {
+                throw std::logic_error("fork changed the requested child membership");
+            }
+            for (std::size_t branch = 0; branch < group.children.size(); ++branch) {
+                const auto& child = group.children[branch];
+                const auto lane   = group.child_lanes[branch];
+                child->sequence   = results[i].children[branch];
+                child->residency  = ResidencyId{LaneId{lane}, ++lane_residency_epochs_[lane]};
+                child->placement  = instance_.session->placement(*child->sequence);
+                child->placement_tokens =
+                    std::max<std::uint64_t>(child->placement_tokens,
+                                            instance_.session->load_tokens(*child->sequence));
+                child->model_state = EngineRequestState::DecodeReady;
+            }
+            parent->begin       = parent->admitted_begin;
+            parent->model_state = EngineRequestState::DecodeReady;
+            forked.push_back(ready[i]);
+            cumulative_stats_.forked_branches += 1 + group.children.size();
         }
-        group->forked = true;
-        // The fork installed its children through a silent context operation; retire it before
-        // the parent's end or the next binding touches the context slot. The children are the
-        // engine's own bookkeeping and adopt regardless.
-        (void)await_context_operation(boundary, Clock::now() + kAdmissionBurst);
-        for (std::uint32_t branch = 0; branch < group->members.size(); ++branch) {
-            const auto& member = group->members[branch];
-            const auto lane     = group->child_lanes[branch];
-            member->sequence    = forked.children[branch];
-            member->residency   = ResidencyId{LaneId{lane}, ++lane_residency_epochs_[lane]};
-            member->placement   = instance_.session->placement(*member->sequence);
-            member->placement_tokens =
-                std::max<std::uint64_t>(member->placement_tokens,
-                                        instance_.session->load_tokens(*member->sequence));
-            member->model_state = EngineRequestState::DecodeReady;
+        for (auto it = forked.rbegin(); it != forked.rend(); ++it) {
+            fork_groups_.erase(fork_groups_.begin() + static_cast<std::ptrdiff_t>(*it));
         }
-        request_admission_check();
-        if (instance_.session->has_context_operation() || parent->capture_pending ||
-            instance_.session->execution_pending(*parent->sequence)) {
-            continue;
-        }
-        complete_helper(parent);
-        {
-            std::lock_guard lock(queue_mutex_);
-            std::erase(groups_, group);
-        }
-        request_admission_check();
+        if (!forked.empty()) { request_admission_check(); }
     }
 }
 
-// Winds down groups that ended before their fork completed (a cancelled or failed member, or
-// a parent that ended early), and forgets groups whose members all left without the fork path.
+// Ends the branches an engaged group lost before its fork: a cancelled branch leaves alone, and
+// a parent that is cancelled or ended takes the branches that wait for its fork with it. Also
+// forgets submitted groups that have no queued branch left.
 template <class Instance>
 void EngineCore<Instance>::settle_sample_groups(HostPhaseMeasurement& boundary) {
-    std::vector<std::shared_ptr<SampleGroup>> snapshot;
     {
         std::lock_guard lock(queue_mutex_);
-        snapshot = groups_;
+        std::erase_if(groups_, [](const auto& group) {
+            return group->sealed &&
+                   std::none_of(group->members.begin(), group->members.end(),
+                                [](const auto& member) { return member->is_queued(); });
+        });
     }
-    for (const auto& group : snapshot) {
-        if (!group->forking) {
-            // A non-forking group leaves with its last member; nothing of it remains once
-            // every branch completed.
-            bool live = false;
-            for (const auto& member : group->members) {
-                if (!member->response_done) { live = true; }
+    for (std::size_t index = 0; index < fork_groups_.size();) {
+        auto& group = fork_groups_[index];
+        const bool parent_gone = group.parent->response_done || group.parent->is_model_finished() ||
+                                 group.parent->cancelled.load(std::memory_order_acquire);
+        std::vector<std::shared_ptr<Request>> ended;
+        std::vector<std::uint32_t> kept_lanes;
+        std::vector<std::shared_ptr<Request>> kept;
+        for (std::size_t branch = 0; branch < group.children.size(); ++branch) {
+            if (parent_gone || group.children[branch]->cancelled.load(std::memory_order_acquire)) {
+                ended.push_back(group.children[branch]);
+            } else {
+                kept.push_back(group.children[branch]);
+                kept_lanes.push_back(group.child_lanes[branch]);
             }
-            if (!live) {
-                std::lock_guard lock(queue_mutex_);
-                std::erase(groups_, group);
-            }
+        }
+        if (ended.empty()) {
+            ++index;
             continue;
         }
-        if (group->forked) { continue; }  // the fork step owns a forked group's end
-        const auto parent = group->parent;
-        bool wind_down    = false;
-        if (parent) {
-            wind_down = parent->response_done || parent->model_state == EngineRequestState::ModelFinished;
+        group.children    = std::move(kept);
+        group.child_lanes = std::move(kept_lanes);
+        if (parent_gone) {
+            fork_groups_.erase(fork_groups_.begin() + static_cast<std::ptrdiff_t>(index));
+        } else {
+            ++index;
         }
-        for (const auto& member : group->members) {
-            if (member->cancelled.load(std::memory_order_acquire)) { wind_down = true; }
-        }
-        if (!wind_down) { continue; }
         const SettlementPass pass(*this);
-        if (parent && parent->sequence &&
-            !parent->capture_pending &&
-            !instance_.session->execution_pending(*parent->sequence) &&
-            parent->model_state != EngineRequestState::ModelFinished) {
+        for (const auto& child : ended) {
             finish_engine_phase(boundary, EngineHostPhase::Boundary);
-            complete_helper(parent);
+            complete_cancelled(child);
             boundary = begin_host_phase();
-        }
-        for (const auto& member : group->members) {
-            if (member->model_state != EngineRequestState::Forking) { continue; }
-            finish_engine_phase(boundary, EngineHostPhase::Boundary);
-            complete_cancelled(member);
-            boundary = begin_host_phase();
-        }
-        {
-            std::lock_guard lock(queue_mutex_);
-            std::erase(groups_, group);
         }
         request_admission_check();
     }
-}
-
-// Ends a forking parent helper: it rests at its fork frontier, so its sequence is aborted (or
-// was already ended), its lineage settles, and its lane and capacity return without counting a
-// request statistic.
-template <class Instance>
-void EngineCore<Instance>::complete_helper(const std::shared_ptr<Request>& parent) {
-    if (parent->sequence) {
-        auto aborted = instance_.session->abort(*parent->sequence);
-        if (aborted.status != ConsumeStatus::Consumed) {
-            throw std::logic_error("fork parent could not be aborted");
-        }
-        parent->speculative_stats = std::move(aborted.speculative);
-    }
-    settle_resources(DeferredSettlement{
-        .request_id        = parent->id,
-        .owner             = std::exchange(parent->continuation_owner, 0),
-        .publication_order = parent->publication_order,
-    });
-    parent->suspended.reset();
-    parent->base_plan.reset();
-    parent->fork_prompt.reset();
-    parent->prompt      = {};
-    parent->model_state = EngineRequestState::ModelFinished;
-    release_request(parent);
-    release_reserved_capacity();
 }
 
 template <class Instance>
@@ -1428,13 +1362,18 @@ LaneTable EngineCore<Instance>::build_lane_table(const LaneSlots& lanes) const {
                                    ? request->admitted_begin->prompt_tokens -
                                          request->admitted_begin->reused_prompt_tokens
                                    : 0;
+        bool forking         = false;
         if (const auto fork = request->base_plan ? request->base_plan->fork_frontier() : 0) {
             const std::uint32_t base =
                 request->admitted_begin ? request->admitted_begin->reused_prompt_tokens : 0;
-            suffix = std::min(suffix, fork > base ? fork - base : 0);
+            suffix  = std::min(suffix, fork > base ? fork - base : 0);
+            forking = true;
         }
         const std::uint32_t computed = std::min(request->computed_prompt_tokens, suffix);
-        if (suffix <= computed) continue;
+        // A source covering the whole prompt leaves no suffix, yet a Session with in-flight
+        // capture still needs one unit to sample the first token from the source's retained
+        // hidden state.
+        if ((forking || !kInFlightCapture) && suffix <= computed) continue;
         const std::uint32_t chunk =
             prefill_chunk_ == 0 ? std::numeric_limits<std::uint32_t>::max() : prefill_chunk_;
         entry.prefill_limit = std::max(std::min(chunk, suffix - computed), 1U);
@@ -1473,6 +1412,9 @@ void EngineCore<Instance>::reserve_planned_units(const IterationMembership& memb
         if (request && request->sequence && request->id == owner) priority = lane;
     }
     if (priority) order.push_back(*priority);
+    // A replaying lane runs alone and takes no part in the prefill list, so it is ordered apart.
+    if (membership.replay_lane && (!priority || *priority != *membership.replay_lane))
+        order.push_back(*membership.replay_lane);
     const auto append = [&](const std::vector<std::uint32_t>& lanes) {
         for (const auto lane : lanes) {
             if (!priority || lane != *priority) order.push_back(lane);
@@ -1482,8 +1424,37 @@ void EngineCore<Instance>::reserve_planned_units(const IterationMembership& memb
     append(membership.decode_lanes);
     append(membership.prefill_lanes);
 
+    // Decode lanes that fit together reserve in one Session call. Any shortfall leaves them to
+    // the lane loop below, which owns reclaim and the per-lane outcome; the order of the
+    // reservations only matters then.
+    std::vector<std::uint8_t> reserved_together(max_concurrency_, 0);
+    if (!priority && membership.control_lanes.empty()) {
+        std::vector<ExecutionUnit> units;
+        std::vector<std::uint32_t> lanes;
+        units.reserve(membership.decode_lanes.size());
+        lanes.reserve(membership.decode_lanes.size());
+        for (const auto lane : membership.decode_lanes) {
+            const auto& request = slots_[lane];
+            if (!request || !request->sequence || request->capture_pending ||
+                request->cancelled.load(std::memory_order_acquire) ||
+                instance_.session->context_blocks(*request->sequence) ||
+                instance_.session->execution_pending(*request->sequence) ||
+                !request->is_decode_ready())
+                continue;
+            units.push_back(execution_unit(*request));
+            lanes.push_back(lane);
+        }
+        if (units.size() > 1 && instance_.session->reserve_units(units)) {
+            for (std::size_t i = 0; i < lanes.size(); ++i) {
+                reserved_units_[lanes[i]] = UnitPermit{units[i], *slots_[lanes[i]]->residency};
+                reserved_together[lanes[i]] = 1;
+            }
+        }
+    }
+
     std::vector<std::uint32_t> granted_prefill;
     for (const auto lane : order) {
+        if (reserved_together[lane]) continue;
         const auto request = slots_[lane];
         if (!request || !request->sequence) continue;
         if (request->capture_pending || request->cancelled.load(std::memory_order_acquire) ||
@@ -1494,14 +1465,20 @@ void EngineCore<Instance>::reserve_planned_units(const IterationMembership& memb
             if (priority && *priority == lane) return;
             continue;
         }
+        const bool replay_lane  = membership.replay_lane && *membership.replay_lane == lane;
         const bool prefill_lane = request->is_prefilling() || request->is_replaying();
-        if (prefill_lane &&
+        if (prefill_lane && !replay_lane &&
             std::find(membership.prefill_lanes.begin(), membership.prefill_lanes.end(), lane) ==
                 membership.prefill_lanes.end()) {
             continue;
         }
         auto unit = execution_unit(*request);
-        if (prefill_lane) {
+        if (replay_lane) {
+            // A replay window is bounded by the public chunk and spends none of the iteration's
+            // prefill token budget: the replay runs alone.
+            unit.tokens = prefill_chunk_ == 0 ? std::numeric_limits<std::uint32_t>::max()
+                                              : prefill_chunk_;
+        } else if (prefill_lane) {
             const auto cap = std::find(membership.prefill_lanes.begin(),
                                        membership.prefill_lanes.end(), lane) -
                              membership.prefill_lanes.begin();
@@ -1533,7 +1510,9 @@ void EngineCore<Instance>::reserve_planned_units(const IterationMembership& memb
                 if (priority && *priority == lane) return;
                 break;
             }
-            if (!quiescent || instance_.session->has_context_operation()) {
+            // A Session with in-flight capture releases checkpoints beside the flights; any
+            // other Session reclaims only while nothing computes.
+            if ((!kInFlightCapture && !quiescent) || instance_.session->has_context_operation()) {
                 if (priority && *priority == lane) return;
                 break;
             }
@@ -1560,6 +1539,11 @@ void EngineCore<Instance>::reserve_planned_units(const IterationMembership& memb
                 }
                 continue;
             }
+            // Pausing a resident is quiescent-iteration work.
+            if (!quiescent) {
+                if (priority && *priority == lane) return;
+                break;
+            }
             if (request->recovery_pending)
                 throw std::logic_error("protected recovery exceeded its Native reservation");
             scheduler_.require_progress(request->id);
@@ -1576,16 +1560,18 @@ void EngineCore<Instance>::reserve_planned_units(const IterationMembership& memb
     // checkpoint inventory). Preparations are optional: a bounded number per iteration keeps
     // the engine servicing, and deferred lanes retry once committed releases shrank the
     // pressure.
-    if (quiescent && !instance_.session->has_context_operation()) {
-        constexpr std::size_t kMaxCapturePreparations = 8;
-        std::size_t preparations = 0;
-        for (const auto lane : granted_prefill) {
-            if (preparations >= kMaxCapturePreparations) {
-                reserved_units_[lane].reset();
-                continue;
+    if constexpr (!kInFlightCapture) {
+        if (quiescent && !instance_.session->has_context_operation()) {
+            constexpr std::size_t kMaxCapturePreparations = 8;
+            std::size_t preparations = 0;
+            for (const auto lane : granted_prefill) {
+                if (preparations >= kMaxCapturePreparations) {
+                    reserved_units_[lane].reset();
+                    continue;
+                }
+                ++preparations;
+                if (!prepare_semantic_capture(slots_[lane])) reserved_units_[lane].reset();
             }
-            ++preparations;
-            if (!prepare_semantic_capture(slots_[lane])) reserved_units_[lane].reset();
         }
     }
 }
@@ -1638,16 +1624,6 @@ template <class Instance>
         if (candidates.empty()) break;
         bool admitted = false;
         for (const auto& candidate : candidates) {
-            if (candidate->sample_group_id) {
-                // A member of an engaged fork group left the queue with its child lane; the
-                // parent helper binds through its own pending entry.
-                if (const auto group = find_group(candidate->sample_group_id);
-                    group && group->forking &&
-                    std::find(group->members.begin(), group->members.end(), candidate) !=
-                        group->members.end()) {
-                    continue;
-                }
-            }
             const auto status = admit_request(candidate, false);
             admitted = admitted || status == AdmissionStatus::Admitted;
             // One admission decision is live at a time; its request is the next candidate.
@@ -1656,14 +1632,35 @@ template <class Instance>
         }
         admitted_any = admitted_any || admitted;
         // A binding that started a context operation (silent or asynchronous) must retire
-        // before the next one can begin; settle whatever it produced on the way.
+        // before the next one can begin; settle whatever it produced on the way. Synchronous
+        // bindings chain until the queue, the lanes or the burst budget ends the pass.
         if (!instance_.session->has_context_operation()) {
-            if (!admitted) break;
+            if (!admitted || Clock::now() >= burst_end) break;
             continue;
         }
         if (!await_context_operation(boundary, burst_end)) break;
     }
     return admitted_any;
+}
+
+template <class Instance>
+void EngineCore<Instance>::balance_retention() {
+    const auto points = resources_.retained_points();
+    if (points == 0) return;
+    const auto usage = instance_.session->physical_usage();
+    std::size_t keep = points;
+    for (const auto& pool : usage.pools) {
+        if (pool.domain != ContextMemoryDomain::Device || pool.cached_bytes == 0) continue;
+        const std::uint64_t free = pool.assigned_free_bytes + pool.unassigned_free_bytes +
+                                   pool.pending_retirement_bytes;
+        const std::uint64_t wanted = pool.capacity_bytes / kPoolHeadroomDivisor;
+        if (free >= wanted) continue;
+        const std::uint64_t per_point = pool.cached_bytes / points;
+        if (per_point == 0) continue;
+        const std::uint64_t excess = (wanted - free + per_point - 1) / per_point;
+        keep = std::min<std::size_t>(keep, excess >= points ? 0 : points - excess);
+    }
+    if (keep < points) resources_.trim_retained(*instance_.session, keep);
 }
 
 template <class Instance>
@@ -1673,12 +1670,14 @@ void EngineCore<Instance>::begin_iteration(HostPhaseMeasurement& boundary) {
     // iteration, and in particular before admission can select a source.
     flush_deferred_settlements();
     (void)expire_pending_requests();
-    if (!instance_.session->has_context_operation() && compute_flights() == 0) {
-        for (const auto& request : slots_) {
-            if (request && request->capture_pending &&
-                !instance_.session->execution_pending(*request->sequence)) {
-                reserve_active_capture(request, request->post_capture_state);
-                break;
+    if constexpr (!kInFlightCapture) {
+        if (!instance_.session->has_context_operation() && compute_flights() == 0) {
+            for (const auto& request : slots_) {
+                if (request && request->capture_pending &&
+                    !instance_.session->execution_pending(*request->sequence)) {
+                    reserve_active_capture(request, request->post_capture_state);
+                    break;
+                }
             }
         }
     }
@@ -1725,11 +1724,13 @@ void EngineCore<Instance>::begin_iteration(HostPhaseMeasurement& boundary) {
             if (instance_.session->has_context_operation()) (void)poll_execution(boundary);
         }
     }
-    // Forking groups advance beside whatever computes: the fork step needs only the context
-    // slot and its own parent.
-    advance_sample_groups(boundary);
-    // Admission of a fresh root source runs beside the flights in flight; reclamation and
-    // asynchronous bindings wait for a quiescent iteration.
+    balance_retention();
+    // Groups at their fork frontier fork beside whatever computes: the fork opens no context
+    // operation and needs only its own parent at rest.
+    fork_ready_groups();
+    // Admission runs beside the flights in flight: a Session with in-flight capture binds
+    // synchronously and reclaims without waiting; any other Session starts only fresh root
+    // bindings, and its reclamation and asynchronous bindings wait for a quiescent iteration.
     (void)admit_pending(boundary);
 }
 
@@ -1987,9 +1988,11 @@ void EngineCore<Instance>::worker_loop() noexcept {
             progressed    = poll_execution(boundary);
             finish_engine_phase(boundary, EngineHostPhase::Boundary);
             const auto revision = schedule_revision_.load(std::memory_order_acquire);
-            if (revision != published_revision_) publish_runtime_stats();
             const bool schedule = progressed || revision != scheduled_revision ||
                                   !execution_outstanding() || Clock::now() >= pending_deadline_;
+            // The snapshot is published once the iteration's flights are submitted, so the
+            // device does not wait for it.
+            bool published = false;
             if (schedule) {
                 scheduled_revision = revision;
                 set_host_work_class(HostWorkClass::Control);
@@ -1999,13 +2002,16 @@ void EngineCore<Instance>::worker_loop() noexcept {
                 if (submit_iteration(boundary)) {
                     progressed = true;
                     publish_runtime_stats();
+                    published = true;
                 }
             }
+            if (!published && revision != published_revision_) publish_runtime_stats();
             {
                 ExecutionCallScope call(*this, CoordinatorCall::Flush);
                 instance_.executor->flush();
                 call.finish();
             }
+            flush_completions();
             outstanding = execution_outstanding();
             if (!outstanding) progressed |= process_measurement();
         } catch (...) {
@@ -2018,7 +2024,7 @@ void EngineCore<Instance>::worker_loop() noexcept {
             const auto started = Clock::now();
             std::this_thread::yield();
             record_coordinator_call(CoordinatorCall::Yield, elapsed_ns(started, Clock::now()),
-                                    exposed);
+                                    *exposed);
         }
         if (!outstanding && !progressed) {
             std::unique_lock lock(queue_mutex_);

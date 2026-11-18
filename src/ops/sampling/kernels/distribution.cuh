@@ -330,53 +330,156 @@ sampling_build_truncated_small(const __nv_bfloat16* logits, std::int64_t base, s
     sampling_normalize_support(cfg, cand_val, cand_idx, prob, n_support, cap);
 }
 
-// Single-block fallback for large columns when the finite multi-block workspace
-// route cannot represent the launch. It still reads each vocab entry once and
-// keeps a bounded per-thread top-20, so it avoids a top_k*vocab global reread.
+// A warp's best `cap` candidates, best first: lane i holds entry i, so a candidate is inserted
+// with shuffles only when it beats the cap-th entry and nothing lives in local memory.
+struct SamplingWarpList {
+    static constexpr unsigned kFull = 0xffffffffu;
+    float entry_value;
+    int entry_index;
+    float worst_value;
+    int worst_index;
+    int cap;
+    int lane;
+
+    __device__ SamplingWarpList(int cap, int lane) : cap(cap), lane(lane) {
+        entry_value = worst_value = -CUDART_INF_F;
+        entry_index = worst_index = INT_MAX;
+    }
+
+    // Every lane of the warp calls together, each with its own candidate.
+    __device__ __forceinline__ void offer(float value, int index, bool live) {
+        unsigned pending =
+            __ballot_sync(kFull, live && score_id_better(value, index, worst_value, worst_index));
+        while (pending) {
+            const int source = __ffs(pending) - 1;
+            pending &= pending - 1;
+            const float new_value = __shfl_sync(kFull, value, source);
+            const int new_index   = __shfl_sync(kFull, index, source);
+            // An earlier insertion of this group may have raised the cap-th entry.
+            if (!score_id_better(new_value, new_index, worst_value, worst_index)) { continue; }
+            const unsigned ahead = __ballot_sync(
+                kFull, lane < cap && score_id_better(entry_value, entry_index, new_value,
+                                                     new_index));
+            const int rank          = __popc(ahead);
+            const float above_value = __shfl_up_sync(kFull, entry_value, 1);
+            const int above_index   = __shfl_up_sync(kFull, entry_index, 1);
+            if (lane == rank) {
+                entry_value = new_value;
+                entry_index = new_index;
+            } else if (lane > rank && lane < cap) {
+                entry_value = above_value;
+                entry_index = above_index;
+            }
+            worst_value = __shfl_sync(kFull, entry_value, cap - 1);
+            worst_index = __shfl_sync(kFull, entry_index, cap - 1);
+        }
+    }
+};
+
+// Single-block route for large columns when the finite multi-block workspace route cannot
+// represent the launch. It reads each vocab entry once. Every warp scans its slices into a
+// SamplingWarpList and the block then ranks the warps' lists against each other, so there are no
+// thread-local arrays and no serial merge. A 16-byte aligned row is read in 256-element chunks
+// (eight BF16 per lane, the next group of chunks already in flight); the chunk tail and rows that
+// are not 16-byte aligned take the scalar path.
 __device__ inline void
 sampling_build_truncated_block_fast(const __nv_bfloat16* logits, std::int64_t base,
                                     std::int32_t vocab, const SamplingConfig& cfg, float* merge_val,
                                     int* merge_idx, float* cand_val, int* cand_idx, float* prob,
                                     int* n_support, TokenRow overlay = {}, int overlay_len = 0) {
-    const int tid = threadIdx.x;
-    const int cap = sampling_candidate_cap(cfg, vocab); // always <= kSamplerFastCandidates
+    static_assert(kSamplerFastCandidates <= 32, "a warp holds the candidate list, one per lane");
+    constexpr int kChunk  = 256; // elements one warp reads per vector load
+    constexpr int kUnroll = 4;   // chunks in flight per warp
+    const int tid         = threadIdx.x;
+    const int lane        = tid & 31;
+    const int warp        = tid >> 5;
+    const int warps       = blockDim.x >> 5;
+    const int cap         = sampling_candidate_cap(cfg, vocab); // always <= kSamplerFastCandidates
 
-    float local_val[kSamplerFastCandidates];
-    int local_idx[kSamplerFastCandidates];
+    if (tid < cap) {
+        cand_val[tid] = -CUDART_INF_F;
+        cand_idx[tid] = INT_MAX;
+    }
+
+    SamplingWarpList list(cap, lane);
+
+    const __nv_bfloat16* row = logits + base;
+    const bool vector_row    = (reinterpret_cast<std::uintptr_t>(row) & 15) == 0;
+    const int chunks         = vector_row ? vocab / kChunk : 0;
+    const auto offer_chunk   = [&](const uint4& packed, int chunk) {
+        const unsigned words[4] = {packed.x, packed.y, packed.z, packed.w};
+        const int first         = chunk * kChunk + lane * 8;
 #pragma unroll
-    for (int j = 0; j < kSamplerFastCandidates; ++j) {
-        local_val[j] = -CUDART_INF_F;
-        local_idx[j] = INT_MAX;
+        for (int w = 0; w < 4; ++w) {
+            const int id0 = first + 2 * w;
+            const float low  = __uint_as_float(words[w] << 16);
+            const float high = __uint_as_float(words[w] & 0xffff0000u);
+            list.offer(sampling_adjusted_logit(low, id0, cfg, overlay, overlay_len), id0, true);
+            list.offer(sampling_adjusted_logit(high, id0 + 1, cfg, overlay, overlay_len), id0 + 1,
+                       true);
+        }
+    };
+    if (chunks > 0) {
+        const int step = warps * kUnroll;
+        uint4 current[kUnroll], upcoming[kUnroll];
+        const auto fetch = [&](uint4* into, int group) {
+#pragma unroll
+            for (int u = 0; u < kUnroll; ++u) {
+                const int chunk = group + u * warps;
+                if (chunk < chunks) {
+                    into[u] = __ldg(reinterpret_cast<const uint4*>(row + chunk * kChunk) + lane);
+                }
+            }
+        };
+        int group = warp;
+        fetch(current, group);
+        for (; group < chunks; group += step) {
+            fetch(upcoming, group + step);
+#pragma unroll
+            for (int u = 0; u < kUnroll; ++u) {
+                if (group + u * warps < chunks) { offer_chunk(current[u], group + u * warps); }
+            }
+#pragma unroll
+            for (int u = 0; u < kUnroll; ++u) { current[u] = upcoming[u]; }
+        }
+    }
+    for (int start = chunks * kChunk + warp * 32; start < vocab; start += warps * 32) {
+        const int id    = start + lane;
+        const bool live = id < vocab;
+        const float x   = live ? sampling_adjusted_logit(__bfloat162float(row[id]), id, cfg,
+                                                         overlay, overlay_len)
+                               : -CUDART_INF_F;
+        list.offer(x, id, live);
     }
 
-    const int fast_cap = cap;
-    for (int v = tid; v < vocab; v += blockDim.x) {
-        const float x = sampling_adjusted_logit(__bfloat162float(logits[base + v]), v, cfg, overlay,
-                                                overlay_len);
-        sampling_insert_candidate(local_val, local_idx, fast_cap, x, v);
-    }
-
-    for (int j = 0; j < kSamplerFastCandidates; ++j) {
-        const int off  = tid * kSamplerFastCandidates + j;
-        merge_val[off] = local_val[j];
-        merge_idx[off] = local_idx[j];
+    if (lane < kSamplerFastCandidates) {
+        merge_val[warp * kSamplerFastCandidates + lane] = list.entry_value;
+        merge_idx[warp * kSamplerFastCandidates + lane] = list.entry_index;
     }
     __syncthreads();
 
-    if (tid == 0) {
-        for (int j = 0; j < cap; ++j) {
-            cand_val[j] = -CUDART_INF_F;
-            cand_idx[j] = INT_MAX;
+    // The best `cap` of the warps' lists, ranked in parallel: a candidate's rank is the number of
+    // candidates strictly ahead of it, and ranks below `cap` are the output slots.
+    for (int c = tid; c < warps * kSamplerFastCandidates; c += blockDim.x) {
+        const int member = c % kSamplerFastCandidates;
+        if (member >= cap) { continue; }
+        const float value = merge_val[c];
+        const int index   = merge_idx[c];
+        if (index == INT_MAX) { continue; }
+        int rank = 0;
+        for (int w = 0; w < warps; ++w) {
+            for (int j = 0; j < cap; ++j) {
+                const int other = w * kSamplerFastCandidates + j;
+                rank += score_id_better(merge_val[other], merge_idx[other], value, index);
+            }
         }
-        const int merge_n = blockDim.x * kSamplerFastCandidates;
-        for (int p = 0; p < merge_n; ++p) {
-            const int idx = merge_idx[p];
-            if (idx == INT_MAX) { continue; }
-            sampling_insert_candidate(cand_val, cand_idx, fast_cap, merge_val[p], idx);
+        if (rank < cap) {
+            cand_val[rank] = value;
+            cand_idx[rank] = index;
         }
     }
     __syncthreads();
-    sampling_normalize_support(cfg, cand_val, cand_idx, prob, n_support, fast_cap);
+    sampling_normalize_support(cfg, cand_val, cand_idx, prob, n_support, cap);
 }
 
 // thread-0 helper: inverse-CDF pick over a normalized `prob[0..n-1]` support,

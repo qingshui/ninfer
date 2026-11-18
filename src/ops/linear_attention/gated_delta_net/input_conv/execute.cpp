@@ -29,6 +29,15 @@ void launch_projection(const Tensor& x, const WeightOperands& weights, Projected
         else
             launch_fp8_gdn_input_matrix(x, w, out.qkv, out.z, stream);
         break;
+    case Format::Fp8Tcgen05: {
+#if NINFER_TARGET_B200
+        const std::array<Tensor, 2> outputs{out.qkv, out.z};
+        linear_split::fp8_split_n20480_k3072_dispatch(x, w, outputs, scratch.fp8, stream);
+        break;
+#else
+        throw std::logic_error("GDN input: the tcgen05 FP8 route exists only on B200");
+#endif
+    }
     case Format::Nvfp4:
         if (plan.compute == Compute::A4)
             launch_nvfp4_gdn_input_a4(x, w, out.qkv, out.z, scratch.nvfp4, stream);

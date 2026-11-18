@@ -152,10 +152,14 @@ __global__ void group_small(const int* ids, ExpertSubsetKind kind, const int* ma
 
 template <class Shape, class Output>
 __global__ void reduce(Storage storage, const float* coefficients, Output output, int elements) {
-    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    const int i = (blockIdx.x * blockDim.x + threadIdx.x) * 4;
     if (i < elements) {
-        output.store(i, output.initial(i) + routed_value<Shape>(i / Shape::hidden, i % Shape::hidden,
-                                                                storage, coefficients));
+        const float4 routed =
+            routed_value4<Shape>(i / Shape::hidden, i % Shape::hidden, storage, coefficients);
+        output.store(i, output.initial(i) + routed.x);
+        output.store(i + 1, output.initial(i + 1) + routed.y);
+        output.store(i + 2, output.initial(i + 2) + routed.z);
+        output.store(i + 3, output.initial(i + 3) + routed.w);
     }
 }
 
@@ -303,7 +307,7 @@ void launch_shape(const Tensor& x, const CudaSwiGLUExperts& experts, const Exper
     } else {
         with_output(destination, mode, [&](auto output) {
             const int elements = x.ne[1] * Shape::hidden;
-            reduce<Shape><<<(elements + 255) / 256, 256, 0, stream>>>(
+            reduce<Shape><<<(elements / 4 + 255) / 256, 256, 0, stream>>>(
                 s, static_cast<const float*>(routes.coefficients.data), output, elements);
         });
         CUDA_CHECK(cudaGetLastError());

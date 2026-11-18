@@ -6,7 +6,9 @@
 
 namespace ninfer::ops::detail::gdn_input {
 
-enum class Format { Q4Q5, Q8, Fp8, Nvfp4, Bf16 };
+// Fp8Tcgen05 is the B200 route of E4M3 row-scaled weights with FP32 scales: it always quantizes
+// the activation and materializes the projection.
+enum class Format { Q4Q5, Q8, Fp8, Nvfp4, Bf16, Fp8Tcgen05 };
 
 // Multi-row executions carry one row per decode lane, so the engine's concurrency ceiling is
 // the authoritative row bound of the materialized route.

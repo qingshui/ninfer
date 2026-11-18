@@ -344,6 +344,14 @@ int main(int argc, char** argv) {
     suite.add("conv_varlen/c10240-no-boundaries", [=] {
         return run_case({"plain", kProfiles[2], {5, 64, 1}, {}, false}, 32);
     });
+    suite.add("conv_varlen/c12288-packed-flight", [=] {
+        return run_case({"flight",
+                         kProfiles[3],
+                         {1, 7, 223, 536, 33, 64, 800, 3, 100},
+                         {{2, 100, true}, {3, 64, true}, {6, 700, true}},
+                         false},
+                        33);
+    });
     suite.add("conv_varlen/rejection", [] { return rejection_case(); });
     return suite.main(argc, argv);
 }

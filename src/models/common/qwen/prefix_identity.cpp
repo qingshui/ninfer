@@ -167,9 +167,9 @@ std::size_t checked_vision_end(const models::frontend::VisionItem& item,
 } // namespace
 
 void ResidentPrefixIdentity::reserve(std::size_t tokens) {
-    token_types_.reserve(tokens);
-    for (auto& axis : positions_) { axis.reserve(tokens); }
-    rewrite_execution_frontiers_.reserve(tokens);
+    reserve_for_growth(token_types_, tokens);
+    for (auto& axis : positions_) { reserve_for_growth(axis, tokens); }
+    reserve_for_growth(rewrite_execution_frontiers_, tokens);
 }
 
 void ResidentPrefixIdentity::clear() noexcept {
@@ -376,7 +376,7 @@ void PrefixShortlistDigests::reserve(std::size_t tokens) {
     if (tokens == std::numeric_limits<std::size_t>::max()) {
         throw std::overflow_error("prefix shortlist capacity overflows size_t");
     }
-    digests_.reserve(tokens + 1U);
+    reserve_for_growth(digests_, tokens + 1U);
 }
 
 void PrefixShortlistDigests::clear() noexcept { digests_.clear(); }

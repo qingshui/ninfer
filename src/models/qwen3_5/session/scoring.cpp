@@ -21,7 +21,9 @@ std::optional<runtime::ExecutionTicket> SessionImpl::start_score(qwen::PreparedP
     scoring.emplace(Scoring{.base = std::move(base), .first_target = first_target});
     try {
         scoring->logprobs.reserve(scoring->base.summary().prompt_tokens - first_target);
-        const auto binding = start_binding(scoring->base, {0}, *source);
+        // Scoring waits on the binding's context operation for its public ticket.
+        const auto binding = start_binding(scoring->base, {0}, *source, nullptr,
+                                           ExecutionUnitKind::Decode, 1, false);
         if (!binding) {
             scoring.reset();
             return {};
@@ -29,11 +31,6 @@ std::optional<runtime::ExecutionTicket> SessionImpl::start_score(qwen::PreparedP
         if (!context_operation_ || !context_operation_->ticket)
             throw std::logic_error("scoring context was not submitted");
         scoring->public_ticket = *context_operation_->ticket;
-        // A penalty-free root binding installs synchronously and publishes no ContextProgress:
-        // the installed sequence is recorded here, and the residency operation's silent
-        // retirement reports it to poll() so the score advances like it does at an
-        // asynchronous binding's completion.
-        if (binding.synchronous) scoring->sequence = *binding.sequence;
         return scoring->public_ticket;
     } catch (...) {
         if (context_operation_ && context_operation_->ticket)

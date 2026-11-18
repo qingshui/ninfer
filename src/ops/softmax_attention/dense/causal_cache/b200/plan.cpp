@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <stdexcept>
+#include <vector>
 
 namespace ninfer::ops::detail {
 namespace {
@@ -20,6 +21,7 @@ constexpr int kQueryHeads = 32;
 constexpr int kKvHeads    = 2;
 constexpr int kHeadDim    = 256;
 constexpr int kBatchLimit = static_cast<int>(ninfer::kMaximumConcurrency);
+constexpr int kMinSplitTarget = 3;
 
 constexpr int ceil_div(int a, int b) { return (a + b - 1) / b; }
 
@@ -80,12 +82,13 @@ Sm100AttentionPlan select_sm100_attention_plan(int heads, int width, int batch,
     const int row_tiles   = ceil_div(width * (kQueryHeads / kKvHeads), kSm100TileQ);
     const int independent = batch * kKvHeads * row_tiles;
     const int key_tiles   = ceil_div(static_cast<int>(envelope.max_visible_keys), kSm100TileKv);
-    // Single split versus split-plus-merge fixes the kernel topology of a captured graph, so it
-    // depends only on the call shape. The split count may follow the envelope.
-    if (independent >= multiprocessor_count)
-        return {kQueryHeads, kKvHeads, kHeadDim, kSm100TileQ, kSm100TileKv, 1};
+    // A merge costs a fixed launch plus a pass over the FP32 partials, which a tile only earns
+    // back when the key range can be cut at least three ways inside one wave of CTAs. Single
+    // versus split-plus-merge fixes the kernel topology of a captured graph, so it depends only on
+    // the call shape for every width. The split count may follow the envelope.
     const int target = causal_partition_target(multiprocessor_count, independent);
-    const int splits = std::max(2, std::min(target, key_tiles / 2));
+    const int splits =
+        target < kMinSplitTarget ? 1 : std::max(2, std::min(target, key_tiles / 2));
     return {kQueryHeads, kKvHeads, kHeadDim, kSm100TileQ, kSm100TileKv, splits};
 }
 
@@ -113,6 +116,50 @@ void sm100_kv_append_attention(KvDType kv, const Tensor& q, const Tensor& k, con
                            valid_columns, table_rows, cache, execution.stream());
     attend(kv, q, positions, scale, make_cache(cache, &valid_columns, &table_rows), envelope,
            workspace, out, execution);
+}
+
+void sm100_kv_append_attention_groups(KvDType kv, const Tensor& q, const Tensor& k, const Tensor& v,
+                                      const Tensor& positions, const Tensor& valid_columns,
+                                      const Tensor& table_rows, float scale,
+                                      PagedKVBatchLayerView cache,
+                                      std::span<const CausalAttentionGroup> groups, Tensor& out,
+                                      CudaExecutionView execution) {
+    std::vector<Sm100AttentionGroup> launches;
+    std::vector<kv::PagedWriteGroup> writes;
+    launches.reserve(groups.size());
+    writes.reserve(groups.size());
+    std::uint32_t capacity = 0;
+    for (const auto& g : groups) {
+        const auto begin   = static_cast<std::int32_t>(g.token_offset);
+        const auto width   = static_cast<std::int32_t>(g.width);
+        const auto batch   = static_cast<std::int32_t>(g.batch);
+        const auto row     = static_cast<std::int32_t>(g.row);
+        const auto columns = width * batch;
+        // Only the FP8 cache has a single-launch writer; the others write group by group.
+        if (kv != KvDType::Fp8) {
+            const Tensor kg = k.slice(2, begin, columns).view({kHeadDim, kKvHeads, width, batch});
+            const Tensor vg = v.slice(2, begin, columns).view({kHeadDim, kKvHeads, width, batch});
+            kv::launch_paged_write(select_write(kv, kKvHeads, width, batch), kg, vg,
+                                   positions.slice(0, begin, columns).view({width, batch}),
+                                   valid_columns.slice(0, row, batch),
+                                   table_rows.slice(0, row, batch), cache, execution.stream());
+        }
+        writes.push_back({begin, width, batch, row});
+        launches.push_back({begin, width, batch, row});
+        capacity = std::max(capacity, g.envelope.max_visible_keys);
+    }
+    if (kv == KvDType::Fp8)
+        kv::launch_paged_write_groups(k, v, positions, valid_columns, table_rows, cache, writes,
+                                      execution.stream());
+    const Sm100GroupOperands operands{static_cast<const __nv_bfloat16*>(q.data),
+                                      static_cast<const std::int32_t*>(positions.data),
+                                      static_cast<__nv_bfloat16*>(out.data),
+                                      scale,
+                                      static_cast<int>(capacity),
+                                      kHeadDim,
+                                      kQueryHeads,
+                                      make_cache(cache, &valid_columns, &table_rows)};
+    launch_sm100_causal_attention_groups(operands, kv, launches, execution.stream());
 }
 
 void sm100_kv_cached_attention(KvDType kv, const Tensor& q, const Tensor& positions, float scale,

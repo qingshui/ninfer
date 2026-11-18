@@ -12,6 +12,7 @@
 #include <optional>
 #include <span>
 #include <variant>
+#include <vector>
 
 namespace ninfer::models::qwen3_5::execution {
 
@@ -60,13 +61,15 @@ struct SequenceUpdate {
 // One independent sequence inside a packed token axis: tokens [token_offset, token_offset+tokens)
 // belong to the sequence whose table row and valid length are entry `row` of kv_table_rows and
 // valid_columns. Its State is read at source_offset and published at destination_offset (Host
-// byte offsets). Segments are consecutive, cover the token axis and share no destination State.
+// byte offsets). `keys` is the number of keys its last token sees (its frontier plus its tokens).
+// Segments are consecutive, cover the token axis and share no destination State.
 struct SequenceSegment {
     std::uint32_t row;
     std::uint32_t token_offset;
     std::uint32_t tokens;
     std::int64_t source_offset;
     std::int64_t destination_offset;
+    std::uint32_t keys;
 };
 
 // The varlen conv/GDN Ops exist on every target but dgx_spark. There a packed traversal runs its
@@ -183,6 +186,7 @@ private:
     TextInputs inputs_;
     TextStateUpdate update_;
     ops::CausalAttentionExecutionEnvelope envelope_;
+    std::vector<ops::CausalAttentionGroup> mixed_groups_;
     Tensor hidden_;
     std::optional<DFlashFeatureSink> features_;
     MemoryArena::Scope traversal_scope_;

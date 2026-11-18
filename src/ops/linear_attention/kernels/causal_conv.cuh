@@ -99,7 +99,7 @@ __device__ __forceinline__ __nv_bfloat16 causal_conv4_silu(float w0, float w1, f
     conv       = fmaf(w1, s1, conv);
     conv       = fmaf(w2, s2, conv);
     conv       = fmaf(w3, p, conv);
-    return __float2bfloat16_rn(common::silu(conv));
+    return __float2bfloat16_rn(common::silu_approx(conv));
 }
 
 } // namespace ninfer::ops::detail

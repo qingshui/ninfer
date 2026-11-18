@@ -40,10 +40,12 @@ target_sources(ninfer_ops_non_rdc PRIVATE
 )
 
 # Full-attention qkvz (n17408_k3072): B200 quantizes into the tcgen05 scale layout and runs the
-# tcgen05 GEMM at every token count; the other targets keep the mma.sync / TMA routes.
+# tcgen05 GEMM at every token count; the other targets keep the mma.sync / TMA routes. The GDN
+# qkvz with E4M3 row-scaled weights (fp8/b200) exists only on B200.
 if(NINFER_TARGET STREQUAL "b200")
   target_sources(ninfer_ops PRIVATE
-    "${CMAKE_CURRENT_LIST_DIR}/nvfp4/shapes/n17408_k3072/b200/tcgen05.cu")
+    "${CMAKE_CURRENT_LIST_DIR}/nvfp4/shapes/n17408_k3072/b200/tcgen05.cu"
+    "${CMAKE_CURRENT_LIST_DIR}/fp8/b200/shapes/n20480_k3072.cu")
 else()
   target_sources(ninfer_ops PRIVATE "${CMAKE_CURRENT_LIST_DIR}/nvfp4/shapes/n17408_k3072/a4.cu")
   target_sources(ninfer_ops_non_rdc PRIVATE

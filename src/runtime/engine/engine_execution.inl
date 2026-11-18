@@ -156,11 +156,14 @@ void EngineCore<Instance>::commit_pending(PendingBatch&& pending, ComputeFlight 
         if (committed.rows[row].disposition != expected) {
             throw std::logic_error("Runtime commit row disposition is invalid");
         }
-        if (committed.capture_ready[row] && (decode_row || expected != CommitDisposition::Active)) {
-            throw std::logic_error("Runtime exposed a capture outside a committed Begin row");
+        if constexpr (!kInFlightCapture) {
+            if (committed.capture_ready[row] &&
+                (decode_row || expected != CommitDisposition::Active)) {
+                throw std::logic_error("Runtime exposed a capture outside a committed Begin row");
+            }
         }
     }
-    const bool terminal_in_batch =
+    [[maybe_unused]] const bool terminal_in_batch =
         std::any_of(decisions.begin(), decisions.begin() + static_cast<std::ptrdiff_t>(row_count),
                     [](const CommitDecision& decision) { return decision.terminal; });
 
@@ -229,40 +232,38 @@ void EngineCore<Instance>::commit_pending(PendingBatch&& pending, ComputeFlight 
         auto timing    = record_committed_output(request, accepted);
         append_output(request, std::move(published), std::move(timing), &phase);
         if (request->output.output_error()) {
-            if (committed.capture_ready[row]) {
-                instance_.session->skip_capture(*request->sequence);
-                committed.capture_ready[row] = false;
+            if constexpr (!kInFlightCapture) {
+                if (committed.capture_ready[row]) {
+                    instance_.session->skip_capture(*request->sequence);
+                    committed.capture_ready[row] = false;
+                }
             }
             if (fail_output(request, lane)) continue;
         }
         if (decisions[row].terminal) {
             request->model_state     = EngineRequestState::ModelFinished;
             request->terminal_reason = finish_reasons[row];
-        } else if (committed.capture_ready[row]) {
-            if (!request->is_prefilling()) {
-                throw std::logic_error("prompt-frontier capture lost its prefill owner");
-            }
-            const EngineRequestState post_capture_state =
-                continuations[row] == ContinuationAction::ApplyTargetControl
-                    ? EngineRequestState::ControlReady
-                    : EngineRequestState::DecodeReady;
-            if (terminal_in_batch) {
-                instance_.session->skip_capture(*request->sequence);
-                request->model_state = post_capture_state;
-            } else {
-                reserve_active_capture(request, post_capture_state);
-            }
-            committed.capture_ready[row] = false;
-            if (!request->capture_pending) {
-                request->model_state = continuations[row] == ContinuationAction::ApplyTargetControl
-                                           ? EngineRequestState::ControlReady
-                                           : EngineRequestState::DecodeReady;
-            }
-        } else {
-            request->model_state = continuations[row] == ContinuationAction::ApplyTargetControl
-                                       ? EngineRequestState::ControlReady
-                                       : EngineRequestState::DecodeReady;
+            continue;
         }
+        const EngineRequestState next_state =
+            continuations[row] == ContinuationAction::ApplyTargetControl
+                ? EngineRequestState::ControlReady
+                : EngineRequestState::DecodeReady;
+        if constexpr (!kInFlightCapture) {
+            if (committed.capture_ready[row]) {
+                if (!request->is_prefilling()) {
+                    throw std::logic_error("prompt-frontier capture lost its prefill owner");
+                }
+                if (terminal_in_batch) {
+                    instance_.session->skip_capture(*request->sequence);
+                } else {
+                    reserve_active_capture(request, next_state);
+                }
+                committed.capture_ready[row] = false;
+                if (request->capture_pending) continue;
+            }
+        }
+        request->model_state = next_state;
     }
     phase.finish();
     record_service(flight);
@@ -333,7 +334,14 @@ void EngineCore<Instance>::resolve_prefill_progress(const std::shared_ptr<Reques
     if (!request->cancelled.load(std::memory_order_acquire)) {
         resources_.observe_committed(*request->base_plan, request->id, computed_begin,
                                      computed_begin + progress.processed_prompt_tokens,
-                                     instance_.session->capture_frontiers(*request->sequence));
+                                     [&] {
+                                         if constexpr (kInFlightCapture) {
+                                             return request->base_plan->checkpoint_frontiers();
+                                         } else {
+                                             return instance_.session->capture_frontiers(
+                                                 *request->sequence);
+                                         }
+                                     }());
     }
     if (progress.complete && request->computed_prompt_tokens != suffix_tokens) {
         throw std::logic_error("completed prefill did not reach the admitted prompt frontier");
@@ -342,12 +350,14 @@ void EngineCore<Instance>::resolve_prefill_progress(const std::shared_ptr<Reques
         request->last_progress = Clock::now();
         publish_prompt_progress(request);
     }
-    if (progress.capture_ready) {
-        if (progress.complete || progress.pending) {
-            throw std::logic_error("prefill capture offer overlaps prompt completion");
+    if constexpr (!kInFlightCapture) {
+        if (progress.capture_ready) {
+            if (progress.complete || progress.pending) {
+                throw std::logic_error("prefill capture offer overlaps prompt completion");
+            }
+            reserve_active_capture(request, EngineRequestState::Prefill);
+            return;
         }
-        reserve_active_capture(request, EngineRequestState::Prefill);
-        return;
     }
     if (!progress.complete) { return; }
     if (!request->lane || produced != progress.pending.has_value()) {
@@ -837,6 +847,24 @@ template <class Instance>
                 request->pending_execution.reset();
             }
             flight->retired_ns = complete->sample.latency.total_ns;
+            if constexpr (kInFlightCapture) {
+                // The flight published the checkpoints it wrote when it retired; they register
+                // with the cache.
+                const std::size_t prefill_members =
+                    flight->kind == FlightKind::Mixed ? flight->prefill_members
+                    : (flight->kind == FlightKind::Prefill || flight->kind == FlightKind::Replay)
+                        ? flight->requests.size()
+                        : 0;
+                for (std::size_t member = 0; member < prefill_members; ++member) {
+                    const auto taken =
+                        instance_.session->take_flight_checkpoints(flight->sequences[member]);
+                    for (const auto checkpoint : taken.published) {
+                        publish_flight_checkpoint(flight->requests[member], checkpoint);
+                    }
+                    cumulative_stats_.inflight_checkpoints_published += taken.published.size();
+                    cumulative_stats_.inflight_checkpoints_skipped += taken.skipped;
+                }
+            }
             record_service(*flight);
             record_flight(*flight, complete->sample);
             if (retiring) retiring_[event->ticket.frame.index].reset();
@@ -876,7 +904,11 @@ template <class Instance>
             flight.prefill_tokens = replay->processed_tokens;
             request->replayed_tokens += replay->processed_tokens;
             cumulative_stats_.replayed_tokens += replay->processed_tokens;
-            if (replay->capture_ready) reserve_active_capture(request, EngineRequestState::Replay);
+            if constexpr (!kInFlightCapture) {
+                if (replay->capture_ready) {
+                    reserve_active_capture(request, EngineRequestState::Replay);
+                }
+            }
             if (replay->complete) {
                 ++cumulative_stats_.replay_restores;
                 ++request->replay_restores;
@@ -1070,6 +1102,7 @@ void EngineCore<Instance>::fail_all(std::exception_ptr error) noexcept {
         std::lock_guard lock(queue_mutex_);
         groups_.clear();
     }
+    fork_groups_.clear();
     admission_decision_.reset();
     for (auto& decision : capture_decisions_) { decision.reset(); }
     for (auto& unit : reserved_units_) { unit.reset(); }
@@ -1086,6 +1119,7 @@ void EngineCore<Instance>::fail_all(std::exception_ptr error) noexcept {
     for (const auto& request : materializing) { release(request); }
     for (const auto& request : pending) { release(request); }
     resources_.release_all(*instance_.session);
+    flush_completions();
     publish_runtime_stats();
     const auto publish = [&](const std::shared_ptr<Request>& request) {
         if (request) { publish_completion(request, {}, error); }

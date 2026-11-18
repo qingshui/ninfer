@@ -28,9 +28,11 @@ int main() {
         return 1;
     }
     const auto& budget = engine.startup_report().ranks.at(0);
+    // The Context arena also holds the scratch and staging State images beyond the capacity the
+    // pool manages, so the allocation may exceed the reported capacity but never fall short of it.
     if (budget.minimum_context_capacity_bytes == 0 ||
         budget.context_capacity_bytes < budget.minimum_context_capacity_bytes ||
-        engine.snapshot().ranks.at(0).memory.allocations.context_device_bytes !=
+        engine.snapshot().ranks.at(0).memory.allocations.context_device_bytes <
             budget.context_capacity_bytes) {
         std::cerr << "causal scoring did not materialize its required Context working set\n";
         return 1;

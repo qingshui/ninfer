@@ -388,7 +388,8 @@ void exercise(const std::filesystem::path& artifact, ninfer::SpeculativeBackend 
     const auto cancellation_target = second.request_id();
     bool cancellation_requested    = false;
     ninfer::RuntimeStats cancellation_observed;
-    std::uint32_t committed_at_cancellation = 0;
+    std::uint64_t target_replayed_at_cancellation = 0;
+    std::uint32_t committed_at_cancellation       = 0;
     const ninfer::CancellationView cancellation([&] {
         if (cancellation_requested) { return true; }
         if (cancel_stage == CancelStage::None) { return false; }
@@ -397,18 +398,21 @@ void exercise(const std::filesystem::path& artifact, ninfer::SpeculativeBackend 
         const auto target =
             std::find_if(snapshot.requests->begin(), snapshot.requests->end(),
                          [&](const auto& r) { return r.id == cancellation_target; });
+        // The Engine counters cover both rows, and either row may have been recovered before
+        // this one, so the replaying row's own progress is the observation.
         const bool observed =
             target != snapshot.requests->end() &&
             (cancel_stage == CancelStage::Paused
                  ? target->phase == ninfer::RequestPhase::Paused
-                 : target->phase == ninfer::RequestPhase::Replay && stats.replayed_tokens != 0);
+                 : target->phase == ninfer::RequestPhase::Replay && target->replayed_tokens != 0);
         if (!observed) { return false; }
         // Observe this request's lifecycle directly: pressure service can preempt either row.
         // CancellationView is checked by the consumer, including while its stream is idle; it
         // observes actual Engine state without delaying a model callback or guessing a sleep.
-        cancellation_observed     = stats;
-        committed_at_cancellation = second_sink.committed_tokens();
-        cancellation_requested    = true;
+        cancellation_observed           = stats;
+        target_replayed_at_cancellation = target->replayed_tokens;
+        committed_at_cancellation       = second_sink.committed_tokens();
+        cancellation_requested          = true;
         return true;
     });
     const auto second_result = second.wait(&second_sink, cancellation);
@@ -514,10 +518,7 @@ void exercise(const std::filesystem::path& artifact, ninfer::SpeculativeBackend 
                 "Host=0 cancellation unexpectedly used a physical snapshot");
         // The stats observation and cancellation delivery are not atomic. Cumulative counters
         // preserve prior recovery work but cannot identify work after cancellation took effect.
-        require(second_result.stats.scheduling.replay_restores >=
-                        cancellation_observed.replay_restores - before.replay_restores &&
-                    second_result.stats.scheduling.replayed_tokens >=
-                        cancellation_observed.replayed_tokens - before.replayed_tokens,
+        require(second_result.stats.scheduling.replayed_tokens >= target_replayed_at_cancellation,
                 "cancellation lost recovery work observed before cancellation");
     } else if (snapshot) {
         require(totals.snapshot_restores != 0 && totals.device_to_host_bytes != 0 &&

@@ -499,17 +499,29 @@ int backend_cases(Fixture& f, CudaExecutionView execution) {
            "122B geometry must route to tcgen05");
     expect(detail::moe_backend(3072, 256, 8, 2048) == detail::MoeBackend::Tcgen05,
            "122B geometry must route to tcgen05 for large calls");
-    // Unset tiles default from the token count.
-    const auto tile = [&](int tokens) {
-        return bs::resolve_nvfp4_sm100_tuning(bs::Nvfp4Sm100Tuning{}, tokens).tile_tokens;
+    // Unset tiles default from the token count, separately for the two projections.
+    const auto tuned = [&](int tokens) {
+        return bs::resolve_nvfp4_sm100_tuning(bs::Nvfp4Sm100Tuning{}, tokens);
     };
-    expect(tile(1) == 16 && tile(256) == 16, "small calls default to 16-token tiles");
-    expect(tile(257) == 32 && tile(1024) == 32, "medium calls default to 32-token tiles");
-    expect(tile(1025) == 64 && tile(2048) == 64, "large calls default to 64-token tiles");
-    expect(tile(2049) == 128, "very large calls default to 128-token tiles");
-    rejected([&] { bs::resolve_nvfp4_sm100_tuning({48, 1, 1}, 130); }, "48");
-    rejected([&] { bs::resolve_nvfp4_sm100_tuning({16, 2, 1}, 130); }, "cluster");
-    rejected([&] { bs::resolve_nvfp4_sm100_tuning({16, 1, 2}, 130); }, "ctas_per_sm");
+    expect(tuned(1).gate_up_tile_tokens == 32 && tuned(768).gate_up_tile_tokens == 32,
+           "small gate/up calls default to 32-token tiles");
+    expect(tuned(769).gate_up_tile_tokens == 64 && tuned(4096).gate_up_tile_tokens == 64,
+           "large gate/up calls default to 64-token tiles");
+    expect(tuned(1).down_tile_tokens == 16 && tuned(256).down_tile_tokens == 16,
+           "small down calls default to 16-token tiles");
+    expect(tuned(257).down_tile_tokens == 32 && tuned(768).down_tile_tokens == 32,
+           "medium down calls default to 32-token tiles");
+    expect(tuned(769).down_tile_tokens == 64 && tuned(1536).down_tile_tokens == 64,
+           "large down calls default to 64-token tiles");
+    expect(tuned(1537).down_tile_tokens == 128, "very large down calls default to 128-token tiles");
+    // A requested tile survives the defaults.
+    expect(bs::resolve_nvfp4_sm100_tuning({.gate_up_tile_tokens = 16, .down_tile_tokens = 64}, 4096)
+                   .gate_up_tile_tokens == 16,
+           "an explicit gate/up tile overrides the default");
+    rejected([&] { bs::resolve_nvfp4_sm100_tuning({.gate_up_tile_tokens = 48}, 130); }, "48");
+    rejected([&] { bs::resolve_nvfp4_sm100_tuning({.down_tile_tokens = 48}, 130); }, "48");
+    rejected([&] { bs::resolve_nvfp4_sm100_tuning({.cluster = 2}, 130); }, "cluster");
+    rejected([&] { bs::resolve_nvfp4_sm100_tuning({.ctas_per_sm = 2}, 130); }, "ctas_per_sm");
     // The grouped kernels address experts as codes + e * stride over one TMA map, so an
     // indexed (offsets) bank is rejected before any launch.
     {
@@ -580,7 +592,7 @@ void add_cases(OpSuite& suite) {
     for (int t : {1, 33, 130, 520})
         add("route/t" + std::to_string(t),
             [t](Fixture& f, auto e) { return route_case(f, e, t); });
-    for (int t : {1, 130, 520, 2048}) {
+    for (int t : {1, 130, 520, 2048, 4096, 6000, 8500}) {
         add("routed/t" + std::to_string(t),
             [t](Fixture& f, auto e) { return run(f, e, t, false, false); });
         add("routed_shared/t" + std::to_string(t),

@@ -1005,6 +1005,10 @@ int main(int argc, char** argv) {
     }
     add({"35b zero decay", 16, 32, 4097, true}, 16032U, InputPattern::ZeroDecay);
     add({"35b weak decay", 16, 32, 4097, true}, 16032U, InputPattern::WeakDecay, true);
+    add({"122b zero decay", 16, 64, 2049, true}, 16064U, InputPattern::ZeroDecay);
+    add({"122b weak decay", 16, 64, 2049, true}, 16064U, InputPattern::WeakDecay, true);
+    add({"122b prefill continuation", 16, 64, 2049, true}, 14264U, InputPattern::ZeroState, false,
+        {1024, 1024, 1});
     add({"27b strong tail", 16, 48, 65, true}, 12065U, InputPattern::StrongDecay);
     // The first checkpoint is the aligned T=64 prefix of the identical T=65 stress input.
     add({"27b strong continuation", 16, 48, 65, true}, 12065U, InputPattern::StrongDecay, true,

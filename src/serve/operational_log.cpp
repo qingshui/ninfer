@@ -414,6 +414,16 @@ OperationalRecord render_throughput(const ThroughputReport& report) {
             << " tok | decode rows/flight " << mean_decode_rows << " | gpu busy "
             << product::format_pretty_percent(gpu_busy_ratio);
     }
+    const std::uint64_t forked =
+        monotonic_delta(report.previous.forked_branches, report.current.forked_branches);
+    if (forked != 0) { out << " | forked " << product::format_pretty_count(forked) << " branches"; }
+    const std::uint64_t published = monotonic_delta(report.previous.inflight_checkpoints_published,
+                                                    report.current.inflight_checkpoints_published);
+    const std::uint64_t skipped   = monotonic_delta(report.previous.inflight_checkpoints_skipped,
+                                                    report.current.inflight_checkpoints_skipped);
+    if (published != 0 || skipped != 0) {
+        out << " | checkpoints " << published << " (skipped " << skipped << ')';
+    }
     return {.severity = OperationalSeverity::Info, .message = out.str()};
 }
 

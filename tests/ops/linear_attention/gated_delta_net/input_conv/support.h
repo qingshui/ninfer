@@ -6,7 +6,12 @@
 #include "ops/input_projection_test_common.h"
 #include "ops/suite.h"
 
+#include <memory>
 #include <optional>
+
+namespace ninfer::test::t4 {
+struct Fp8RowFp32Rep;
+}
 
 namespace ninfer::test::gdn_input_conv {
 
@@ -30,7 +35,12 @@ inline constexpr Profile profiles[]{{QType::Q4_G64_FP16, 5120, "q4_q5"},
                                     {QType::Q8_G32_FP16, 2560, "q8"},
                                     {QType::NVFP4, 5120, "nvfp4"},
                                     {QType::FP8_E4M3FN_ROW_BF16, 5120, "fp8"},
-                                    {QType::BF16, 3072, "bf16"}};
+                                    {QType::BF16, 3072, "bf16"}
+#if NINFER_TARGET_B200
+                                    ,
+                                    {QType::FP8_E4M3FN_ROW_FP32, 3072, "fp8_tcgen05"}
+#endif
+};
 
 inline constexpr Profile local_profile{QType::Q8_G32_FP16, 2560, "q8_local", 1024};
 
@@ -38,12 +48,14 @@ const char* policy_name(ops::LinearPolicy policy);
 
 struct Weights {
     Weights(Profile profile, bool record);
+    ~Weights();
     ops::ProjectionWeights projection(ops::LinearPolicy policy) const;
     double project(int row, const float* input) const;
     int preserved() const;
     Profile profile;
-    input_projection::DevicePackedWeight first;
+    std::optional<input_projection::DevicePackedWeight> first;
     std::optional<input_projection::DevicePackedWeight> second;
+    std::unique_ptr<t4::Fp8RowFp32Rep> fp8;
 };
 
 struct SnapshotCase {

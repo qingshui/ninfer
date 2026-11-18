@@ -96,8 +96,7 @@ __device__ __forceinline__ __half2 fp8_code2_to_half2(std::uint16_t storage) {
 }
 
 // An already decoded FP16 multiplier, shared by all values in one G128 group.
-__device__ __forceinline__ int4 fp8_dequant_f16x8_scaled(const std::uint8_t* codes, __half scale) {
-    const int2 raw    = load_vec<int2>(codes);
+__device__ __forceinline__ int4 fp8_dequant_f16x8_scaled(int2 raw, __half scale) {
     const auto* c     = reinterpret_cast<const std::uint16_t*>(&raw);
     const auto scale2 = __halves2half2(scale, scale);
     unsigned packed[4];
@@ -109,9 +108,13 @@ __device__ __forceinline__ int4 fp8_dequant_f16x8_scaled(const std::uint8_t* cod
     return make_int4(packed[0], packed[1], packed[2], packed[3]);
 }
 
+__device__ __forceinline__ int4 fp8_dequant_f16x8_scaled(const std::uint8_t* codes, __half scale) {
+    return fp8_dequant_f16x8_scaled(load_vec<int2>(codes), scale);
+}
+
 // Full UE8M0 range: the first power-of-two multiply is exact for finite E4M3
 // results, and the residual multiplier performs the single final FP16 rounding.
-__device__ __forceinline__ int4 fp8_dequant_f16x8(const std::uint8_t* codes, std::uint8_t scale) {
+__device__ __forceinline__ int4 fp8_dequant_f16x8(int2 codes, std::uint8_t scale) {
     const int primary = min(142, max(113, int(scale)));
     const auto first  = __ushort_as_half(static_cast<unsigned short>((primary - 112) << 10));
     int4 result       = fp8_dequant_f16x8_scaled(codes, first);
@@ -124,6 +127,10 @@ __device__ __forceinline__ int4 fp8_dequant_f16x8(const std::uint8_t* codes, std
         for (int i = 0; i < 4; ++i) pairs[i] = __hmul2(pairs[i], multiplier);
     }
     return result;
+}
+
+__device__ __forceinline__ int4 fp8_dequant_f16x8(const std::uint8_t* codes, std::uint8_t scale) {
+    return fp8_dequant_f16x8(load_vec<int2>(codes), scale);
 }
 
 __device__ __forceinline__ unsigned fp8_dequant_bf16x2(std::uint16_t codes, std::uint8_t scale) {

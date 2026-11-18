@@ -1,4 +1,5 @@
 #include "models/qwen3_5/session/internal.h"
+#include "models/qwen3_5/prefill_chunk.h"
 
 #include <algorithm>
 #include <stdexcept>
@@ -13,9 +14,12 @@ SessionImpl::submit_execution(Execution&& pending, runtime::ExecutionReservation
     slot.emplace(std::move(pending));
     auto& current = *slot;
     try {
+        current.lanes.clear();
+        for (const auto handle : current.members) current.lanes.push_back(lane(handle));
         current.preparation->prepare_actions();
         adopt_deferred_bindings(current, work);
         const auto ticket = executor().submit(std::move(reservation), std::move(work));
+        for (const auto l : current.lanes) ++lane_busy_[l];
         current.ticket    = ticket;
         if (current.vision_id) vision_window.submitted(current.vision_id, ticket);
         current.preparation->mark_submitted();
@@ -32,12 +36,16 @@ SessionImpl::submit_execution(Execution&& pending, runtime::ExecutionReservation
 // transactions complete and publish with the flight's retirement.
 void SessionImpl::adopt_deferred_bindings(Execution& current, Work& work) {
     std::vector<context::ContextAction> merged;
-    for (const auto handle : current.members) {
-        auto& deferred = deferred_bindings[lane(handle)];
-        if (!deferred) continue;
+    for (const auto l : current.lanes) {
+        auto& deferred = deferred_bindings[l];
+        if (!deferred || deferred->submitted) continue;
         merged.insert(merged.end(), deferred->actions.operations.begin(),
                       deferred->actions.operations.end());
+        // The installation rides the same Work: the residency is current before its rows run.
+        if (deferred->install) work.installs.push_back(std::move(*deferred->install));
+        deferred->install.reset();
         deferred->transaction.mark_submitted();
+        deferred->submitted = true;
     }
     const auto& actions = current.preparation->actions();
     if (merged.empty()) {
@@ -75,12 +83,11 @@ std::uint32_t SessionImpl::prefill_pack_limit() const noexcept { return plan.pac
 std::uint32_t SessionImpl::prefill_pack_tokens() const noexcept { return plan.pack_tokens; }
 
 // A window that spans a prefix execution boundary runs as separate traversals so cached State
-// stays identical to an uncached run; such a window does not share a packed traversal.
+// stays identical to an uncached run. The varlen Ops cut such a window at its boundaries inside a
+// packed traversal; a target without them runs the window alone.
 bool SessionImpl::crosses_execution_boundary(const SequenceState& state, std::uint32_t begin,
                                              std::uint32_t end) const {
-    const auto frontiers = state.prefix_identity.execution_frontiers();
-    const auto next      = std::upper_bound(frontiers.begin(), frontiers.end(), begin);
-    return next != frontiers.end() && *next < end;
+    return split_count(state, begin, end) != 0;
 }
 
 std::optional<PrefillStart> SessionImpl::start_prefill(std::span<const SequenceHandle> candidates,
@@ -103,10 +110,8 @@ std::optional<PrefillStart> SessionImpl::start_prefill(std::span<const SequenceH
             throw std::logic_error("duplicate sequence in prefill");
         const auto l        = lane(candidates[i]);
         const auto& request = requests[l];
-        if (request.lifecycle != Lifecycle::Prefilling || !request.prefill ||
-            request.capture_pending) {
+        if (request.lifecycle != Lifecycle::Prefilling || !request.prefill)
             throw std::logic_error("sequence has no executable prefill window");
-        }
         require_unit(l, ExecutionUnitKind::Prefill);
     }
     auto reservation = executor().try_reserve(runtime::FrameKind::Compute);
@@ -122,13 +127,13 @@ std::optional<PrefillStart> SessionImpl::start_prefill(std::span<const SequenceH
 
     std::vector<Segment> segments;
     std::uint32_t packed_tokens = 0;
+    std::uint32_t packed_splits = 0;
     bool final_segment          = false;
     try {
         for (std::size_t i = 0; i < considered; ++i) {
             const auto l  = lane(candidates[i]);
             auto& state   = sequences[l];
             auto& request = requests[l];
-            prepare_capture_boundary(l);
             const auto begin = state.continuation.metadata.execution_frontier;
             const auto end   = window_end(
                 state, request, begin,
@@ -136,19 +141,27 @@ std::optional<PrefillStart> SessionImpl::start_prefill(std::span<const SequenceH
                 vision_window);
             // A window that reaches the prompt end produces the first token and packs with any
             // other segment. Vision and DFlash windows carry state that only a single-row
-            // execution owns, and so does a window that crosses a prefix execution boundary. The
-            // summed window length of a pack stays within the planned token axis.
+            // execution owns, and so does an empty window: a source that covers the whole prompt
+            // leaves nothing to compute, and the lane samples its first token from the source's
+            // retained hidden state. A window that crosses a prefix execution boundary packs
+            // through the segment table's splits where the target has the varlen Ops. The summed
+            // window length of a pack stays within the planned token axis and its splits within
+            // the table.
             const bool final_window = end == request.base->summary.prompt_tokens;
             const bool alone        = request.base->vision ||
-                               is_masked_draft_backend(speculative_backend) ||
-                               crosses_execution_boundary(state, begin, end);
+                               is_masked_draft_backend(speculative_backend) || end == begin ||
+                               (!kSplitPacking && crosses_execution_boundary(state, begin, end));
             // A window that reached its unit bound (a fork parent rests at its fork frontier)
             // carries nothing; admission stops there and leaves the lane's unit to the caller.
-            if (end == begin) break;
-            if (i && (alone || packed_tokens + (end - begin) > plan.pack_tokens)) break;
+            if (end == begin && request.base->fork_frontier == begin) break;
+            const auto splits = split_count(state, begin, end);
+            if (i && (alone || packed_tokens + (end - begin) > plan.pack_tokens ||
+                      packed_splits + splits > kPrefillPackBoundaryLimit))
+                break;
             segments.push_back({l, begin, end, !constrained.empty() && constrained[i],
                                 final_window});
             packed_tokens += end - begin;
+            packed_splits += splits;
             final_segment = final_segment || final_window;
             if (alone) break;
         }
@@ -191,6 +204,7 @@ void SessionImpl::append_prefill_row(Execution& pending, ForwardWork& forward,
     forward.inputs.push_back(input_window(state, begin, end));
     forward.inputs.back().visual = prepare_visual(state, begin, end);
     if (forward.inputs.back().visual) pending.vision_id = forward.inputs.back().visual->window.id;
+    attach_checkpoints(pending, forward.inputs.back(), state, begin, end);
     forward.sampling.push_back({request.sampling_host, constrained, produces_token});
 }
 
@@ -230,12 +244,11 @@ std::uint32_t SessionImpl::mixed_decode_limit() const noexcept { return plan.mix
 // execution segment. A window that reaches the prompt end produces the sequence's first token;
 // its row joins the decode batch only without speculative drafts, which keep the batch's wider
 // row stride. The permit bounds the window when the sequence holds one; otherwise the window is
-// the one the next permit would grant. Capture boundaries only shorten a window, so a window
-// judged mixable here stays mixable once start_mixed has prepared them.
+// the one the next permit would grant.
 std::optional<std::uint32_t> SessionImpl::mixable_end(const SequenceState& state,
                                                       const RequestControl& request) const {
     if (!plan.mixed_decode_rows || request.lifecycle != Lifecycle::Prefilling || !request.prefill ||
-        request.capture_pending || request.base->vision)
+        request.base->vision)
         return {};
     const auto begin  = state.continuation.metadata.execution_frontier;
     const auto prompt = request.base->summary.prompt_tokens;
@@ -243,7 +256,8 @@ std::optional<std::uint32_t> SessionImpl::mixable_end(const SequenceState& state
                                    request.permit ? std::min(request.permit->main_frontier, prompt)
                                                   : prompt,
                                    vision_window);
-    if (end <= begin || crosses_execution_boundary(state, begin, end)) return {};
+    if (end <= begin || (!kSplitPacking && crosses_execution_boundary(state, begin, end)))
+        return {};
     if (end == prompt && speculative_backend != SpeculativeBackend::None) return {};
     return end;
 }
@@ -285,10 +299,8 @@ SessionImpl::start_mixed(std::span<const SequenceHandle> prefill,
             throw std::logic_error("duplicate sequence in mixed prefill");
         const auto l        = lane(prefill[i]);
         const auto& request = requests[l];
-        if (request.lifecycle != Lifecycle::Prefilling || !request.prefill ||
-            request.capture_pending) {
+        if (request.lifecycle != Lifecycle::Prefilling || !request.prefill)
             throw std::logic_error("sequence has no executable prefill window");
-        }
         require_unit(l, ExecutionUnitKind::Prefill);
     }
     for (std::size_t b = 0; b < rows; ++b) {
@@ -314,18 +326,22 @@ SessionImpl::start_mixed(std::span<const SequenceHandle> prefill,
     try {
         std::vector<Segment> segments;
         std::uint32_t packed_tokens = 0;
+        std::uint32_t packed_splits = 0;
         bool final_segment          = false;
         for (std::size_t i = 0; i < considered; ++i) {
-            const auto l = lane(prefill[i]);
-            prepare_capture_boundary(l);
+            const auto l        = lane(prefill[i]);
             const auto& request = requests[l];
             const auto end      = mixable_end(sequences[l], requests[l]);
             if (!end) break;
-            const auto begin = sequences[l].continuation.metadata.execution_frontier;
-            if (i && packed_tokens + (*end - begin) > plan.pack_tokens) break;
+            const auto begin  = sequences[l].continuation.metadata.execution_frontier;
+            const auto splits = split_count(sequences[l], begin, *end);
+            if (i && (packed_tokens + (*end - begin) > plan.pack_tokens ||
+                      packed_splits + splits > kPrefillPackBoundaryLimit))
+                break;
             const bool produces = *end == request.base->summary.prompt_tokens;
             segments.push_back({begin, *end, produces});
             packed_tokens += *end - begin;
+            packed_splits += splits;
             final_segment = final_segment || produces;
         }
         if (segments.empty())
@@ -368,13 +384,12 @@ std::optional<runtime::ExecutionTicket> SessionImpl::start_replay(SequenceHandle
     if (executing() &&
         ((request.base && request.base->vision) || is_masked_draft_backend(speculative_backend)))
         return {};
-    if (request.lifecycle != Lifecycle::Replaying || request.capture_pending)
+    if (request.lifecycle != Lifecycle::Replaying)
         throw std::logic_error("sequence has no executable Replay window");
     require_unit(l, ExecutionUnitKind::Replay);
     auto reservation = executor().try_reserve(runtime::FrameKind::Compute);
     if (!reservation) return {};
     try {
-        prepare_capture_boundary(l);
         const auto begin = state.continuation.metadata.execution_frontier;
         const auto end   = window_end(state, request, begin,
                                       std::min(request.permit->main_frontier, request.replay_target),

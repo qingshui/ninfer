@@ -24,13 +24,18 @@ std::uint64_t EngineCore<Instance>::elapsed_ns(Clock::time_point started,
 }
 
 template <class Instance>
-typename EngineCore<Instance>::ActiveExposureSet EngineCore<Instance>::active_exposure_set() const {
-    ActiveExposureSet result(max_concurrency_);
+typename EngineCore<Instance>::ExposureHandle EngineCore<Instance>::active_exposure_set() const {
+    if (exposure_cache_ && exposure_cache_epoch_ == slots_epoch_) { return exposure_cache_; }
+    auto result = std::make_shared<ActiveExposureSet>();
+    result->entries.reserve(max_concurrency_);
     for (std::uint32_t lane = 0; lane < max_concurrency_; ++lane) {
         if (slots_[lane] == nullptr) { continue; }
-        result.entries[result.size++] = ActiveExposure{.request = slots_[lane], .lane = lane};
+        result->entries.push_back(ActiveExposure{.request = slots_[lane], .lane = lane});
     }
-    return result;
+    result->size         = result->entries.size();
+    exposure_cache_      = std::move(result);
+    exposure_cache_epoch_ = slots_epoch_;
+    return exposure_cache_;
 }
 
 template <class Instance>
@@ -45,20 +50,20 @@ typename EngineCore<Instance>::HostPhaseMeasurement EngineCore<Instance>::begin_
 template <class Instance>
 void EngineCore<Instance>::set_host_work_class(
     HostWorkClass work_class, std::span<const std::uint32_t> decode_lanes) noexcept {
-    current_host_work_class_   = work_class;
+    current_host_work_class_ = work_class;
+    for (std::size_t i = 0; i < current_decode_lane_count_; ++i) {
+        current_decode_member_[current_decode_lanes_[i]] = 0;
+    }
     current_decode_lane_count_ = decode_lanes.size();
     for (std::size_t i = 0; i < decode_lanes.size(); ++i) {
-        current_decode_lanes_[i] = decode_lanes[i];
+        current_decode_lanes_[i]                   = decode_lanes[i];
+        current_decode_member_[decode_lanes[i]] = 1;
     }
 }
 
 template <class Instance>
 bool EngineCore<Instance>::current_decode_contains(std::uint32_t lane) const noexcept {
-    return std::find(current_decode_lanes_.begin(),
-                     current_decode_lanes_.begin() +
-                         static_cast<std::ptrdiff_t>(current_decode_lane_count_),
-                     lane) !=
-           current_decode_lanes_.begin() + static_cast<std::ptrdiff_t>(current_decode_lane_count_);
+    return current_decode_member_[lane] != 0;
 }
 
 template <class Instance>
@@ -113,7 +118,7 @@ void EngineCore<Instance>::finish_engine_phase(const HostPhaseMeasurement& measu
         break;
     }
     add_class_host_time(own, 0);
-    expose_engine_phase(measurement.exposed, phase, own);
+    expose_engine_phase(*measurement.exposed, phase, own);
     worker_accounted_elapsed_ns_ += own;
 }
 
@@ -152,7 +157,7 @@ void EngineCore<Instance>::finish_execution_call(const HostPhaseMeasurement& mea
                                                  CoordinatorCall call) noexcept {
     const auto wall   = elapsed_ns(measurement.started, Clock::now());
     const auto nested = worker_accounted_elapsed_ns_ - measurement.accounted_before;
-    record_coordinator_call(call, wall > nested ? wall - nested : 0, measurement.exposed);
+    record_coordinator_call(call, wall > nested ? wall - nested : 0, *measurement.exposed);
 }
 
 template <class Instance>
@@ -237,8 +242,6 @@ void EngineCore<Instance>::record_completion(const std::shared_ptr<Request>& req
     if (request->completion_observed) return;
     request->completion_observed = true;
     if (!request->completed_at) { request->completed_at = Clock::now(); }
-    // A hidden sample-group helper carries no consumer and counts no request statistic.
-    if (request->sample_helper) return;
     auto& counters = cumulative_stats_.requests;
     if (failed)
         ++counters.failed;
@@ -285,35 +288,30 @@ void EngineCore<Instance>::publish_runtime_stats() {
                                       : failed_ ? EngineStatus::Failed
                                                 : EngineStatus::Ready;
         for (const auto& request : pending_) {
-            if (!request->sample_helper) {
-                request_observations_.push_back(observe_request(*request));
-            }
+            request_observations_.push_back(observe_request(*request));
         }
     }
     snapshot.prefilling_requests    = 0;
     snapshot.paused_requests        = static_cast<std::uint32_t>(paused_.size());
     snapshot.replaying_requests     = 0;
     snapshot.materializing_requests = static_cast<std::uint32_t>(std::count_if(
-        materializing_.begin(), materializing_.end(), [](const auto& entry) {
-            return entry.has_value() && !entry->request->sample_helper;
-        }));
+        materializing_.begin(), materializing_.end(),
+        [](const auto& entry) { return entry.has_value(); }));
     for (std::uint32_t lane = 0; lane < max_concurrency_; ++lane) {
         if (slots_[lane] == nullptr) { continue; }
         const auto& request = *slots_[lane];
-        if (request.sample_helper) { continue; }  // hidden fork parents carry no consumer
         request_observations_.push_back(observe_request(request));
         ++snapshot.running_requests;
         if (request.is_prefilling()) { ++snapshot.prefilling_requests; }
         if (request.is_replaying()) { ++snapshot.replaying_requests; }
         if (request.is_decode_ready()) { ++snapshot.decode_ready_requests; }
+        if (request.model_state == EngineRequestState::Forking) { ++snapshot.forking_requests; }
         if (request.capture_pending) { ++snapshot.capture_pending_requests; }
         if (request.terminal_reason) { ++snapshot.terminal_pending_requests; }
     }
     for (const auto& request : paused_) request_observations_.push_back(observe_request(*request));
     for (const auto& entry : materializing_) {
-        if (entry && !entry->request->sample_helper) {
-            request_observations_.push_back(observe_request(*entry->request));
-        }
+        if (entry) { request_observations_.push_back(observe_request(*entry->request)); }
     }
     std::sort(request_observations_.begin(), request_observations_.end(),
               [](const auto& a, const auto& b) { return a.id < b.id; });

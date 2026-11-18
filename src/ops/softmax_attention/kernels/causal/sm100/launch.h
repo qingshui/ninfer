@@ -14,6 +14,7 @@
 #include <cuda_runtime.h>
 
 #include <cstdint>
+#include <span>
 
 namespace ninfer::ops::detail {
 
@@ -52,5 +53,33 @@ struct Sm100CausalOperands : CausalAttentionOperands {
 // The cache must already contain every key the queries attend to (the append is a separate write).
 void launch_sm100_causal_attention(const Sm100CausalOperands& operands, KvDType kv,
                                    const Sm100AttentionPlan& plan, cudaStream_t stream);
+
+// `batch` consecutive entries of `width` columns of one token axis. Entry b uses entry `row + b` of
+// the cache's valid-column and table-row metadata.
+struct Sm100AttentionGroup {
+    int token_base;
+    int width;
+    int batch;
+    int row;
+};
+
+// q/positions/out are indexed by token-axis column. The cache needs valid_columns and table_rows.
+struct Sm100GroupOperands {
+    const __nv_bfloat16* q;
+    const std::int32_t* positions;
+    __nv_bfloat16* out;
+    float scale;
+    int visible_capacity;
+    int head_dim;
+    int query_heads;
+    Sm100KvCache cache;
+};
+
+// Every group in one launch (several when the groups exceed the launch's descriptor capacity). The
+// entries are those of launch_sm100_causal_attention, each run as a single split that writes the
+// final BF16 output, so no partials and no merge.
+void launch_sm100_causal_attention_groups(const Sm100GroupOperands& operands, KvDType kv,
+                                          std::span<const Sm100AttentionGroup> groups,
+                                          cudaStream_t stream);
 
 } // namespace ninfer::ops::detail

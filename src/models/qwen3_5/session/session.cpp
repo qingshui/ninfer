@@ -66,6 +66,11 @@ std::uint32_t RequestBasePlan::fork_frontier() const noexcept {
     return impl_ != nullptr ? impl_->fork_frontier : 0;
 }
 
+std::span<const std::uint32_t> RequestBasePlan::checkpoint_frontiers() const noexcept {
+    return impl_ != nullptr ? std::span<const std::uint32_t>(impl_->checkpoint_frontiers)
+                            : std::span<const std::uint32_t>{};
+}
+
 ResumeState::ResumeState(std::unique_ptr<detail::ResumeStateImpl> impl) noexcept
     : impl_(std::move(impl)) {}
 
@@ -251,18 +256,6 @@ ResourceReservation Session::reserve_units(std::span<const ExecutionUnit> units)
     return impl_->reserve_units(units);
 }
 
-bool Session::reclaim_capture_reservation(const ContextAssessment& assessment) {
-    impl_->note_context_change();
-    return impl_->reclaim_capture_reservation(assessment);
-}
-
-std::optional<std::uint32_t> Session::capture_reservation_frontier(SequenceHandle sequence) const {
-    if (!impl_->valid_sequence(sequence)) return std::nullopt;
-    const auto& request = impl_->requests[impl_->lane(sequence)];
-    if (!request.capture_reservation) return std::nullopt;
-    return request.capture_reservation->frontier;
-}
-
 void Session::release_units(std::span<const SequenceHandle> units) noexcept {
     impl_->note_context_change();
     impl_->release_units(units);
@@ -270,41 +263,10 @@ void Session::release_units(std::span<const SequenceHandle> units) noexcept {
 
 BindingReservation Session::start_binding(const RequestBasePlan& base, runtime::LaneId lane,
                                           const SourceCandidate& source, ResumeState* resume,
-                                          ExecutionUnitKind kind, std::uint32_t tokens) {
+                                          ExecutionUnitKind kind, std::uint32_t tokens,
+                                          bool synchronous_only) {
     impl_->note_context_change();
-    return impl_->start_binding(base, lane, source, resume, kind, tokens);
-}
-
-bool Session::start_capture(SequenceHandle h) {
-    impl_->note_context_change();
-    return impl_->start_capture(h);
-}
-
-std::vector<std::uint32_t> Session::capture_frontiers(SequenceHandle h) const {
-    std::vector<std::uint32_t> result;
-    for (const auto& point : impl_->requests[impl_->lane(h)].capture_groups)
-        result.push_back(point.frontier);
-    return result;
-}
-
-bool Session::capture_is_shared(SequenceHandle h) const {
-    const auto& request = impl_->requests[impl_->lane(h)];
-    if (request.next_capture >= request.capture_groups.size()) return false;
-    const auto& roles = request.capture_groups[request.next_capture].roles;
-    return roles.size() == 1 && roles.front() == runtime::CheckpointRole::SharedPrefix;
-}
-
-bool Session::capture_is_input(SequenceHandle h) const { return impl_->capture_is_input(h); }
-
-std::optional<CapturePreparation>
-Session::prepare_capture(SequenceHandle h, std::span<const CheckpointHandle> host_victims) {
-    impl_->note_context_change();
-    return impl_->prepare_capture(h, host_victims);
-}
-
-void Session::skip_capture(SequenceHandle h, runtime::CaptureSkip reason) {
-    impl_->note_context_change();
-    impl_->skip_capture(h, reason);
+    return impl_->start_binding(base, lane, source, resume, kind, tokens, true, synchronous_only);
 }
 
 runtime::ContextStart Session::start_demote(const ContextDemotion& plan,
@@ -393,10 +355,9 @@ std::uint32_t Session::prefill_pack_tokens() const noexcept { return impl_->pref
 
 std::uint32_t Session::sample_fork_limit() const noexcept { return impl_->sample_fork_limit(); }
 
-ForkResult Session::fork(SequenceHandle parent, std::span<const runtime::LaneId> children,
-                         std::span<const ResolvedSamplingParameters> sampling) {
+std::vector<ForkGroupResult> Session::fork_batch(std::span<const ForkGroupRequest> groups) {
     impl_->note_context_change();
-    return impl_->fork(parent, children, sampling);
+    return impl_->fork_batch(groups);
 }
 
 std::optional<PrefillStart> Session::start_prefill(std::span<const SequenceHandle> sequences,
@@ -476,6 +437,10 @@ bool Session::execution_pending(SequenceHandle h) const noexcept {
     return impl_->execution_pending(h);
 }
 
+FlightCheckpoints Session::take_flight_checkpoints(SequenceHandle h) {
+    return impl_->take_flight_checkpoints(h);
+}
+
 bool Session::terminal_blocked(SequenceHandle h) const noexcept {
     return impl_->terminal_blocked(h);
 }
@@ -530,6 +495,10 @@ SessionImpl::SessionImpl(std::shared_ptr<const ModelDefinition> definition_in, S
         plan.pack_segments > kPrefillPackSegmentLimit)
         throw std::invalid_argument("Session preparation is incomplete");
     deferred_bindings.resize(plan.max_concurrency);
+    lane_identity_.assign(plan.max_concurrency, 0);
+    lane_busy_.assign(plan.max_concurrency, 0);
+    lane_releasing_.assign(plan.max_concurrency, 0);
+    lane_index_.reserve(plan.max_concurrency * 2);
     checkpoints.configure(Checkpoints::capacity_for_metadata(directory.metadata_budget().limit()),
                           directory.metadata_budget(), &recovery_index);
     if (!causal_scoring) {

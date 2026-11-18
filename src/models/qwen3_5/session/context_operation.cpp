@@ -34,16 +34,10 @@ bool SessionImpl::context_pins(CheckpointHandle handle) const noexcept {
                                    [&](const auto& pair) {
                                        return pair.first == handle || pair.second == handle;
                                    });
-            } else if constexpr (std::is_same_v<Action, CaptureOperation>) {
-                return std::any_of(action.points.begin(), action.points.end(),
-                                   [&](const auto& point) { return point.first == handle; });
             } else if constexpr (std::is_same_v<Action, DemoteOperation>) {
                 return has(action.sources);
             } else if constexpr (std::is_same_v<Action, PauseOperation>) {
                 return action.paused.impl_ && action.paused.impl_->snapshot == handle;
-            } else if constexpr (std::is_same_v<Action, ResidencyOperation>) {
-                // A silent residency installation borrows no checkpoint.
-                return false;
             } else {
                 // Maintenance may relocate any record, and carries the demotion or pause that
                 // follows it.
@@ -137,9 +131,7 @@ void SessionImpl::receive_context_result(runtime::ExecutionTicket ticket, Contex
 }
 
 void SessionImpl::cancel_context() noexcept {
-    // A silent residency installation holds no adoptable state; cancelling it would tear down
-    // lanes the caller already owns.
-    if (context_operation_ && !context_operation_->silent) context_operation_->transaction.cancel();
+    if (context_operation_) context_operation_->transaction.cancel();
     if (normalizing_pause_) pause_cancelled_ = true;
 }
 
@@ -188,24 +180,6 @@ void SessionImpl::retire_context(runtime::DeviceRetired retired) {
         if (std::holds_alternative<MaintenanceOperation>(operation.action)) {
             maintenance_trace("MAINT complete\n");
         }
-        // A silent operation finished an installation the caller already adopted: no lane state
-        // waits on it and no ContextProgress follows.
-        if (operation.silent) {
-            context_operation_.reset();
-            // A pending score adopted its sequence when the synchronous installation
-            // returned; its residency retirement reports the sequence through the same
-            // ContextProgress an asynchronous binding publishes, so poll() starts the
-            // score's first execution here instead of waiting for a progress that never
-            // arrives.
-            if (scoring) {
-                ContextProgress progress{.kind = ContextOperationKind::Bind};
-                progress.complete  = true;
-                progress.published = true;
-                progress.sequence  = scoring->sequence;
-                events.push_back({.ticket = retired.ticket, .result = std::move(progress)});
-            }
-            return;
-        }
         if (auto* maintenance = std::get_if<MaintenanceOperation>(&operation.action);
             maintenance && (maintenance->demotion || maintenance->pause_sequence)) {
             auto targets      = transaction.take_reservation();
@@ -237,11 +211,6 @@ void SessionImpl::retire_context(runtime::DeviceRetired retired) {
                 using Action = std::decay_t<decltype(action)>;
                 if constexpr (std::is_same_v<Action, BindOperation>) {
                     complete_binding(action, transaction, out);
-                } else if constexpr (std::is_same_v<Action, CaptureOperation>) {
-                    out.captured_checkpoints.reserve(action.points.size());
-                    publish_capture(action, transaction, out.operations);
-                    for (const auto& [handle, role] : action.points)
-                        out.captured_checkpoints.push_back(handle);
                 } else if constexpr (std::is_same_v<Action, PauseOperation>) {
                     out.paused.emplace(complete_pause(action));
                 }
@@ -285,14 +254,6 @@ void SessionImpl::abort_context() noexcept {
                         else
                             checkpoints.cancel(to);
                     }
-                } else if constexpr (std::is_same_v<Action, CaptureOperation>) {
-                    auto& state = sequences[action.lane];
-                    if (state_store->role(state.continuation.image) ==
-                            context::StateRole::CheckpointImmutable &&
-                        !state_store->checkpoint_references(state.continuation.image))
-                        state_store->make_mutable(state.continuation.image);
-                    for (const auto& [handle, role] : action.points)
-                        if (!valid_checkpoint(handle)) checkpoints.cancel(handle);
                 } else if constexpr (std::is_same_v<Action, MaintenanceOperation>) {
                     if (action.pause_sequence && valid_sequence(*action.pause_sequence)) {
                         const auto index = lane(*action.pause_sequence);

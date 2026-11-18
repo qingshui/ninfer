@@ -184,4 +184,36 @@ void launch_paged_write(PagedWriteInstance instance, const Tensor& k, const Tens
         launch.template operator()<false>();
 }
 
+void launch_paged_write_groups(const Tensor& k, const Tensor& v, const Tensor& positions,
+                               const Tensor& valid_columns, const Tensor& table_rows,
+                               PagedKVBatchLayerView cache, std::span<const PagedWriteGroup> groups,
+                               cudaStream_t stream) {
+    if (cache.storage != KvCacheStorage::Fp8E4m3fnGroup128Ue8m0 || k.ne[1] != 2)
+        throw std::logic_error("KV write groups: FP8 storage with two KV heads only");
+    Fp8GroupWriteParams params{};
+    params.k             = static_cast<const __nv_bfloat16*>(k.data);
+    params.v             = static_cast<const __nv_bfloat16*>(v.data);
+    params.positions     = static_cast<const std::int32_t*>(positions.data);
+    params.tables        = static_cast<const std::int64_t*>(cache.k_pages.records.page_offsets.data);
+    params.valid_columns = static_cast<const std::int32_t*>(valid_columns.data);
+    params.table_rows    = static_cast<const std::int32_t*>(table_rows.data);
+    params.cache_k       = static_cast<std::uint8_t*>(cache.k_pages.data());
+    params.cache_v       = static_cast<std::uint8_t*>(cache.v_pages.data());
+    params.scale_k       = static_cast<std::uint8_t*>(cache.k_scale_pages.data());
+    params.scale_v       = static_cast<std::uint8_t*>(cache.v_scale_pages.data());
+    params.table_stride  = cache.k_pages.records.page_offsets.ne[0];
+    for (std::size_t next = 0; next < groups.size();) {
+        int count = 0;
+        for (; next < groups.size() && count < kPagedWriteMaxGroups; ++next, ++count) {
+            params.group[count] = groups[next];
+            params.columns      = groups[next].token_base + groups[next].width * groups[next].batch;
+        }
+        params.groups = count;
+        const auto units = static_cast<std::int64_t>(params.columns) * 2;
+        const dim3 grid(static_cast<unsigned>(common::div_up(units, std::int64_t{8})));
+        write_fp8_groups_kernel<D256Geometry<2>><<<grid, 256, 0, stream>>>(params);
+        CUDA_CHECK(cudaGetLastError());
+    }
+}
+
 } // namespace ninfer::ops::detail::kv

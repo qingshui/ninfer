@@ -312,9 +312,15 @@ void launch_control_shared_impl(const Tensor& x, const MoeWeights& weights,
                stream>>>(input, gu, storage, nullptr, nullptr, FloatContribution{}, control, scores,
                          shared_gate);
     } else {
-        const auto launch = [&]<int Columns>() {
+        bool dense_gate_up = false;
+#if NINFER_TARGET_B200
+        dense_gate_up = launch_control_shared_gate_up_dense(x, weights, storage, plan, execution);
+#endif
+        // The blocks past the router rows produce the shared activation.
+        const int gate_up_blocks = dense_gate_up ? 0 : Intermediate / 32;
+        const auto launch        = [&]<int Columns>() {
             shared_mma<Shape, true, Columns, Intermediate, SplitActivation>
-                <<<dim3(Intermediate / 32 + (routed ? (Shape::experts + 64) / 64 : 1),
+                <<<dim3(gate_up_blocks + (routed ? (Shape::experts + 64) / 64 : 1),
                         (x.ne[1] + Columns - 1) / Columns),
                    128, 0, stream>>>(input, gu, storage, nullptr, nullptr, FloatContribution{},
                                      x.ne[1], control, scores, shared_gate);

@@ -14,7 +14,9 @@ struct Fp8LinearAddPlan {
 
 Fp8LinearAddPlan select_fp8_add_n5120_k6144(LinearPolicy policy, std::int32_t tokens);
 Fp8LinearAddPlan select_fp8_add_n5120_k17408(LinearPolicy policy, std::int32_t tokens);
-std::size_t fp8_linear_add_workspace_capacity_bytes(std::int32_t rows, std::int32_t k,
+// B200 only: GDN output projection with E4M3 row-scaled weights and FP32 scales.
+Fp8LinearAddPlan select_fp8_row_fp32_add_n3072_k8192(LinearPolicy policy, std::int32_t tokens);
+std::size_t fp8_linear_add_workspace_capacity_bytes(QType type, std::int32_t rows, std::int32_t k,
                                                     LinearPolicy policy, std::int32_t first,
                                                     std::int32_t last);
 void fp8_linear_add_dispatch(const Tensor&, const Weight&, Tensor&, LinearPolicy, MemoryArena&,

@@ -573,6 +573,97 @@ int exercise_zero_suffix_reuse(ninfer::Engine& engine, const std::vector<ninfer:
     return 0;
 }
 
+ninfer::RequestOptions greedy_request(std::uint32_t tokens, bool reuse) {
+    ninfer::RequestOptions value;
+    value.execution.requested_output_tokens = tokens;
+    value.execution.sampling.temperature    = 0.0F;
+    value.execution.allow_prefix_reuse      = reuse;
+    value.stop.include_model_defaults       = false;
+    return value;
+}
+
+// A request that never completes fails the test instead of hanging it.
+ninfer::GenerationResult wait_within(ninfer::GenerationHandle& handle,
+                                     std::chrono::seconds limit) {
+    const auto deadline = std::chrono::steady_clock::now() + limit;
+    return handle.wait(nullptr, ninfer::CancellationView([deadline] {
+                           return std::chrono::steady_clock::now() > deadline;
+                       }));
+}
+
+// A retained source that covers the whole prompt leaves an empty window. The lane samples its
+// first token from the source's hidden state in an execution of its own, so it must still be
+// scheduled alone, beside other lanes that prefill and decode.
+int exercise_zero_suffix_scheduling(const char* artifact) {
+    ninfer::EngineOptions options;
+    options.artifact_path        = artifact;
+    options.max_context          = 1024;
+    options.prefill_chunk        = 128;
+    options.max_concurrency      = 3;
+    options.max_pending_requests = 8;
+    ninfer::test::qwen3_5::set_context_capacity(options, 6);
+    ninfer::Engine engine(std::move(options));
+
+    constexpr auto limit = std::chrono::seconds(120);
+    const std::vector<ninfer::TokenId> prompt{248045, 846, 198, 5834, 248046, 198};
+    std::vector<ninfer::TokenId> decoding{248045, 846, 198};
+    for (ninfer::TokenId id = 1000; id < 1020; ++id) decoding.push_back(id);
+    std::vector<ninfer::TokenId> fresh{248045, 846, 198};
+    for (std::uint32_t index = 0; index < 300; ++index)
+        fresh.push_back(static_cast<ninfer::TokenId>(2000 + index % 50));
+
+    auto reference_handle = engine.submit(engine.prepare_tokens(prompt), greedy_request(8, false));
+    const auto reference  = wait_within(reference_handle, limit);
+    if (reference.generated_token_ids.size() != 8) {
+        std::cerr << "zero-suffix scheduling reference did not generate eight tokens\n";
+        return 1;
+    }
+
+    // One-token outputs retain the whole prompt, so each repeat starts from an empty window.
+    if (const int result = exercise_zero_suffix_reuse(engine, prompt); result != 0) return result;
+    for (int round = 0; round < 3; ++round) {
+        auto handle        = engine.submit(engine.prepare_tokens(prompt), greedy_request(1, true));
+        const auto result = wait_within(handle, limit);
+        if (result.finish_reason != ninfer::FinishReason::OutputLimit ||
+            result.generated_token_ids.size() != 1) {
+            std::cerr << "a repeated prompt with an empty window did not complete\n";
+            return 1;
+        }
+        if (round && result.stats.reused_prompt_tokens != prompt.size()) {
+            std::cerr << "a repeated prompt reused " << result.stats.reused_prompt_tokens
+                      << " tokens, expected " << prompt.size() << '\n';
+            return 1;
+        }
+    }
+
+    int empty_windows = 0;
+    for (int round = 0; round < 3; ++round) {
+        auto seed = engine.submit(engine.prepare_tokens(prompt), greedy_request(1, true));
+        if (wait_within(seed, limit).generated_token_ids.size() != 1) {
+            std::cerr << "zero-suffix scheduling seed did not complete\n";
+            return 1;
+        }
+        auto decode = engine.submit(engine.prepare_tokens(decoding), greedy_request(48, true));
+        auto empty  = engine.submit(engine.prepare_tokens(prompt), greedy_request(8, true));
+        auto prefix = engine.submit(engine.prepare_tokens(fresh), greedy_request(8, true));
+        const auto empty_result  = wait_within(empty, limit);
+        const auto prefix_result = wait_within(prefix, limit);
+        const auto decode_result = wait_within(decode, limit);
+        if (empty_result.generated_token_ids != reference.generated_token_ids ||
+            prefix_result.generated_token_ids.size() != 8 ||
+            decode_result.generated_token_ids.size() != 48) {
+            std::cerr << "an empty window beside prefill and decode lanes changed or lost output\n";
+            return 1;
+        }
+        if (empty_result.stats.reused_prompt_tokens == prompt.size()) ++empty_windows;
+    }
+    if (empty_windows == 0) {
+        std::cerr << "no request started from an empty window beside other lanes\n";
+        return 1;
+    }
+    return 0;
+}
+
 int exercise_prefix(ninfer::Engine& engine) {
     ninfer::RequestOptions first_options;
     first_options.execution.requested_output_tokens = 5;
@@ -2212,6 +2303,8 @@ int main() {
         result = exercise_late_instructions(artifact);
     } else if (scenario == "agent-continuation") {
         result = exercise_agent_continuation(artifact);
+    } else if (scenario == "zero-suffix") {
+        result = exercise_zero_suffix_scheduling(artifact);
     } else if (scenario == "explicit-prefix") {
         result = exercise_explicit_prefix(artifact);
     } else if (scenario == "explicit-anchor") {

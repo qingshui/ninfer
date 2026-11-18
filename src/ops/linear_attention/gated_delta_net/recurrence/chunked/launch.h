@@ -8,4 +8,7 @@ void launch_prepare(const RecurrenceOperands& args, QkChunk* qk, ControlChunk* c
                     bool normalize_qk, cudaStream_t stream);
 void launch_recurrence(const RecurrenceOperands& args, const QkChunk* qk,
                        const ControlChunk* control, int value_tile, cudaStream_t stream);
+// 64-value stripes with the state in registers; every target but dgx_spark compiles it.
+void launch_register_state(const RecurrenceOperands& args, const QkChunk* qk,
+                           const ControlChunk* control, cudaStream_t stream);
 } // namespace ninfer::ops::detail::gated_delta_net::chunked

@@ -12,7 +12,8 @@
 // TMA map over the expert-major bank and block_scale_k16_m128x4 scale atoms through bulk copies.
 //
 // Two kernels share the mainloop:
-//   gate/up  B = quantized hidden states, gathered by token id (TMA gather4). Two weight tiles
+//   gate/up  B = quantized hidden states in packed-slot order (the launcher gathers them by
+//            token id first). Two weight tiles
 //            (gate rows, up rows) accumulate side by side; the epilogue computes
 //            silu(gate) * up in FP32 and re-quantizes it to NVFP4 (G16, calibrated divisor) into
 //            the packed-assignment-ordered product buffer.
@@ -21,11 +22,18 @@
 //            stores it per assignment for the ordered reduction.
 //
 // Block scales of the activation operand are written in smem by a dedicated warp from the
-// token-major scale rows, in the 128-token K16M128x4 atom order tcgen05.cp expects.
+// slot-major scale rows, in the 128-token K16M128x4 atom order tcgen05.cp expects.
 //
-// Roles (8 warps): 0 TMA producer, 1 MMA issuer, 2 TMEM allocator, 3 activation-scale loader,
-// 4-7 epilogue (one 32-lane TMEM quadrant each). Stages are guarded by full/empty mbarriers and
+// Roles (8 or 12 warps): 0 TMA producer, 1 MMA issuer, 2 TMEM allocator, 3 activation-scale
+// loader, then 4 or 8 epilogue warps. A warp reaches the 32 TMEM lanes of quadrant (warp % 4); with
+// eight epilogue warps the two warps of a quadrant drain the first and second half of the tile's
+// token columns. Stages are guarded by full/empty mbarriers and
 // accumulator buffers by acc_full/acc_empty, as in the dense mainloop.
+//
+// Each epilogue warp drains with one thread per accumulator lane, and its global loads queue
+// behind the reductions it already issued. An epilogue therefore splits what it needs to know
+// about a tile into `fetch` (independent loads) and `settle` (the loads and math that depend on
+// them); both run for tile n + 1 while tile n drains, so `drain` finds them in registers.
 
 #include "core/device.h"
 #include "ops/common/cuda/memory.cuh"
@@ -42,6 +50,7 @@
 namespace ninfer::ops::detail::moe_cuda::block_scaled::nvfp4 {
 
 namespace sm = ::ninfer::ops::common::sm100;
+
 
 // Everything the mainloop needs besides the tensor maps. Pointers address the Groups arrays and
 // the weight bank; none of it is repacked.
@@ -70,6 +79,8 @@ struct GroupTile {
     int warp_q;         // quadrant = 32-row group inside the 128-row tile
     int lane;
     unsigned char* scratch; // 2 KiB private to this warp
+    int col_begin;      // first accumulator column this warp drains
+    int col_end;        // one past the last
 };
 
 struct TileInfo {
@@ -85,12 +96,17 @@ struct TileCursor {
     int base   = 0;
 };
 
+// The expert offsets are staged in shared memory: every role walks the tile sequence, and a
+// walk over global loads costs a dependent L2 round trip per expert, which the producer cannot
+// hide behind its stage ring.
+inline constexpr int kMaxExperts = 256;
+
 template <int TileN>
 __device__ __forceinline__ bool next_tile(TileCursor& cursor, int tile, const GroupedArgs& args,
-                                          TileInfo& info) {
+                                          const int* offsets, TileInfo& info) {
     while (cursor.expert < args.experts) {
-        const int begin  = args.offsets[cursor.expert];
-        const int end    = args.offsets[cursor.expert + 1];
+        const int begin  = offsets[cursor.expert];
+        const int end    = offsets[cursor.expert + 1];
         const int ntiles = (end - begin + TileN - 1) / TileN;
         const int count  = ntiles * args.tiles_m;
         if (tile < cursor.base + count) {
@@ -108,7 +124,7 @@ __device__ __forceinline__ bool next_tile(TileCursor& cursor, int tile, const Gr
 }
 
 // ---------------------------------------------------------------------------------------------
-// TMA forms the dense mainloop does not need: 3D expert-bank tiles and 4-row gathers.
+// TMA form the dense mainloop does not need: 3D expert-bank tiles.
 // ---------------------------------------------------------------------------------------------
 
 __device__ __forceinline__ void tma_load_tile_3d(void* destination, const CUtensorMap* map, int c0,
@@ -122,28 +138,17 @@ __device__ __forceinline__ void tma_load_tile_3d(void* destination, const CUtens
                  : "memory");
 }
 
-// Loads four rows (r0..r3) of a 2D map whose box is [box_inner x 1] into four consecutive
-// box-inner-wide rows of shared memory, with the map's swizzle applied as for a 4-row box.
-__device__ __forceinline__ void tma_gather4(void* destination, const CUtensorMap* map, int c0,
-                                            int r0, int r1, int r2, int r3,
-                                            std::uint64_t* barrier, std::uint64_t cache_hint) {
-    asm volatile("cp.async.bulk.tensor.2d.shared::cluster.global.tile::gather4"
-                 ".mbarrier::complete_tx::bytes.L2::cache_hint "
-                 "[%0], [%1, {%3, %4, %5, %6, %7}], [%2], %8;"
-                 :
-                 : "r"(common::smem_addr(destination)), "l"(map),
-                   "r"(common::smem_addr(barrier)), "r"(c0), "r"(r0), "r"(r1), "r"(r2), "r"(r3),
-                   "l"(cache_hint)
-                 : "memory");
+// Adds four consecutive floats (16-byte aligned) in one L2 reduction.
+__device__ __forceinline__ void red_add_v4(float* address, float x, float y, float z, float w) {
+    asm volatile("red.global.add.v4.f32 [%0], {%1, %2, %3, %4};" ::"l"(address), "f"(x), "f"(y),
+                 "f"(z), "f"(w));
 }
 
 // ---------------------------------------------------------------------------------------------
 // Kernel
 // ---------------------------------------------------------------------------------------------
 
-enum class BSource { Gather, Contiguous };
-
-template <class Cfg, BSource Source, class Epilogue>
+template <class Cfg, class Epilogue>
 __global__ __launch_bounds__(Cfg::kThreads, 1) void grouped_gemm_kernel(
     const __grid_constant__ CUtensorMap a_map, const __grid_constant__ CUtensorMap b_map,
     const __grid_constant__ GroupedArgs args, const __grid_constant__ Epilogue epilogue) {
@@ -165,6 +170,10 @@ __global__ __launch_bounds__(Cfg::kThreads, 1) void grouped_gemm_kernel(
 
     const int warp = static_cast<int>(threadIdx.x) >> 5;
     const int lane = static_cast<int>(threadIdx.x) & 31;
+    __shared__ int offsets[kMaxExperts + 1];
+    for (int i = static_cast<int>(threadIdx.x); i <= args.experts; i += Cfg::kThreads) {
+        offsets[i] = args.offsets[i];
+    }
 
     if (warp == 0 && lane == 0) {
         sm::tma_prefetch_descriptor(&a_map);
@@ -196,20 +205,8 @@ __global__ __launch_bounds__(Cfg::kThreads, 1) void grouped_gemm_kernel(
         TileInfo t;
         int stage           = 0;
         std::uint32_t phase = 0;
-        for (int tile = static_cast<int>(blockIdx.x); next_tile<TileN>(cursor, tile, args, t);
+        for (int tile = static_cast<int>(blockIdx.x); next_tile<TileN>(cursor, tile, args, offsets, t);
              tile += static_cast<int>(gridDim.x)) {
-            int rows[4] = {0, 0, 0, 0};
-            if constexpr (Source == BSource::Gather) {
-                // Lane j gathers token rows 4j..4j+3 of the tile. Rows past the expert's last
-                // token repeat its first one: they feed discarded accumulator columns.
-                if (lane < TileN / 4) {
-#pragma unroll
-                    for (int j = 0; j < 4; ++j) {
-                        const int i = lane * 4 + j;
-                        rows[j]     = args.assignments[t.start + (i < t.valid ? i : 0)] / args.top_k;
-                    }
-                }
-            }
             for (int kb = 0; kb < args.k_iters; ++kb) {
                 sm::mbarrier_wait(&empty[stage], phase ^ 1u);
                 if (lane == 0) sm::mbarrier_arrive_expect_tx(&full[stage], kTmaBytes);
@@ -226,15 +223,8 @@ __global__ __launch_bounds__(Cfg::kThreads, 1) void grouped_gemm_kernel(
                                       args.a_scales + t.expert * args.a_scale_stride + atom * 512,
                                       Cfg::kScaleStageBytes, &full[stage]);
                     }
-                    if constexpr (Source == BSource::Contiguous)
-                        sm::tma_load_tile_2d(shared.b(stage), &b_map, kb * Cfg::kBoxInner,
-                                             t.start, &full[stage], input_hint);
-                }
-                if constexpr (Source == BSource::Gather) {
-                    if (lane < TileN / 4)
-                        tma_gather4(shared.b(stage) + lane * 4 * Cfg::kSlabBytes, &b_map,
-                                    kb * Cfg::kBoxInner, rows[0], rows[1], rows[2], rows[3],
-                                    &full[stage], input_hint);
+                    sm::tma_load_tile_2d(shared.b(stage), &b_map, kb * Cfg::kBoxInner, t.start,
+                                         &full[stage], input_hint);
                 }
                 __syncwarp();
                 if (++stage == Cfg::kStages) {
@@ -247,47 +237,59 @@ __global__ __launch_bounds__(Cfg::kThreads, 1) void grouped_gemm_kernel(
         // ---- Activation scale loader ----
         // Rewrites the token-major scale rows (16 bytes = one 256-wide K stage per token) into
         // the K16M128x4 atoms: atom j holds groups 4j..4j+3, and token i sits at row i % 32,
-        // word i / 32.
-        constexpr int R = (TileN + 31) / 32;
+        // word i / 32. The rows of the next kAhead stages are loaded before the slot they fill is
+        // free, so a stage waits for its slot, not for a global load.
+        constexpr int R      = (TileN + 31) / 32;
+        constexpr int kAhead = 4;
         TileCursor cursor;
         TileInfo t;
         int stage           = 0;
         std::uint32_t phase = 0;
-        for (int tile = static_cast<int>(blockIdx.x); next_tile<TileN>(cursor, tile, args, t);
+        for (int tile = static_cast<int>(blockIdx.x); next_tile<TileN>(cursor, tile, args, offsets, t);
              tile += static_cast<int>(gridDim.x)) {
             std::int64_t row[R];
 #pragma unroll
             for (int r = 0; r < R; ++r) {
                 const int i = lane + 32 * r;
-                const int p = t.start + (i < t.valid ? i : 0);
-                row[r]      = Source == BSource::Gather ? args.assignments[p] / args.top_k : p;
+                row[r]      = t.start + (i < t.valid ? i : 0);
             }
-            for (int kb = 0; kb < args.k_iters; ++kb) {
-                sm::mbarrier_wait(&empty[stage], phase ^ 1u);
-                unsigned char* atoms = shared.sfb(stage);
-                uint4 value[R];
+            const auto load_scales = [&](int kb, uint4 (&value)[R]) {
 #pragma unroll
                 for (int r = 0; r < R; ++r)
                     if (lane + 32 * r < TileN)
                         value[r] = *reinterpret_cast<const uint4*>(
                             args.b_scales + row[r] * args.b_scale_row_bytes + kb * 16);
+            };
+            uint4 pending[kAhead][R];
 #pragma unroll
-                for (int r = 0; r < R; ++r) {
-                    const int i = lane + 32 * r;
-                    if (i < TileN) {
-                        unsigned char* word = atoms + (i & 31) * 16 + (i >> 5) * 4;
-                        *reinterpret_cast<unsigned*>(word)        = value[r].x;
-                        *reinterpret_cast<unsigned*>(word + 512)  = value[r].y;
-                        *reinterpret_cast<unsigned*>(word + 1024) = value[r].z;
-                        *reinterpret_cast<unsigned*>(word + 1536) = value[r].w;
+            for (int d = 0; d < kAhead; ++d)
+                if (d < args.k_iters) load_scales(d, pending[d]);
+            for (int kb = 0; kb < args.k_iters; kb += kAhead) {
+#pragma unroll
+                for (int d = 0; d < kAhead; ++d) {
+                    if (kb + d < args.k_iters) {
+                        sm::mbarrier_wait(&empty[stage], phase ^ 1u);
+                        unsigned char* atoms = shared.sfb(stage);
+#pragma unroll
+                        for (int r = 0; r < R; ++r) {
+                            const int i = lane + 32 * r;
+                            if (i < TileN) {
+                                unsigned char* word = atoms + (i & 31) * 16 + (i >> 5) * 4;
+                                *reinterpret_cast<unsigned*>(word)        = pending[d][r].x;
+                                *reinterpret_cast<unsigned*>(word + 512)  = pending[d][r].y;
+                                *reinterpret_cast<unsigned*>(word + 1024) = pending[d][r].z;
+                                *reinterpret_cast<unsigned*>(word + 1536) = pending[d][r].w;
+                            }
+                        }
+                        sm::fence_proxy_async_shared();
+                        __syncwarp();
+                        if (lane == 0) sm::mbarrier_arrive(&full[stage]);
+                        if (++stage == Cfg::kStages) {
+                            stage = 0;
+                            phase ^= 1u;
+                        }
+                        if (kb + d + kAhead < args.k_iters) load_scales(kb + d + kAhead, pending[d]);
                     }
-                }
-                sm::fence_proxy_async_shared();
-                __syncwarp();
-                if (lane == 0) sm::mbarrier_arrive(&full[stage]);
-                if (++stage == Cfg::kStages) {
-                    stage = 0;
-                    phase ^= 1u;
                 }
             }
         }
@@ -302,7 +304,7 @@ __global__ __launch_bounds__(Cfg::kThreads, 1) void grouped_gemm_kernel(
             int acc                 = 0;
             std::uint32_t acc_phase = 0;
             std::uint32_t k_count   = 0;
-            for (int tile = static_cast<int>(blockIdx.x); next_tile<TileN>(cursor, tile, args, t);
+            for (int tile = static_cast<int>(blockIdx.x); next_tile<TileN>(cursor, tile, args, offsets, t);
                  tile += static_cast<int>(gridDim.x)) {
                 sm::mbarrier_wait(&acc_empty[acc], acc_phase ^ 1u);
                 sm::fence_after_thread_sync();
@@ -360,15 +362,30 @@ __global__ __launch_bounds__(Cfg::kThreads, 1) void grouped_gemm_kernel(
         }
     } else if (warp >= 4) {
         // ---- Epilogue warps ----
-        const int q             = warp - 4;
+        using Ahead             = typename Epilogue::template Ahead<Cfg>;
+        constexpr int kSlices   = Cfg::kEpilogueWarps / 4;
+        constexpr int kSliceCols = TileN / kSlices;
+        static_assert(kSliceCols % 16 == 0);
+        const int ew            = warp - 4;
+        const int q             = ew & 3;
+        const int col_begin     = (ew >> 2) * kSliceCols;
         int acc                 = 0;
         std::uint32_t acc_phase = 0;
         TileCursor cursor;
-        TileInfo t;
-        for (int tile = static_cast<int>(blockIdx.x); next_tile<TileN>(cursor, tile, args, t);
-             tile += static_cast<int>(gridDim.x)) {
+        TileInfo t, upcoming;
+        Ahead ahead{};
+        bool more = next_tile<TileN>(cursor, static_cast<int>(blockIdx.x), args, offsets, upcoming);
+        if (more) {
+            ahead = epilogue.template fetch<Cfg>(upcoming, lane);
+            epilogue.template settle<Cfg>(ahead, upcoming, lane);
+        }
+        for (int tile = static_cast<int>(blockIdx.x); more; tile += static_cast<int>(gridDim.x)) {
+            t    = upcoming;
+            more = next_tile<TileN>(cursor, tile + static_cast<int>(gridDim.x), args, offsets, upcoming);
             sm::mbarrier_wait(&acc_full[acc], acc_phase);
             sm::fence_after_thread_sync();
+            Ahead following{};
+            if (more) following = epilogue.template fetch<Cfg>(upcoming, lane);
             const GroupTile g{sm::tmem_address(tmem_base, q * 32, acc * Cfg::kAccCols),
                               Cfg::kTileN,
                               t.expert,
@@ -377,8 +394,14 @@ __global__ __launch_bounds__(Cfg::kThreads, 1) void grouped_gemm_kernel(
                               t.valid,
                               q,
                               lane,
-                              shared.scratch(q)};
-            epilogue.template drain<Cfg>(g);
+                              shared.scratch(ew),
+                              col_begin,
+                              col_begin + kSliceCols};
+            epilogue.template drain<Cfg>(g, ahead);
+            if (more) {
+                epilogue.template settle<Cfg>(following, upcoming, lane);
+                ahead = following;
+            }
             sm::fence_before_thread_sync();
             __syncwarp();
             if (lane == 0) sm::mbarrier_arrive(&acc_empty[acc]);
@@ -414,58 +437,86 @@ struct GateUpEpilogue {
     int intermediate;
 
     template <class Cfg>
-    __device__ __forceinline__ void drain(const GroupTile& t) const {
+    struct Ahead {
+        float factor; // fetch: the expert's matrix scalar; settle: reciprocal output scale
+    };
+
+    template <class Cfg>
+    __device__ __forceinline__ Ahead<Cfg> fetch(const TileInfo& t, int /*lane*/) const {
+        return {matrix_scales[t.expert * matrix_scale_stride]};
+    }
+
+    template <class Cfg>
+    __device__ __forceinline__ void settle(Ahead<Cfg>& a, const TileInfo& /*t*/,
+                                           int /*lane*/) const {
+        a.factor = 1.0F / (activation_divisor * a.factor);
+    }
+
+    // The TMEM loads of the next 16-token chunk are in flight while this one is computed.
+    template <class Cfg>
+    __device__ __forceinline__ void drain(const GroupTile& t, const Ahead<Cfg>& a) const {
         static_assert(Cfg::kParts == 2);
-        const float factor =
-            1.0F / (activation_divisor * matrix_scales[t.expert * matrix_scale_stride]);
+        const int end = min(t.valid, t.col_end);
+        if (t.col_begin >= end) return;
+        std::uint32_t gate0[16], up0[16], gate1[16], up1[16];
+        const auto load = [&](int c0, std::uint32_t (&gate)[16], std::uint32_t (&up)[16]) {
+            sm::tmem_load_32x32b<16>(t.tmem + c0, gate);
+            sm::tmem_load_32x32b<16>(t.tmem + t.part_stride + c0, up);
+        };
+        load(t.col_begin, gate0, up0);
+        for (int c0 = t.col_begin; c0 < end; c0 += 32) {
+            sm::tmem_load_wait();
+            if (c0 + 16 < end) load(c0 + 16, gate1, up1);
+            quantize_chunk<Cfg>(t, a.factor, gate0, up0, c0);
+            if (c0 + 16 >= end) break;
+            sm::tmem_load_wait();
+            if (c0 + 32 < end) load(c0 + 32, gate0, up0);
+            quantize_chunk<Cfg>(t, a.factor, gate1, up1, c0 + 16);
+        }
+    }
+
+private:
+    template <class Cfg>
+    __device__ __forceinline__ void quantize_chunk(const GroupTile& t, float factor,
+                                                   const std::uint32_t (&gate)[16],
+                                                   const std::uint32_t (&up)[16], int c0) const {
         // 16 tokens x 32 features of FP32, bank-conflict free through an xor on the feature.
         auto* stage         = reinterpret_cast<float*>(t.scratch);
         const int feature0  = t.m * Cfg::kTileM + t.warp_q * 32;
         const int reader    = t.lane & 15; // token column this lane quantizes
         const int group     = t.lane >> 4; // which 16 features of the warp's 32
-        for (int c0 = 0; c0 < t.valid; c0 += 16) {
-            std::uint32_t gate[16], up[16];
-            sm::tmem_load_32x32b<16>(t.tmem + c0, gate);
-            sm::tmem_load_32x32b<16>(t.tmem + t.part_stride + c0, up);
-            sm::tmem_load_wait();
 #pragma unroll
-            for (int i = 0; i < 16; ++i) {
-                const float g = __uint_as_float(gate[i]) * factor;
-                const float u = __uint_as_float(up[i]) * factor;
-                stage[i * 32 + (t.lane ^ i)] = common::silu(g) * u;
-            }
-            __syncwarp();
-            const int column = c0 + reader;
-            if (column < t.valid) {
-                float h[16];
-                float maximum = 0.0F;
-#pragma unroll
-                for (int f = 0; f < 16; ++f) {
-                    h[f]    = stage[reader * 32 + ((group * 16 + f) ^ reader)];
-                    maximum = fmaxf(maximum, fabsf(h[f]));
-                }
-                const std::uint8_t scale = common::nvfp4_activation_scale(maximum, product_divisor);
-                std::uint32_t word[2]    = {0, 0};
-#pragma unroll
-                for (int k = 0; k < 8; ++k) {
-                    const std::uint32_t code = common::quantize_nvfp4_activation_pair(
-                        make_float2(h[2 * k], h[2 * k + 1]), product_divisor, scale);
-                    word[k >> 2] |= code << (8 * (k & 3));
-                }
-                const std::int64_t slot = t.start + column;
-                const int feature       = feature0 + group * 16;
-                *reinterpret_cast<uint2*>(codes + slot * (intermediate / 2) + feature / 2) =
-                    make_uint2(word[0], word[1]);
-                scales[slot * (intermediate / 16) + feature / 16] = scale;
-            }
-            __syncwarp();
+        for (int i = 0; i < 16; ++i) {
+            const float g = __uint_as_float(gate[i]) * factor;
+            const float u = __uint_as_float(up[i]) * factor;
+            stage[i * 32 + (t.lane ^ i)] = common::silu_approx(g) * u;
         }
+        __syncwarp();
+        const int column = c0 + reader;
+        if (column < t.valid) {
+            float2 h[8];
+#pragma unroll
+            for (int p = 0; p < 8; ++p) {
+                h[p].x = stage[reader * 32 + ((group * 16 + 2 * p) ^ reader)];
+                h[p].y = stage[reader * 32 + ((group * 16 + 2 * p + 1) ^ reader)];
+            }
+            const auto q            = common::quantize_nvfp4_k16(h, product_divisor);
+            const std::int64_t slot = t.start + column;
+            const int feature       = feature0 + group * 16;
+            *reinterpret_cast<uint2*>(codes + slot * (intermediate / 2) + feature / 2) =
+                make_uint2(q.codes_lo, q.codes_hi);
+            scales[slot * (intermediate / 16) + feature / 16] = q.scale;
+        }
+        __syncwarp();
     }
 };
 
 // Down: out[token, row] += coefficient * (acc * factor) (Atomic, into the per-token FP32 sum), or
-// contributions[slot, row] = acc * factor (ordered reduction by the caller). Lane = output row, so
-// both forms write 32 consecutive floats per column.
+// contributions[slot, row] = acc * factor (ordered reduction by the caller). Lane = output row.
+// The ordered form writes 32 consecutive floats per column. The atomic form transposes 16
+// columns through shared memory so that each lane reduces four consecutive rows of one token
+// with a single vector reduction: the L2 atomic unit takes the same number of instructions
+// whatever their width, and the scalar form was bound by them.
 template <bool Atomic>
 struct DownEpilogue {
     float* sum;           // [tokens][hidden] (Atomic)
@@ -477,38 +528,94 @@ struct DownEpilogue {
     float activation_divisor; // divisor of the product quantization (down input)
     int hidden, top_k;
 
+    // Lane j holds the route of column j + 32 r of the tile.
     template <class Cfg>
-    __device__ __forceinline__ void drain(const GroupTile& t) const {
-        static_assert(Cfg::kParts == 1);
-        const float factor =
-            1.0F / (activation_divisor * matrix_scales[t.expert * matrix_scale_stride]);
-        const int row = t.m * Cfg::kTileM + t.warp_q * 32 + t.lane;
-        constexpr int C = Cfg::kTileN >= 32 ? 32 : Cfg::kTileN;
-        for (int c0 = 0; c0 < t.valid; c0 += C) {
-            std::uint32_t r[C];
-            sm::tmem_load_32x32b<C>(t.tmem + c0, r);
-            int token = 0;
-            float coefficient = 0.0F;
-            if constexpr (Atomic) {
-                if (t.lane < C && c0 + t.lane < t.valid) {
-                    const int assignment = assignments[t.start + c0 + t.lane];
-                    token                = assignment / top_k;
-                    coefficient          = coefficients[assignment];
-                }
-            }
-            sm::tmem_load_wait();
+    struct Ahead {
+        static constexpr int kRoutes = (Cfg::kTileN + 31) / 32;
+        int assignment[kRoutes]; // set by fetch
+        int token[kRoutes];      // set by settle
+        float coefficient[kRoutes];
+        float factor; // fetch: the expert's matrix scalar; settle: reciprocal output scale
+    };
+
+    template <class Cfg>
+    __device__ __forceinline__ Ahead<Cfg> fetch(const TileInfo& t, int lane) const {
+        Ahead<Cfg> a{};
+        if constexpr (Atomic) {
 #pragma unroll
-            for (int i = 0; i < C; ++i) {
-                if (c0 + i < t.valid) {
-                    const float value = __uint_as_float(r[i]) * factor;
-                    if constexpr (Atomic) {
-                        const int target_token = __shfl_sync(0xffffffffu, token, i);
-                        const float weight     = __shfl_sync(0xffffffffu, coefficient, i);
-                        atomicAdd(sum + static_cast<std::int64_t>(target_token) * hidden + row,
-                                  value * weight);
-                    } else {
+            for (int r = 0; r < Ahead<Cfg>::kRoutes; ++r) {
+                const int column = lane + 32 * r;
+                a.assignment[r]  = column < t.valid ? assignments[t.start + column] : 0;
+            }
+        }
+        a.factor = matrix_scales[t.expert * matrix_scale_stride];
+        return a;
+    }
+
+    template <class Cfg>
+    __device__ __forceinline__ void settle(Ahead<Cfg>& a, const TileInfo& t, int lane) const {
+        if constexpr (Atomic) {
+#pragma unroll
+            for (int r = 0; r < Ahead<Cfg>::kRoutes; ++r) {
+                const int assignment = a.assignment[r];
+                a.coefficient[r]     = lane + 32 * r < t.valid ? coefficients[assignment] : 0.0F;
+                a.token[r]           = assignment / top_k;
+            }
+        }
+        a.factor = 1.0F / (activation_divisor * a.factor);
+    }
+
+    // The TMEM load of the next 16-column chunk is in flight while this one is reduced.
+    template <class Cfg>
+    __device__ __forceinline__ void drain(const GroupTile& t, const Ahead<Cfg>& a) const {
+        static_assert(Cfg::kParts == 1 && Cfg::kTileN % 16 == 0);
+        constexpr int kChunks = Cfg::kTileN / 16 / (Cfg::kEpilogueWarps / 4);
+        const int row0        = t.m * Cfg::kTileM + t.warp_q * 32;
+        auto* stage           = reinterpret_cast<float*>(t.scratch);
+        if (t.col_begin >= t.valid) return;
+        std::uint32_t r[2][16];
+        sm::tmem_load_32x32b<16>(t.tmem + t.col_begin, r[0]);
+#pragma unroll
+        for (int chunk = 0; chunk < kChunks; ++chunk) {
+            const int c0 = t.col_begin + chunk * 16;
+            if (c0 >= t.valid) break;
+            sm::tmem_load_wait();
+            if (chunk + 1 < kChunks && c0 + 16 < t.valid)
+                sm::tmem_load_32x32b<16>(t.tmem + c0 + 16, r[(chunk + 1) & 1]);
+            if constexpr (Atomic) {
+                // stage[column][row], rows in groups of four xor-swizzled by the column so both the
+                // lane-per-row writes and the four-rows-per-lane reads are bank-conflict free.
+                const int group = t.lane >> 2; // four consecutive rows
+                const int quad  = t.lane & 3;  // which of the four columns of a round
+#pragma unroll
+                for (int i = 0; i < 16; ++i)
+                    stage[i * 32 + (((group ^ ((i & 3) << 1)) << 2) | (t.lane & 3))] =
+                        __uint_as_float(r[chunk & 1][i]);
+                __syncwarp();
+#pragma unroll
+                for (int round = 0; round < 4; ++round) {
+                    const int column = c0 + 4 * round + quad;
+                    const float4 v   = *reinterpret_cast<const float4*>(
+                        stage + (4 * round + quad) * 32 + ((group ^ (quad << 1)) << 2));
+                    const int route    = (c0 + 4 * round) >> 5;
+                    const int source   = column & 31;
+                    const int token    = __shfl_sync(0xffffffffu, a.token[route], source);
+                    const float weight = __shfl_sync(0xffffffffu, a.coefficient[route], source);
+                    if (column < t.valid) {
+                        red_add_v4(sum + static_cast<std::int64_t>(token) * hidden + row0 +
+                                       4 * group,
+                                   v.x * a.factor * weight, v.y * a.factor * weight,
+                                   v.z * a.factor * weight, v.w * a.factor * weight);
+                    }
+                }
+                __syncwarp();
+            } else {
+                const int row = row0 + t.lane;
+#pragma unroll
+                for (int i = 0; i < 16; ++i) {
+                    if (c0 + i < t.valid) {
                         contributions[static_cast<std::int64_t>(t.start + c0 + i) * hidden + row] =
-                            value;
+                            __uint_as_float(r[chunk & 1][i]) * a.factor;
                     }
                 }
             }
@@ -549,15 +656,16 @@ inline int device_sm_count() {
 }
 
 // Launches one persistent CTA per SM (never more than there can be tiles).
-template <class Cfg, BSource Source, class Epilogue>
+template <class Cfg, class Epilogue>
 void launch_grouped(const CUtensorMap& a_map, const CUtensorMap& b_map, const GroupedArgs& args,
                     const Epilogue& epilogue, int assignments, cudaStream_t stream) {
+    if (args.experts > kMaxExperts) throw std::runtime_error("moe tcgen05: too many experts");
     static bool configured[64] = {};
     int device                 = 0;
     CUDA_CHECK(cudaGetDevice(&device));
     if (device < 0 || device >= 64) throw std::runtime_error("moe tcgen05: device ordinal");
     if (!configured[device]) {
-        CUDA_CHECK(cudaFuncSetAttribute(grouped_gemm_kernel<Cfg, Source, Epilogue>,
+        CUDA_CHECK(cudaFuncSetAttribute(grouped_gemm_kernel<Cfg, Epilogue>,
                                         cudaFuncAttributeMaxDynamicSharedMemorySize,
                                         Cfg::kSharedBytes));
         configured[device] = true;
@@ -565,7 +673,7 @@ void launch_grouped(const CUtensorMap& a_map, const CUtensorMap& b_map, const Gr
     // Sum of ceil(count_e / TileN) over experts is at most A / TileN + experts.
     const int max_tiles = args.tiles_m * (assignments / Cfg::kTileN + args.experts);
     const int grid      = sm::persistent_grid(max_tiles, device_sm_count());
-    grouped_gemm_kernel<Cfg, Source, Epilogue>
+    grouped_gemm_kernel<Cfg, Epilogue>
         <<<grid, Cfg::kThreads, Cfg::kSharedBytes, stream>>>(a_map, b_map, args, epilogue);
     CUDA_CHECK(cudaGetLastError());
 }

@@ -61,7 +61,8 @@ int main() {
     expect(throws_invalid(1000, 262144), "chunk 1000 rejected");
 
     // Segment descriptors: consecutive segments of unequal lengths (incl. 1) are expressible.
-    const x::SequenceSegment segs[] = {{0, 0, 1, 0, 64}, {1, 1, 300, 128, 192}, {2, 301, 2048, 256, 320}};
+    const x::SequenceSegment segs[] = {
+        {0, 0, 1, 0, 64, 1}, {1, 1, 300, 128, 192, 300}, {2, 301, 2048, 256, 320, 2048}};
     x::PackedSequenceUpdate up{std::span<const x::SequenceSegment>(segs)};
     x::TextStateUpdate u = up;
     expect(std::holds_alternative<x::PackedSequenceUpdate>(u), "variant holds packed update");

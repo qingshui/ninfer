@@ -17,6 +17,7 @@
 #include <optional>
 #include <span>
 #include <stdexcept>
+#include <tuple>
 #include <unordered_set>
 #include <unordered_map>
 #include <utility>
@@ -111,6 +112,65 @@ public:
 
     [[nodiscard]] const PrefixCacheStatistics& statistics() const noexcept {
         return index_.statistics();
+    }
+
+    // Points kept for later requests to adopt: the shared prefixes and the finished lineages.
+    [[nodiscard]] std::size_t retained_points() const {
+        std::size_t count = shared_.size();
+        for (const auto& owner : owners_) {
+            if (!owner.active) { count += owner.points.size(); }
+        }
+        return count;
+    }
+
+    // Releases retained points, least worth first, until at most `target` remain. Each holds a
+    // full context state, and a pool they fill leaves an admission to reclaim, and relocate
+    // records, before it can start; the caller decides how many the pool can spare. A point a
+    // waiting admission holds, or one a transfer still leases, stays; the next call tries again.
+    void trim_retained(Session& session, std::size_t target) {
+        while (retained_points() > target) {
+            std::optional<Worth> worst;
+            Owner* lineage = nullptr;
+            std::optional<Handle> prefix;
+            for (auto& owner : owners_) {
+                if (owner.active || owner.points.empty()) { continue; }
+                if (std::any_of(owner.points.begin(), owner.points.end(),
+                                [&](const auto& point) { return held_by_waiting(point.handle); })) {
+                    continue;
+                }
+                const Worth worth{owner.session.has_value(),
+                                  owner.priority.at(request_epoch_).reused(), false,
+                                  owner.retained_at};
+                if (!worst || worth < *worst) {
+                    worst   = worth;
+                    lineage = &owner;
+                    prefix.reset();
+                }
+            }
+            for (const auto& entry : shared_) {
+                if (held_by_waiting(entry.handle)) { continue; }
+                const Worth worth{false, entry.priority.at(request_epoch_).reused(), true,
+                                  entry.retained_at};
+                if (!worst || worth < *worst) {
+                    worst   = worth;
+                    lineage = nullptr;
+                    prefix  = entry.handle;
+                }
+            }
+            if (!worst) { return; }
+            if (lineage) {
+                std::vector<Handle> handles;
+                for (const auto& point : lineage->points) { handles.push_back(point.handle); }
+                for (const auto handle : handles) {
+                    if (!remove_point(session, *lineage, handle)) { return; }
+                }
+                std::erase_if(owners_, [](const auto& owner) {
+                    return !owner.active && owner.points.empty();
+                });
+            } else if (!remove_shared(session, *prefix)) {
+                return;
+            }
+        }
     }
 
     [[nodiscard]] const ReclaimPlanningStats& planning_stats() const noexcept { return stats_; }
@@ -1203,11 +1263,42 @@ private:
             touch();
     }
 
+    bool held_by_waiting(Handle handle) const {
+        return std::any_of(waiting_.begin(), waiting_.end(),
+                           [&](const auto& waiting) { return contains(waiting.held, handle); });
+    }
+
+    // What a retained point is worth keeping, least first: a point no session points to goes
+    // before the latest of a session, one no request adopted before one that was, a finished
+    // lineage before a shared prefix, then the oldest.
+    struct Worth {
+        bool session;
+        bool reused;
+        bool shared;
+        std::uint64_t retained_at;
+        bool operator<(const Worth& other) const {
+            return std::tie(session, reused, shared, retained_at) <
+                   std::tie(other.session, other.reused, other.shared, other.retained_at);
+        }
+    };
+
+    bool remove_shared(Session& session, Handle handle) {
+        touch();
+        if (reference_count(handle) == 1 && session.valid_checkpoint(handle) &&
+            !session.release_checkpoint(handle)) {
+            return false;
+        }
+        std::erase_if(shared_, [&](const auto& entry) { return entry.handle == handle; });
+        if (!catalog_reference_count(handle)) { index_.erase(handle); }
+        return true;
+    }
+
     struct RankedVictim {
         Handle handle;
         CacheRetentionPriority priority;
         std::uint64_t age;
         SharedCandidateEvidence evidence = SharedCandidateEvidence::None;
+        std::uint32_t frontier           = 0;
     };
 
     std::vector<RankedVictim> ranked_victims(Session& session) const {
@@ -1216,11 +1307,12 @@ private:
         const auto add = [&](Handle handle, CacheRetentionPriority priority, std::uint64_t age,
                              SharedCandidateEvidence evidence = SharedCandidateEvidence::None) {
             if (!session.valid_checkpoint(handle)) return;
-            evidence |= session.checkpoint_metadata(handle).evidence;
+            const auto metadata = session.checkpoint_metadata(handle);
+            evidence |= metadata.evidence;
             auto& position = positions[handle.index];
             if (position == SIZE_MAX) {
                 position = ranked.size();
-                ranked.push_back({handle, priority, age, evidence});
+                ranked.push_back({handle, priority, age, evidence, metadata.frontier});
                 return;
             }
             auto& prior = ranked[position];
@@ -1229,7 +1321,7 @@ private:
                 (priority.reused() == prior.priority.reused() &&
                  (priority.reused() ? priority.last_demand > prior.priority.last_demand
                                     : age > prior.age)))
-                prior = {handle, priority, age, prior.evidence};
+                prior = {handle, priority, age, prior.evidence, metadata.frontier};
         };
         for (const auto& owner : owners_)
             for (const auto& point : owner.points)
@@ -1262,15 +1354,22 @@ private:
 
     [[nodiscard]] ReclaimCursor reclaim_order(Session& session) const {
         ReclaimCursor cursor;
-        for (const auto& entry : ranked_victims(session)) {
-            const auto frontier = session.checkpoint_metadata(entry.handle).frontier;
+        const auto ranked = ranked_victims(session);
+        cursor.victims.reserve(ranked.size());
+        for (const auto& entry : ranked) {
             cursor.victims.push_back(
                 {entry.handle, entry.priority,
-                 demand_priority(session.checkpoint_key(entry.handle, frontier)), entry.evidence});
+                 demand_priority(session.checkpoint_key(entry.handle, entry.frontier)),
+                 entry.evidence});
         }
-        for (const auto& owner : owners_)
-            cursor.owners.push_back({owner.token, owner.priority.at(request_epoch_),
-                                     owner.proven_frontier, points(owner.token)});
+        cursor.owners.reserve(owners_.size());
+        for (const auto& owner : owners_) {
+            cursor.owners.push_back(
+                {owner.token, owner.priority.at(request_epoch_), owner.proven_frontier, {}});
+            auto& protection = cursor.owners.back();
+            protection.points.reserve(owner.points.size());
+            for (const auto& point : owner.points) protection.points.push_back(point.handle);
+        }
         return cursor;
     }
 

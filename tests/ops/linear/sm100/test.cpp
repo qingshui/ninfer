@@ -9,6 +9,7 @@
 
 #include "ops/linear/backend.h"
 #include "ops/linear/kernels/sm100/gemm.h"
+#include "ops/float_codec.h"
 #include "ops/op_tester.h"
 #include "ops/suite.h"
 
@@ -177,18 +178,18 @@ int nvfp4_case(int kind, int tokens) {
                           });
 }
 
-int bf16_case(int kind, int tokens) {
-    constexpr int kRows = 1536, kK = 1024;
-    std::vector<float> w(static_cast<std::size_t>(kRows) * kK),
-        x(static_cast<std::size_t>(tokens) * kK);
+int bf16_case(int kind, int tokens, int k = 1024) {
+    constexpr int kRows = 1536;
+    std::vector<float> w(static_cast<std::size_t>(kRows) * k),
+        x(static_cast<std::size_t>(tokens) * k);
     fill_uniform(w, 21U, -1.F, 1.F);
     fill_uniform(x, 22U, -1.F, 1.F);
     round_to_bf16(w);
     round_to_bf16(x);
-    const auto acc = contract(w, x, kRows, kK, tokens);
+    const auto acc = contract(w, x, kRows, k, tokens);
     const auto dw = to_device_bf16(w), dx = to_device_bf16(x);
     const Sm100Bf16Operands operands{static_cast<const __nv_bfloat16*>(dx.data()),
-                                     static_cast<const __nv_bfloat16*>(dw.data()), kRows, kK,
+                                     static_cast<const __nv_bfloat16*>(dw.data()), kRows, k,
                                      tokens};
     return check_epilogue(std::string("sm100 bf16 ") + kind_name(kind) + " t" +
                               std::to_string(tokens),
@@ -198,7 +199,54 @@ int bf16_case(int kind, int tokens) {
                           });
 }
 
-// The four registered 122B shapes run on tcgen05 at every token count; nothing else does.
+// E4M3 codes drawn over the finite range with one FP32 scale per row; the dequantized values
+// stay within [-1, 1] so the contraction is comparable with the BF16 cases.
+struct Fp8Matrix {
+    std::vector<std::uint8_t> codes; // [rows, k]
+    std::vector<float> scales;       // [rows]
+    std::vector<float> dequantized;  // [rows, k]
+};
+
+Fp8Matrix make_fp8(int rows, int k, std::uint32_t seed) {
+    std::mt19937 rng(seed);
+    std::uniform_real_distribution<float> unit(-1.F, 1.F), magnitude(0.25F, 1.F);
+    Fp8Matrix m;
+    m.codes.resize(static_cast<std::size_t>(rows) * k);
+    m.dequantized.resize(m.codes.size());
+    m.scales.resize(rows);
+    for (int r = 0; r < rows; ++r) {
+        m.scales[r] = magnitude(rng) / 448.F;
+        for (int c = 0; c < k; ++c) {
+            const std::size_t index = static_cast<std::size_t>(r) * k + c;
+            m.codes[index]          = float_codec::encode_e4m3fn_rne_satfinite(unit(rng) * 448.F);
+            m.dequantized[index]    = float_codec::decode_e4m3fn(m.codes[index]) * m.scales[r];
+        }
+    }
+    return m;
+}
+
+int fp8_case(int kind, int tokens, int k = 1024) {
+    constexpr int kRows = 1536;
+    const Fp8Matrix w = make_fp8(kRows, k, 31U), x = make_fp8(tokens, k, 32U);
+    const auto acc    = contract(w.dequantized, x.dequantized, kRows, k, tokens);
+    const auto wc = to_device(w.codes), ws = to_device(w.scales), xc = to_device(x.codes),
+               xs = to_device(x.scales);
+    const Sm100Fp8Operands operands{static_cast<const std::uint8_t*>(xc.data()),
+                                    static_cast<const float*>(xs.data()),
+                                    static_cast<const std::uint8_t*>(wc.data()),
+                                    static_cast<const float*>(ws.data()),
+                                    kRows,
+                                    k,
+                                    tokens};
+    return check_epilogue(std::string("sm100 fp8 ") + kind_name(kind) + " t" +
+                              std::to_string(tokens),
+                          kind, acc, kRows, tokens, 1.0, {0.05, 0.01},
+                          [&](const Sm100Epilogue& e, __nv_bfloat16* y) {
+                              launch_sm100_fp8_gemm(operands, e, y, nullptr);
+                          });
+}
+
+// The registered 122B shapes run on tcgen05 at every token count; nothing else does.
 int routing_case() {
     int failures = 0;
     const auto expect = [&](QType type, int n, int k, int tokens, LinearBackend backend) {
@@ -213,7 +261,13 @@ int routing_case() {
         expect(QType::NVFP4, 17408, 3072, t, LinearBackend::Tcgen05);
         expect(QType::BF16, 20480, 3072, t, LinearBackend::Tcgen05);
         expect(QType::BF16, 3072, 8192, t, LinearBackend::Tcgen05);
+        expect(QType::FP8_E4M3FN_ROW_FP32, 20480, 3072, t, LinearBackend::Tcgen05);
+        expect(QType::FP8_E4M3FN_ROW_FP32, 3072, 8192, t, LinearBackend::Tcgen05);
+        expect(QType::FP8_E4M3FN_ROW_BF16, 20480, 3072, t,
+               t == 1 ? LinearBackend::Gemv : LinearBackend::MmaSync);
         expect(QType::NVFP4, 5120, 6144, t, t == 1 ? LinearBackend::Gemv : LinearBackend::MmaSync);
+        expect(QType::BF16, 248320, 3072, t, LinearBackend::Tcgen05);
+        expect(QType::BF16, 248320, 2560, t, t == 1 ? LinearBackend::Gemv : LinearBackend::MmaSync);
         expect(QType::Q8_G32_FP16, 248320, 3072, t,
                t == 1 ? LinearBackend::Gemv : LinearBackend::MmaSync);
     }
@@ -232,5 +286,18 @@ int main(int argc, char** argv) {
             suite.add(std::string("sm100/bf16/") + kind_name(kind) + "/t" + std::to_string(tokens),
                       [=] { return bf16_case(kind, tokens); });
         }
+    // Calls of 3072 tokens and more run 256-token BF16 tiles; 3200 ends in a half tile.
+    for (int kind : {Sm100Epilogue::Identity, Sm100Epilogue::Add, Sm100Epilogue::Split})
+        suite.add(std::string("sm100/bf16/") + kind_name(kind) + "/t3200",
+                  [=] { return bf16_case(kind, 3200, 256); });
+    suite.add("sm100/bf16/identity/t3072",
+              [] { return bf16_case(Sm100Epilogue::Identity, 3072, 256); });
+    for (int kind : {Sm100Epilogue::Identity, Sm100Epilogue::Add, Sm100Epilogue::Split}) {
+        for (int tokens : {1, 17, 130, 257})
+            suite.add(std::string("sm100/fp8/") + kind_name(kind) + "/t" + std::to_string(tokens),
+                      [=] { return fp8_case(kind, tokens); });
+        suite.add(std::string("sm100/fp8/") + kind_name(kind) + "/t3200",
+                  [=] { return fp8_case(kind, 3200, 256); });
+    }
     return suite.main(argc, argv);
 }

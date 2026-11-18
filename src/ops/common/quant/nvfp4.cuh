@@ -126,8 +126,38 @@ __device__ __forceinline__ std::uint8_t quantize_nvfp4_activation_pair(float2 va
                                     __NV_E2M1, cudaRoundNearest);
 }
 
-// BF16 input, group size 16, explicit tensor divisor. Codes use the rounded E4M3
-// group scale; a scale that rounds to zero produces zero codes.
+// x / s rounded to nearest, given the reciprocal r = 1 / s that a group of values shares. One
+// correction by the exact remainder (Markstein) returns what __fdiv_rn returns whenever s is a
+// normal float whose significand is not all ones, which holds for every decoded E4M3 scale. It
+// takes three instructions per value and, unlike the division sequence, no slow-path branch.
+__device__ __forceinline__ float fdiv_rn_by_reciprocal(float x, float s, float r) {
+    const float q = x * r;
+    return fmaf(fmaf(-q, s, x), r, q);
+}
+
+// Group size 16, explicit tensor divisor. Codes use the rounded E4M3 group scale; a scale that
+// rounds to zero produces zero codes. The values are overwritten.
+__device__ __forceinline__ Nvfp4QuantizedK16 quantize_nvfp4_k16(float2 (&values)[8],
+                                                                float divisor) {
+    float maximum = 0.0F;
+#pragma unroll
+    for (int pair = 0; pair < 8; ++pair)
+        maximum = fmaxf(maximum, fmaxf(fabsf(values[pair].x), fabsf(values[pair].y)));
+    Nvfp4QuantizedK16 result{};
+    result.scale = nvfp4_activation_scale(maximum, divisor);
+    if (!result.scale) return result;
+    const float scale      = decode_e4m3(result.scale);
+    const float reciprocal = __frcp_rn(scale);
+#pragma unroll
+    for (int pair = 0; pair < 8; ++pair) {
+        values[pair].x = fdiv_rn_by_reciprocal(values[pair].x * divisor, scale, reciprocal);
+        values[pair].y = fdiv_rn_by_reciprocal(values[pair].y * divisor, scale, reciprocal);
+    }
+    pack_nvfp4_e2m1x16(values, result.codes_lo, result.codes_hi);
+    return result;
+}
+
+// BF16 input.
 __device__ __forceinline__ Nvfp4QuantizedK16 quantize_nvfp4_k16(const __nv_bfloat16* source,
                                                                 float input_scale) {
     const uint4 packed0                = load_vec<uint4>(source);
@@ -135,48 +165,19 @@ __device__ __forceinline__ Nvfp4QuantizedK16 quantize_nvfp4_k16(const __nv_bfloa
     const std::uint32_t represented[8] = {
         packed0.x, packed0.y, packed0.z, packed0.w, packed1.x, packed1.y, packed1.z, packed1.w,
     };
-
     float2 values[8];
-    float max_abs = 0.0F;
 #pragma unroll
-    for (int pair = 0; pair < 8; ++pair) {
-        values[pair] = bf16x2_bits_to_float2(represented[pair]);
-        max_abs      = fmaxf(max_abs, fabsf(values[pair].x));
-        max_abs      = fmaxf(max_abs, fabsf(values[pair].y));
-    }
-
-    Nvfp4QuantizedK16 result{};
-    result.scale = nvfp4_activation_scale(max_abs, input_scale);
-    if (result.scale == 0) { return result; }
-
-    const float decoded_scale = decode_e4m3(result.scale);
-#pragma unroll
-    for (int pair = 0; pair < 8; ++pair) {
-        values[pair] = nvfp4_activation_values(values[pair], input_scale, decoded_scale);
-    }
-    pack_nvfp4_e2m1x16(values, result.codes_lo, result.codes_hi);
-    return result;
+    for (int pair = 0; pair < 8; ++pair) values[pair] = bf16x2_bits_to_float2(represented[pair]);
+    return quantize_nvfp4_k16(values, input_scale);
 }
 
 // FP32 producer input with the same explicit calibrated tensor divisor and rounded G16 scale.
 __device__ __forceinline__ Nvfp4QuantizedK16 quantize_nvfp4_k16(const float* source,
                                                                 float divisor) {
     float2 values[8];
-    float maximum = 0.0f;
 #pragma unroll
-    for (int pair = 0; pair < 8; ++pair) {
-        values[pair] = load_vec<float2>(source + pair * 2);
-        maximum      = fmaxf(maximum, fmaxf(fabsf(values[pair].x), fabsf(values[pair].y)));
-    }
-    Nvfp4QuantizedK16 result{};
-    result.scale = nvfp4_activation_scale(maximum, divisor);
-    if (!result.scale) return result;
-    const float scale = decode_e4m3(result.scale);
-#pragma unroll
-    for (int pair = 0; pair < 8; ++pair)
-        values[pair] = nvfp4_activation_values(values[pair], divisor, scale);
-    pack_nvfp4_e2m1x16(values, result.codes_lo, result.codes_hi);
-    return result;
+    for (int pair = 0; pair < 8; ++pair) values[pair] = load_vec<float2>(source + pair * 2);
+    return quantize_nvfp4_k16(values, divisor);
 }
 
 // Native multiplier calibration: x = E2M1 * E4M3 * multiplier. The two divisions

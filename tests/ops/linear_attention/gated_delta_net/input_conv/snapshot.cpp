@@ -970,14 +970,14 @@ int run_snapshot(Weights& weights, const SnapshotCase& c) {
     if (!c.batch && p.qk_rows == 2048) {
         switch (p.format) {
         case QType::Q4_G64_FP16:
-            return run_q4_q5_case(weights.first, *weights.second, c.width, initial,
+            return run_q4_q5_case(*weights.first, *weights.second, c.width, initial,
                                   c.full_reference);
         case QType::Q8_G32_FP16:
-            return run_q8_case(weights.first, c.width, initial, c.graph);
+            return run_q8_case(*weights.first, c.width, initial, c.graph);
         case QType::NVFP4:
-            return run_nvfp4_case(weights.first, c.width, c.policy, initial);
+            return run_nvfp4_case(*weights.first, c.width, c.policy, initial);
         case QType::FP8_E4M3FN_ROW_BF16:
-            return run_fp8_case(weights.first, c.width, c.policy, initial);
+            return run_fp8_case(*weights.first, c.width, c.policy, initial);
         default:
             throw std::logic_error("unknown snapshot test format");
         }
@@ -989,6 +989,7 @@ int run_snapshot(Weights& weights, const SnapshotCase& c) {
         projection, c.batch ? c.batch : 1, c.width, c.width);
     const auto criterion =
         p.format == QType::Q8_G32_FP16 ? kQ8GdnInputProjConvSnapshotA16Tolerance
+        : p.format == QType::FP8_E4M3FN_ROW_FP32 ? kFp8GdnInputProjConvSnapshotA8Tolerance
         : p.format == QType::FP8_E4M3FN_ROW_BF16
             ? (c.policy == ops::LinearPolicy::A16Only ? kFp8GdnInputProjConvSnapshotA16Tolerance
                                                       : kFp8GdnInputProjConvSnapshotA8Tolerance)

@@ -18,6 +18,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -48,7 +49,6 @@ public:
     using ContextAssessment  = typename ModelContract::Session::ContextAssessment;
     using PrefillStart       = typename ModelContract::PrefillStart;
     using MixedStart         = typename ModelContract::MixedStart;
-    using ForkResult         = typename ModelContract::ForkResult;
     using ExecutionUnit      = typename ModelContract::ExecutionUnit;
     using UnitKind           = typename ModelContract::ExecutionUnitKind;
     using Checkpoint         = typename ModelContract::CheckpointHandle;
@@ -63,6 +63,14 @@ public:
     using ResourceManagement = ResourceManager<ModelContract>;
     using Clock              = std::chrono::steady_clock;
 
+    // A Session that declares `captures_in_flight()` writes its prefix checkpoints inside the
+    // flights that carry them and forks sample groups through `fork_batch`: neither opens a
+    // context operation, waits for the Session to rest, or occupies a helper lane, and the
+    // Engine registers the checkpoints a flight reports once it retires. A Session without the
+    // declaration keeps the capture and context-operation flows, and never forks.
+    static constexpr bool kInFlightCapture = requires(const typename ModelContract::Session& session) {
+        { session.captures_in_flight() } -> std::same_as<bool>;
+    };
     EngineCore(Instance& instance, const EngineOptions& options,
                ContextMachineCostModel context_cost)
         : instance_(instance), max_context_(options.max_context),
@@ -80,7 +88,8 @@ public:
           scheduler_(options.max_concurrency),
           control_executed_(options.max_concurrency),
           reserved_units_(options.max_concurrency),
-          current_decode_lanes_(options.max_concurrency) {
+          current_decode_lanes_(options.max_concurrency),
+          current_decode_member_(options.max_concurrency) {
         if (max_concurrency_ == 0 || max_concurrency_ > kMaximumConcurrency ||
             options.max_pending_requests == 0 || pending_timeout_.count() <= 0) {
             throw std::invalid_argument("Engine core bounds are invalid");
@@ -166,20 +175,26 @@ public:
     }
 
     // A sample group of one prepared prompt: `members` are the branch requests, each derived
-    // from the same prompt with its own sampling seed. A forking group reserves one parent lane
-    // (the hidden parent helper that prefills the shared prompt prefix) plus one child lane per
-    // member; the members hold their child lanes in the Forking state until the parent rests at
-    // the fork frontier and forks them in. A non-forking group admits its members as ordinary
-    // requests that each prefill the whole prompt.
+    // from the same prompt with its own sampling seed. When the Session can fork, one member, the
+    // `parent`, binds through the ordinary admission path and prefills the shared prompt prefix;
+    // the other members (`children`) hold their own lanes in the Forking state and take no unit
+    // until the parent rests at the fork frontier. One fork_batch per iteration then installs
+    // every ready group's children and moves the parent and the children to decoding together.
+    // A group that cannot fork admits its members as ordinary requests that each prefill the
+    // whole prompt.
     struct SampleGroup {
         std::uint64_t id = 0;
         std::vector<std::shared_ptr<Request>> members;
+        bool sealed = false;
+    };
+
+    // An engaged fork group: its parent is bound and prefills to the fork frontier, and its other
+    // branches hold the lanes `child_lanes` in the Forking state, in `children` order. Worker
+    // thread only.
+    struct ForkGroup {
         std::shared_ptr<Request> parent;
+        std::vector<std::shared_ptr<Request>> children;
         std::vector<std::uint32_t> child_lanes;
-        // `forking`: the group holds its parent helper and child lanes. `forked`: the fork
-        // installed the children and only the parent's completion may still be pending.
-        bool forking = false;
-        bool forked  = false;
     };
 
     class Submission {
@@ -268,8 +283,8 @@ public:
     // One sample group: `sample_count` branch requests of the same prepared prompt, in branch
     // order. Branch i derives its sampling seed from (the request seed, i). The branches are
     // queued consecutively and linked to one SampleGroup, so admission takes the group as a
-    // unit: a forking group gains one parent lane plus one child lane per branch together, and
-    // a non-forking group holds its lane count as its reservation floor.
+    // unit: a forking group gains one lane per branch together, and a non-forking group holds
+    // its lane count as its reservation floor.
     [[nodiscard]] std::vector<Submission>
     submit_samples(PreparedPrompt prompt, PromptSummary prompt_summary, double prepare_seconds,
                    ResolvedRequestOptions options, std::uint32_t sample_count,
@@ -278,10 +293,7 @@ public:
         if (sample_count == 0) {
             throw std::invalid_argument("sample count must be positive");
         }
-        // A forking group needs its parent helper lane beside one child lane per branch.
-        const std::uint32_t lane_capacity =
-            instance_.session->sample_fork_limit() != 0 ? max_concurrency_ - 1 : max_concurrency_;
-        if (sample_count > lane_capacity) {
+        if (sample_count > max_concurrency_) {
             throw std::invalid_argument("sample group exceeds the engine lane capacity");
         }
         const Clock::time_point submitted = Clock::now();
@@ -312,21 +324,32 @@ public:
                 ResolvedRequestOptions branch_options = options;
                 branch_options.execution.sampling.seed =
                     derive_sample_seed(options.execution.sampling.seed, branch);
+                branch_options.execution.sample_count = sample_count;
+                // Every branch of a group ends in its own context, and a later request extends at
+                // most one of them. The first branch's lineage stays: it carries the prompt's
+                // checkpoints. The rest end with their request and hold no cache space.
+                branch_options.execution.publish_prefix_continuation =
+                    options.execution.publish_prefix_continuation && branch == 0;
                 PreparedPrompt branch_prompt =
                     branch == 0 ? std::move(prompt) : std::move(prompts[branch - 1]);
-                auto branch_request = create_request(
+                branches.push_back(create_request(
                     std::move(branch_prompt), std::move(branch_options), prompt_summary,
-                    prepare_seconds, consumer_mode, observation, pending_deadline, submitted);
-                branch_request->sample_group_id = group->id;
-                branch_request->branch_index    = branch;
-                group->members.push_back(branch_request);
-                branches.push_back(std::move(branch_request));
+                    prepare_seconds, consumer_mode, observation, pending_deadline, submitted,
+                    group.get(), branch));
             }
         } catch (...) {
             // A partially created group cancels its branches: every request that queued keeps
             // its completion path, and the caller observes only the submission failure.
+            {
+                std::lock_guard lock(queue_mutex_);
+                std::erase(groups_, group);
+            }
             for (const auto& branch_request : branches) { abandon_request(branch_request); }
             throw;
+        }
+        {
+            std::lock_guard lock(queue_mutex_);
+            group->sealed = true;
         }
         request_admission_check();
         queue_cv_.notify_one();
@@ -431,26 +454,25 @@ private:
         std::uint32_t lane = 0;
     };
 
-    // The resident requests of a cycle boundary, sized to the lane capacity.
+    // The resident requests of a cycle boundary. Immutable once built and shared by every
+    // measurement that begins while the residency is unchanged.
     struct ActiveExposureSet {
         std::vector<ActiveExposure> entries;
         std::size_t size = 0;
-
-        ActiveExposureSet() = default;
-
-        explicit ActiveExposureSet(std::uint32_t lanes) : entries(lanes) {}
     };
+
+    using ExposureHandle = std::shared_ptr<const ActiveExposureSet>;
 
     struct HostPhaseMeasurement {
         Clock::time_point started;
         std::uint64_t accounted_before = 0;
-        ActiveExposureSet exposed;
+        ExposureHandle exposed;
     };
 
     [[nodiscard]] static std::uint64_t elapsed_ns(Clock::time_point started,
                                                   Clock::time_point finished) noexcept;
 
-    [[nodiscard]] ActiveExposureSet active_exposure_set() const;
+    [[nodiscard]] ExposureHandle active_exposure_set() const;
 
     [[nodiscard]] HostPhaseMeasurement begin_host_phase() const;
 
@@ -601,6 +623,9 @@ private:
         std::shared_ptr<const typename Request::BasePlan> base;
         std::uint64_t publication_order = 0;
         bool finished                   = false;
+        // Only publishes `checkpoint` under `owner`: a checkpoint a flight wrote beside a request
+        // that keeps running.
+        bool publication_only           = false;
     };
 
     // Fixes, for one settle/cancel pass, whether resource tails must wait. The decision is taken
@@ -628,6 +653,10 @@ private:
 
     // Runs the resource tail now, or records it when resource calls are blocked.
     void settle_resources(DeferredSettlement&& settlement);
+
+    // Registers a checkpoint that a retired flight wrote beside `request`: now, or in order with
+    // the recorded tails when resource calls are blocked.
+    void publish_flight_checkpoint(const std::shared_ptr<Request>& request, Checkpoint checkpoint);
 
     void apply_settlement(const DeferredSettlement& settlement);
 
@@ -666,8 +695,11 @@ private:
     void release_request(const std::shared_ptr<Request>& request) noexcept;
 
     // The worker publishes the matching scheduling snapshot before making the response visible.
+    // Completions of one pass are held and published together, so one snapshot covers them all.
     void publish_completion(const std::shared_ptr<Request>& request, GenerationResult result,
                             std::exception_ptr error = {});
+
+    void flush_completions();
 
     void complete_error(const std::shared_ptr<Request>& request, std::exception_ptr error);
 
@@ -746,15 +778,16 @@ private:
     // The outcome of one admission attempt.
     enum class AdmissionStatus : std::uint8_t { Admitted, Deferred, Blocked };
 
-    // The outcome of engaging a forking sample group. `Failed` ends the group: its lanes or its
-    // shared plan cannot carry the fork, and the members fail on their own passes.
-    enum class Engagement : std::uint8_t { Engaged, Waiting, Failed };
+    // The outcome of the group check before a forkable request's admission. `Ready`: the request
+    // is its group's parent and may bind now; the group's other lanes are free. `Waiting`: the
+    // group's lanes are not free yet. `Failed`: the engine cannot carry the group's fork.
+    enum class Engagement : std::uint8_t { Ready, Waiting, Failed };
 
     // One request's ordinary admission path (root or reused source): the per-request state
     // machine over `admission_decision_`, with source selection, reclamation and binding.
-    // While flights compute, only a predicted-synchronous root binding proceeds; every path
-    // that would start or reclaim through an asynchronous context operation defers to a
-    // quiescent iteration.
+    // A Session with in-flight capture decides which bindings complete synchronously and may
+    // therefore start while flights compute; every path that would start or reclaim through an
+    // asynchronous context operation defers to a quiescent iteration.
     [[nodiscard]] AdmissionStatus admit_request(const std::shared_ptr<Request>& request,
                                                  bool restoring);
 
@@ -762,35 +795,39 @@ private:
     // scan order, and each started binding retires before the next one begins.
     [[nodiscard]] bool admit_pending(HostPhaseMeasurement& boundary);
 
-    // Engages a forking sample group: one parent helper lane plus one child lane per member,
-    // taken together or not at all. `first` names the member whose plan carried the fork
-    // frontier; its stashed prompt clone seeds the parent helper.
-    [[nodiscard]] Engagement engage_fork_group(const std::shared_ptr<SampleGroup>& group,
-                                               const std::shared_ptr<Request>& first);
+    // Decides whether `parent` can head a fork group now. The parent is the group's first queued
+    // branch; the group needs one free lane per queued branch (the parent binds into one of
+    // them), taken together or not at all.
+    [[nodiscard]] Engagement engage_fork_group(const SampleGroup& group,
+                                               const std::shared_ptr<Request>& parent);
 
-    // Forks every engaged group whose parent rests at its fork frontier, adopts the children
-    // as their members' sequences, and ends the parent helper.
-    void advance_sample_groups(HostPhaseMeasurement& boundary);
+    // After the parent's binding started: the group's other queued branches take their lanes in
+    // the Forking state and leave the queue; their branch prefills arrive with the fork. A parent
+    // bound at or past its fork frontier prefills the whole prompt itself and claims nothing.
+    void claim_fork_children(const std::shared_ptr<Request>& parent);
 
-    // Cancels and settles groups whose parent or members ended (cancelled, failed, helper
-    // error) before the fork completed.
+    // Forks, with one Session call, every engaged group whose parent rests at its fork frontier,
+    // and adopts the installed children as their members' sequences. The parent and the
+    // children decode the last prompt token as ordinary sequences from the next flight on.
+    void fork_ready_groups();
+
+    // Cancels engaged groups whose parent or any branch ended before the fork, and forgets
+    // submitted groups that no longer have a queued branch.
     void settle_sample_groups(HostPhaseMeasurement& boundary);
 
+    // The group `id` names once all its branches are created; null while they still are, and for
+    // an unknown id.
     [[nodiscard]] std::shared_ptr<SampleGroup> find_group(std::uint64_t id) const noexcept;
 
-    // Ends a forking parent helper: aborts its sequence, settles its resources, releases its
-    // lane and capacity, and counts no request statistic.
-    void complete_helper(const std::shared_ptr<Request>& parent);
-
     // Creates one queued request: queue accounting, the output session, the Request record and
-    // its pending entry. `queued` false keeps an engine-internal helper out of the pending
-    // queue.
+    // its pending entry. A request of a sample group is linked to `group` in the same critical
+    // section that queues it, so no admission pass sees it unlinked.
     [[nodiscard]] std::shared_ptr<Request>
     create_request(PreparedPrompt prompt, ResolvedRequestOptions options,
                    PromptSummary prompt_summary, double prepare_seconds,
                    OutputConsumerMode consumer_mode, GenerationObservationOptions observation,
                    Clock::time_point pending_deadline, Clock::time_point submitted,
-                   bool queued = true);
+                   SampleGroup* group = nullptr, std::uint32_t branch = 0);
 
     // Adopts a synchronously completed root binding: the lane, sequence, residency and
     // resources become the request's without a ContextProgress.
@@ -803,6 +840,16 @@ private:
     // Longest an admission that waits for capacity keeps the Engine in its iteration to chain its
     // reclaim steps (see begin_iteration).
     static constexpr std::chrono::milliseconds kAdmissionBurst{50};
+
+    // Retained points, the shared prefixes and the finished lineages the resource manager keeps
+    // for later requests to adopt, are a cache over the pool's idle bytes. Admission and
+    // checkpoint publication need free pool space, and finding none sends them through reclaim
+    // and record relocation, which costs far more than the points save. Each iteration therefore
+    // lets the least worth go once the free space falls under this share of the pool.
+    static constexpr std::uint64_t kPoolHeadroomDivisor = 20;
+
+    // Releases retained points until every device pool has its headroom free again.
+    void balance_retention();
 
     // Polls until the running context operation finishes or `deadline` passes. True when no
     // context operation remains.
@@ -944,7 +991,10 @@ private:
     // Asynchronous bindings in flight, indexed by destination lane; the Session's single
     // context-operation slot keeps at most one entry waiting at a time.
     std::vector<std::optional<MaterializingRequest>> materializing_;
+    // Submitted groups that still have queued branches (guarded by `queue_mutex_`).
     std::vector<std::shared_ptr<SampleGroup>> groups_;
+    // Engaged fork groups waiting for their parent to rest at the fork frontier.
+    std::vector<ForkGroup> fork_groups_;
     std::vector<std::uint64_t> lane_residency_epochs_;
     std::uint64_t next_group_id_ = 1;
     std::optional<AdmissionDecision> admission_decision_;
@@ -952,6 +1002,13 @@ private:
     std::vector<std::optional<CaptureDecision>> capture_decisions_;
     std::shared_ptr<Request> context_owner_;
     std::deque<DeferredSettlement> deferred_settlements_;
+
+    struct HeldCompletion {
+        std::shared_ptr<Request> request;
+        GenerationResult result;
+        std::exception_ptr error;
+    };
+    std::vector<HeldCompletion> held_completions_;
     std::optional<bool> pass_blocked_;
     std::vector<std::shared_ptr<Request>> paused_;
     Scheduling scheduler_;
@@ -971,6 +1028,10 @@ private:
     HostWorkClass current_host_work_class_     = HostWorkClass::Control;
     std::vector<std::uint32_t> current_decode_lanes_{};
     std::size_t current_decode_lane_count_ = 0;
+    std::vector<std::uint8_t> current_decode_member_{};
+    std::uint64_t slots_epoch_ = 0;
+    mutable ExposureHandle exposure_cache_{};
+    mutable std::uint64_t exposure_cache_epoch_ = 0;
     RuntimeStats cumulative_stats_;
     RuntimeStats stats_snapshot_;
     EngineSnapshot published_snapshot_;

@@ -8,6 +8,7 @@
 #include "ops/common/cuda/mma.cuh"
 #include "ops/common/cuda/memory.cuh"
 #include "ops/linear_attention/gated_delta_net/kernels/transition.cuh"
+#include "ops/linear_attention/gated_delta_net/recurrence/chunked/register_state.cuh"
 
 namespace ninfer::ops::detail::gated_delta_net::varlen {
 namespace {
@@ -21,7 +22,8 @@ using chunked::vector_index;
 template <int DV>
 inline constexpr int kThreads = DV >= 32 ? 256 : 128;
 
-constexpr int kPlanThreads = 1024;
+constexpr int kPlanThreads      = 1024;
+constexpr int kPrepareMinBlocks = 5; // 48 registers: the solve keeps a column in registers
 static_assert(kPlanThreads >= kMaxRows);
 
 __host__ __device__ inline int chunks_of(int length, int threshold) {
@@ -110,30 +112,43 @@ __device__ __forceinline__ int find_sub_segment(const SubSegment* sub_segments, 
     return low;
 }
 
-struct PrepareShared {
-    QkChunk qk;
+// One block publishes one chunk for one Q/K head and the value heads that share it: Q/K are
+// normalized and multiplied once for the group, then each head's warp forms its own gates,
+// triangular solve and control record. Same arithmetic as chunked::prepare_kernel; only the
+// chunk to token mapping and the split of the work differ.
+inline constexpr int kMaxGroup = 4;
+
+struct PrepareHeadShared {
     ControlChunk control;
     float prefix[kChunkSize];
     float beta[kChunkSize];
     float lower[kChunkSize * kChunkSize];
 };
 
-// Same arithmetic as chunked::prepare_kernel; only the chunk to token mapping differs.
+struct PrepareShared {
+    QkChunk qk;
+    float gram[2][kChunkSize * kChunkSize]; // K.K^T and Q.K^T before the gate weights
+    PrepareHeadShared head[kMaxGroup];
+};
+
+__device__ __forceinline__ uint4 pack_vector(const float (&v)[8]) {
+    return make_uint4(common::pack_bf16x2(v[0], v[1]), common::pack_bf16x2(v[2], v[3]),
+                      common::pack_bf16x2(v[4], v[5]), common::pack_bf16x2(v[6], v[7]));
+}
+
 template <bool Normalize>
-__global__ __launch_bounds__(256, 2) void prepare_kernel(Operands ops, const PlanHeader* header,
-                                                         const SubSegment* sub_segments,
-                                                         int sub_segment_count, QkChunk* qk_ws,
-                                                         ControlChunk* control_ws,
-                                                         int chunk_capacity) {
+__global__ __launch_bounds__(256, kPrepareMinBlocks) void prepare_kernel(
+    Operands ops, const PlanHeader* header, const SubSegment* sub_segments, int sub_segment_count,
+    QkChunk* qk_ws, ControlChunk* control_ws, int chunk_capacity) {
     __shared__ PrepareShared sm;
-    const int chunk_id = blockIdx.x / ops.value_heads;
+    const int chunk_id = blockIdx.x / ops.qk_heads;
     if (chunk_id >= header->total_chunks) return;
-    const int tid = threadIdx.x, lane = tid & 31;
-    const int head  = blockIdx.x % ops.value_heads;
+    const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
+    const int qh    = blockIdx.x % ops.qk_heads;
     const auto& sub = sub_segments[find_sub_segment(sub_segments, sub_segment_count, chunk_id)];
     const int local = (chunk_id - sub.chunk_base) * kChunkSize;
     const int start = sub.start + local, length = min(kChunkSize, sub.length - local);
-    const int group = ops.value_heads / ops.qk_heads, qh = head / group;
+    const int group = ops.value_heads / ops.qk_heads;
     const int row = tid / 16, col = (tid & 15) * 8;
     const auto qo = (static_cast<std::int64_t>(start + row) * ops.qk_heads + qh) * kStateDim;
 
@@ -165,31 +180,41 @@ __global__ __launch_bounds__(256, 2) void prepare_kernel(Operands ops, const Pla
             k[i] *= ki;
         }
     }
+    common::store_vec(sm.qk.q + vector_index(row, col), pack_vector(q));
+    common::store_vec(sm.qk.k + vector_index(row, col), pack_vector(k));
+    if (warp < group) {
+        auto& hs = sm.head[warp];
+        hs.control.padding[lane] = 0;
+        if (lane < kChunkSize) {
+            const auto off = static_cast<std::int64_t>(start + lane) * ops.value_heads +
+                             qh * group + warp;
+            float g      = lane < length ? ops.g[off] : 0.0F;
+            hs.beta[lane] = lane < length ? ops.beta[off] : 0.0F;
 #pragma unroll
-    for (int i = 0; i < 8; ++i) {
-        sm.qk.q[vector_index(row, col + i)] = __float2bfloat16_rn(q[i]);
-        sm.qk.k[vector_index(row, col + i)] = __float2bfloat16_rn(k[i]);
-    }
-    if (tid < 32) sm.control.padding[tid] = 0;
-    if (tid < kChunkSize) {
-        const auto off = static_cast<std::int64_t>(start + tid) * ops.value_heads + head;
-        float g        = tid < length ? ops.g[off] : 0.0F;
-        sm.beta[tid]   = tid < length ? ops.beta[off] : 0.0F;
-#pragma unroll
-        for (int offset = 1; offset < kChunkSize; offset <<= 1) {
-            const float previous = __shfl_up_sync(0xffffU, g, offset, kChunkSize);
-            if (tid >= offset) g += previous;
+            for (int offset = 1; offset < kChunkSize; offset <<= 1) {
+                const float previous = __shfl_up_sync(0xffffU, g, offset, kChunkSize);
+                if (lane >= offset) g += previous;
+            }
+            hs.prefix[lane]         = g;
+            hs.control.prefix[lane] = common::exp2_approx(g * common::kLog2E);
+            const float last        = __shfl_sync(0xffffU, g, kChunkSize - 1, kChunkSize);
+            hs.control.suffix[lane] = common::exp2_approx((last - g) * common::kLog2E);
         }
-        sm.prefix[tid]         = g;
-        sm.control.prefix[tid] = common::exp2_approx(g * common::kLog2E);
-        const float last       = __shfl_sync(0xffffU, g, kChunkSize - 1, kChunkSize);
-        sm.control.suffix[tid] = common::exp2_approx((last - g) * common::kLog2E);
     }
     __syncthreads();
 
+    // Other producers never read this workspace; the following kernel supplies the only
+    // producer/consumer synchronization.
+    {
+        auto* dst = reinterpret_cast<uint4*>(
+            qk_ws + static_cast<std::int64_t>(qh) * chunk_capacity + chunk_id);
+        const auto* data = reinterpret_cast<const uint4*>(&sm.qk);
+#pragma unroll
+        for (int i = tid; i < sizeof(QkChunk) / 16; i += 256) dst[i] = data[i];
+    }
     // Both products consume the same represented Q/K that recurrence will load.
-    if (tid < 64) {
-        const auto* a = tid < 32 ? sm.qk.k : sm.qk.q;
+    if (warp == 4 || warp == 5) {
+        const auto* a = warp == 4 ? sm.qk.k : sm.qk.q;
         float acc[2][4]{};
 #pragma unroll
         for (int offset = 0; offset < kStateDim; offset += 16) {
@@ -209,56 +234,58 @@ __global__ __launch_bounds__(256, 2) void prepare_kernel(Operands ops, const Pla
                                  af[3], bf[0], bf[1]);
             }
         }
+        float* gram = sm.gram[warp - 4];
 #pragma unroll
         for (int n = 0; n < 2; ++n) {
 #pragma unroll
-            for (int i = 0; i < 4; ++i) {
-                const int r = lane / 4 + (i / 2) * 8;
-                const int c = n * 8 + (lane & 3) * 2 + (i & 1);
-                // Do not evaluate upper-triangle exponentials: g can be strongly negative.
-                const float value =
-                    r >= c ? acc[n][i] *
-                                 common::exp2_approx((sm.prefix[r] - sm.prefix[c]) * common::kLog2E)
-                           : 0.0F;
-                if (tid < 32)
-                    sm.lower[r * kChunkSize + c] = r > c ? sm.beta[r] * value : 0.0F;
-                else
-                    sm.control.mqk[square_index(r, c)] = value;
-            }
+            for (int i = 0; i < 4; ++i)
+                gram[(lane / 4 + (i / 2) * 8) * kChunkSize + n * 8 + (lane & 3) * 2 + (i & 1)] =
+                    acc[n][i];
         }
     }
-    __syncthreads();
-    if (tid < 32) {
-        const int c = lane & 15;
-#pragma unroll
-        for (int r = 0; r < kChunkSize; ++r) {
-            float value = r == c ? 1.0F : 0.0F;
-#pragma unroll
-            for (int j = 0; j < r; ++j)
-                value = fmaf(-sm.lower[r * kChunkSize + j], sm.control.solve[square_index(j, c)],
-                             value);
-            if (lane < 16) sm.control.solve[square_index(r, c)] = value;
-            __syncwarp();
-        }
-    }
-    __syncthreads();
-    sm.control.solve[square_index(row, tid & 15)] *= sm.beta[tid & 15];
     __syncthreads();
 
-    auto* ctrl = reinterpret_cast<uint4*>(control_ws +
-                                          static_cast<std::int64_t>(head) * chunk_capacity +
-                                          chunk_id);
-    const auto* src = reinterpret_cast<const uint4*>(&sm.control);
-    if (tid < sizeof(ControlChunk) / 16) ctrl[tid] = src[tid];
-    // Only the first value head in a group publishes Q/K. Other producers never read this
-    // workspace; the following kernel supplies the only producer/consumer synchronization.
-    if (head % group == 0) {
-        auto* dst = reinterpret_cast<uint4*>(
-            qk_ws + static_cast<std::int64_t>(qh) * chunk_capacity + chunk_id);
-        const auto* data = reinterpret_cast<const uint4*>(&sm.qk);
+    if (warp >= group) return;
+    auto& hs = sm.head[warp];
+    const int c = lane & 15;
 #pragma unroll
-        for (int i = tid; i < sizeof(QkChunk) / 16; i += 256) dst[i] = data[i];
+    for (int e = lane; e < kChunkSize * kChunkSize; e += 32) {
+        const int r = e / kChunkSize;
+        float lower = 0.0F, mqk = 0.0F;
+        // Do not evaluate upper-triangle exponentials: g can be strongly negative.
+        if (r >= c) {
+            const float weight =
+                common::exp2_approx((hs.prefix[r] - hs.prefix[c]) * common::kLog2E);
+            const float value = sm.gram[0][e] * weight;
+            mqk               = sm.gram[1][e] * weight;
+            lower             = r > c ? hs.beta[r] * value : 0.0F;
+        }
+        hs.lower[e]                        = lower;
+        hs.control.mqk[square_index(r, c)] = mqk;
     }
+    __syncwarp();
+
+    // Column c of (I + L)^-1 by forward substitution; the solved rows stay in registers.
+    float x[kChunkSize];
+#pragma unroll
+    for (int r = 0; r < kChunkSize; ++r) {
+        float value = r == c ? 1.0F : 0.0F;
+#pragma unroll
+        for (int j = 0; j < r; ++j) value = fmaf(-hs.lower[r * kChunkSize + j], x[j], value);
+        x[r] = value;
+    }
+    const float beta_c = hs.beta[c];
+    if (lane < kChunkSize) {
+#pragma unroll
+        for (int r = 0; r < kChunkSize; ++r) hs.control.solve[square_index(r, c)] = x[r] * beta_c;
+    }
+    __syncwarp();
+
+    auto* ctrl = reinterpret_cast<uint4*>(control_ws +
+                                          static_cast<std::int64_t>(qh * group + warp) *
+                                              chunk_capacity + chunk_id);
+    const auto* src = reinterpret_cast<const uint4*>(&hs.control);
+    for (int i = lane; i < sizeof(ControlChunk) / 16; i += 32) ctrl[i] = src[i];
 }
 
 template <int Width>
@@ -396,58 +423,48 @@ __device__ __forceinline__ void store_output(const Operands& ops, float (&acc)[4
     }
 }
 
+// Value tiles below 64: each warp owns one 8-value column tile and MPW 16-key row tiles.
 template <int DV>
 struct Tile {
-    static constexpr int kWarps  = kThreads<DV> / 32;
-    static constexpr int NT      = DV / 8;
-    static constexpr int MW      = NT < kWarps ? kWarps / NT : 1;
-    static constexpr int MPW     = (kStateDim / 16) / MW;
-    static constexpr int NPW     = NT > kWarps ? NT / kWarps : 1;
-    static constexpr int kGroups = DV / kDvPerWarp;
+    static constexpr int kWarps = kThreads<DV> / 32;
+    static constexpr int NT     = DV / 8;
+    static constexpr int MW     = kWarps / NT;
+    static constexpr int MPW    = (kStateDim / 16) / MW;
+    static_assert(NT < kWarps && kWarps % NT == 0);
 };
 
 // MMA accumulators describe S^T[key,value]; external state remains [value,key].
 template <int DV>
-__device__ __forceinline__ void load_fragments(float (&state)[Tile<DV>::NPW][Tile<DV>::MPW][4],
-                                               const float* base, int value_start, int warp,
-                                               int lane) {
+__device__ __forceinline__ void load_fragments(float (&state)[Tile<DV>::MPW][4], const float* base,
+                                               int value_start, int warp, int lane) {
     using T = Tile<DV>;
     const int g = lane / 4, t = lane & 3;
-    const int n_start = warp % T::NT, m_start = T::NT < T::kWarps ? warp / T::NT : 0;
+    const int n = warp % T::NT, m_start = warp / T::NT;
 #pragma unroll
-    for (int ni = 0; ni < T::NPW; ++ni) {
-        const int n = n_start + ni * T::kWarps;
-#pragma unroll
-        for (int mi = 0; mi < T::MPW; ++mi) {
-            const int key   = (m_start + mi * T::MW) * 16 + g;
-            const int value = value_start + n * 8 + t * 2;
-            state[ni][mi][0] = base[value * kStateDim + key];
-            state[ni][mi][1] = base[(value + 1) * kStateDim + key];
-            state[ni][mi][2] = base[value * kStateDim + key + 8];
-            state[ni][mi][3] = base[(value + 1) * kStateDim + key + 8];
-        }
+    for (int mi = 0; mi < T::MPW; ++mi) {
+        const int key   = (m_start + mi * T::MW) * 16 + g;
+        const int value = value_start + n * 8 + t * 2;
+        state[mi][0]    = base[value * kStateDim + key];
+        state[mi][1]    = base[(value + 1) * kStateDim + key];
+        state[mi][2]    = base[value * kStateDim + key + 8];
+        state[mi][3]    = base[(value + 1) * kStateDim + key + 8];
     }
 }
 
 template <int DV>
-__device__ __forceinline__ void
-store_fragments(const float (&state)[Tile<DV>::NPW][Tile<DV>::MPW][4], float* base,
-                int value_start, int warp, int lane) {
+__device__ __forceinline__ void store_fragments(const float (&state)[Tile<DV>::MPW][4],
+                                                float* base, int value_start, int warp, int lane) {
     using T = Tile<DV>;
     const int g = lane / 4, t = lane & 3;
-    const int n_start = warp % T::NT, m_start = T::NT < T::kWarps ? warp / T::NT : 0;
+    const int n = warp % T::NT, m_start = warp / T::NT;
 #pragma unroll
-    for (int ni = 0; ni < T::NPW; ++ni) {
-        const int n = n_start + ni * T::kWarps;
-#pragma unroll
-        for (int mi = 0; mi < T::MPW; ++mi) {
-            const int key   = (m_start + mi * T::MW) * 16 + g;
-            const int value = value_start + n * 8 + t * 2;
-            base[value * kStateDim + key]           = state[ni][mi][0];
-            base[(value + 1) * kStateDim + key]     = state[ni][mi][1];
-            base[value * kStateDim + key + 8]       = state[ni][mi][2];
-            base[(value + 1) * kStateDim + key + 8] = state[ni][mi][3];
-        }
+    for (int mi = 0; mi < T::MPW; ++mi) {
+        const int key   = (m_start + mi * T::MW) * 16 + g;
+        const int value = value_start + n * 8 + t * 2;
+        base[value * kStateDim + key]           = state[mi][0];
+        base[(value + 1) * kStateDim + key]     = state[mi][1];
+        base[value * kStateDim + key + 8]       = state[mi][2];
+        base[(value + 1) * kStateDim + key + 8] = state[mi][3];
     }
 }
 
@@ -492,13 +509,12 @@ __device__ __forceinline__ void run_recurrent_sub_segment(const Operands& ops,
                                                           int value_start, const float* read,
                                                           float* destination, float* checkpoint,
                                                           bool normalize) {
-    using T = Tile<DV>;
     const int warp = threadIdx.x / 32, lane = threadIdx.x % 32;
     const SubSegmentAccess access{ops.q,         ops.k,           ops.v,
                                   ops.g,         ops.beta,        ops.out,
                                   ops.qk_heads,  ops.value_heads, sub.start,
                                   ops.scale};
-    for (int group = warp; group < T::kGroups; group += T::kWarps) {
+    for (int group = warp; group < DV / kDvPerWarp; group += Tile<DV>::kWarps) {
         RecurrentCoordinates coord{};
         coord.lane       = lane;
         coord.warp       = warp;
@@ -534,7 +550,7 @@ __global__ __launch_bounds__(kThreads<DV>, (DV >= 32 ? 2 : 4)) void recurrence_k
     const int value_start = blockIdx.x % (kStateDim / DV) * DV;
     const int row         = blockIdx.y;
     const int n_start     = warp % T::NT;
-    const int m_start     = T::NT < T::kWarps ? warp / T::NT : 0;
+    const int m_start     = warp / T::NT;
 
     const auto head_offset = static_cast<std::int64_t>(head) * kStateDim * kStateDim;
     const auto* source = reinterpret_cast<const float*>(ops.source_base + ops.source_offsets[row]) +
@@ -543,7 +559,7 @@ __global__ __launch_bounds__(kThreads<DV>, (DV >= 32 ? 2 : 4)) void recurrence_k
         reinterpret_cast<float*>(ops.destination_base + ops.destination_offsets[row]) + head_offset;
     const int first_sub = ws.row_first[row], end_sub = ws.row_first[row + 1];
 
-    float state[T::NPW][T::MPW][4];
+    float state[T::MPW][4];
     bool resident = false;
     for (int s = first_sub; s < end_sub; ++s) {
         const SubSegment sub = ws.sub_segments[s];
@@ -579,84 +595,45 @@ __global__ __launch_bounds__(kThreads<DV>, (DV >= 32 ? 2 : 4)) void recurrence_k
             else
                 common::cp_wait<0>();
 #pragma unroll
-            for (int ni = 0; ni < T::NPW; ++ni) {
-                const int n = n_start + ni * T::kWarps;
-#pragma unroll
-                for (int mi = 0; mi < T::MPW; ++mi) {
-                    const int key = (m_start + mi * T::MW) * 16 + g;
-                    const int col = n * 8 + t * 2;
-                    common::store_vec(sm.snapshot + value_index<DV>(key, col),
-                                      make_float2(state[ni][mi][0], state[ni][mi][1]));
-                    common::store_vec(sm.snapshot + value_index<DV>(key + 8, col),
-                                      make_float2(state[ni][mi][2], state[ni][mi][3]));
-                }
+            for (int mi = 0; mi < T::MPW; ++mi) {
+                const int key = (m_start + mi * T::MW) * 16 + g;
+                const int col = n_start * 8 + t * 2;
+                common::store_vec(sm.snapshot + value_index<DV>(key, col),
+                                  make_float2(state[mi][0], state[mi][1]));
+                common::store_vec(sm.snapshot + value_index<DV>(key + 8, col),
+                                  make_float2(state[mi][2], state[mi][3]));
             }
             __syncthreads();
             const auto& stage     = sm.stage[chunk & 1];
             const ControlChunk& p = stage.control;
             const QkChunk& qk     = stage.qk;
-            float history[T::NPW][4]{};
+            float history[4]{};
 
-            if constexpr (T::NT >= T::kWarps) {
-                float prediction[T::NPW][4]{};
+            // Warps [0, NT) form K.S and the residual, warps [NT, 2 NT) form Q.S.
+            if (warp < 2 * T::NT) {
+                const bool query = warp >= T::NT;
+                const int n      = warp % T::NT;
+                if (query) {
 #pragma unroll
-                for (int k = 0; k < kStateDim; k += 16) {
-                    unsigned ka0[4], ka1[4], qa[4];
-                    load_vector_tf32_a(qk.k, k, lane, ka0);
-                    load_vector_tf32_a(qk.k, k + 8, lane, ka1);
-                    load_vector_bf16_a(qk.q, k, lane, qa);
-#pragma unroll
-                    for (int ni = 0; ni < T::NPW; ++ni) {
-                        const int n    = warp + ni * T::kWarps;
-                        const float b0 = sm.snapshot[value_index<DV>(k + 2 * t, n * 8 + g)];
-                        const float b1 = sm.snapshot[value_index<DV>(k + 2 * t + 1, n * 8 + g)];
-                        const float b2 = sm.snapshot[value_index<DV>(k + 2 * t + 8, n * 8 + g)];
-                        const float b3 = sm.snapshot[value_index<DV>(k + 2 * t + 9, n * 8 + g)];
-                        common::mma_tf32_bits(prediction[ni][0], prediction[ni][1],
-                                              prediction[ni][2], prediction[ni][3], ka0[0], ka0[1],
-                                              ka0[2], ka0[3], __float_as_uint(b0),
-                                              __float_as_uint(b1));
-                        common::mma_tf32_bits(prediction[ni][0], prediction[ni][1],
-                                              prediction[ni][2], prediction[ni][3], ka1[0], ka1[1],
-                                              ka1[2], ka1[3], __float_as_uint(b2),
-                                              __float_as_uint(b3));
-                        common::mma_bf16(history[ni][0], history[ni][1], history[ni][2],
-                                         history[ni][3], qa[0], qa[1], qa[2], qa[3],
-                                         common::pack_bf16x2(b0, b1), common::pack_bf16x2(b2, b3));
+                    for (int k = 0; k < kStateDim; k += 16) {
+                        unsigned af[4], b0, b1;
+                        load_vector_bf16_a(qk.q, k, lane, af);
+                        load_bf16_b<DV>(sm.snapshot, k, n, lane, b0, b1);
+                        common::mma_bf16(history[0], history[1], history[2], history[3], af[0],
+                                         af[1], af[2], af[3], b0, b1);
                     }
-                }
+                } else {
 #pragma unroll
-                for (int ni = 0; ni < T::NPW; ++ni) {
-                    store_residual<DV>(sm.delta, stage.value, prediction[ni], p.prefix,
-                                       warp + ni * T::kWarps, lane);
-                }
-            } else {
-                if (warp < 2 * T::NT) {
-                    const bool query = warp >= T::NT;
-                    const int n      = warp % T::NT;
-                    if (query) {
-#pragma unroll
-                        for (int k = 0; k < kStateDim; k += 16) {
-                            unsigned af[4], b0, b1;
-                            load_vector_bf16_a(qk.q, k, lane, af);
-                            load_bf16_b<DV>(sm.snapshot, k, n, lane, b0, b1);
-                            common::mma_bf16(history[0][0], history[0][1], history[0][2],
-                                             history[0][3], af[0], af[1], af[2], af[3], b0, b1);
-                        }
-                    } else {
-#pragma unroll
-                        for (int k = 0; k < kStateDim; k += 8) {
-                            unsigned af[4];
-                            load_vector_tf32_a(qk.k, k, lane, af);
-                            common::mma_tf32_bits(
-                                history[0][0], history[0][1], history[0][2], history[0][3], af[0],
-                                af[1], af[2], af[3],
-                                __float_as_uint(sm.snapshot[value_index<DV>(k + 2 * t, n * 8 + g)]),
-                                __float_as_uint(
-                                    sm.snapshot[value_index<DV>(k + 2 * t + 1, n * 8 + g)]));
-                        }
-                        store_residual<DV>(sm.delta, stage.value, history[0], p.prefix, n, lane);
+                    for (int k = 0; k < kStateDim; k += 8) {
+                        unsigned af[4];
+                        load_vector_tf32_a(qk.k, k, lane, af);
+                        common::mma_tf32_bits(
+                            history[0], history[1], history[2], history[3], af[0], af[1], af[2],
+                            af[3],
+                            __float_as_uint(sm.snapshot[value_index<DV>(k + 2 * t, n * 8 + g)]),
+                            __float_as_uint(sm.snapshot[value_index<DV>(k + 2 * t + 1, n * 8 + g)]));
                     }
+                    store_residual<DV>(sm.delta, stage.value, history, p.prefix, n, lane);
                 }
             }
             __syncthreads();
@@ -675,60 +652,37 @@ __global__ __launch_bounds__(kThreads<DV>, (DV >= 32 ? 2 : 4)) void recurrence_k
             }
             __syncthreads();
 
-            if constexpr (T::NT >= T::kWarps) {
-#pragma unroll
-                for (int ni = 0; ni < T::NPW; ++ni) {
-                    const int n = warp + ni * T::kWarps;
-                    history[ni][0] *= p.prefix[g];
-                    history[ni][1] *= p.prefix[g];
-                    history[ni][2] *= p.prefix[g + 8];
-                    history[ni][3] *= p.prefix[g + 8];
-                    matrix_delta<DV>(history[ni], p.mqk, sm.delta, n, lane);
-                    store_output(ops, history[ni], first, valid, head, value_start, n, lane);
-                }
-            } else if (warp >= T::NT && warp < 2 * T::NT) {
+            if (warp >= T::NT && warp < 2 * T::NT) {
                 const int n = warp - T::NT;
-                history[0][0] *= p.prefix[g];
-                history[0][1] *= p.prefix[g];
-                history[0][2] *= p.prefix[g + 8];
-                history[0][3] *= p.prefix[g + 8];
-                matrix_delta<DV>(history[0], p.mqk, sm.delta, n, lane);
-                store_output(ops, history[0], first, valid, head, value_start, n, lane);
+                history[0] *= p.prefix[g];
+                history[1] *= p.prefix[g];
+                history[2] *= p.prefix[g + 8];
+                history[3] *= p.prefix[g + 8];
+                matrix_delta<DV>(history, p.mqk, sm.delta, n, lane);
+                store_output(ops, history, first, valid, head, value_start, n, lane);
             }
 
             // S^T = gamma S^T + K^T diag(suffix) Delta. The master state stays FP32.
             // Delta is converted to BF16 only for this MMA; the output branch above consumed the
             // original FP32 Delta through TF32 MMA.
-            unsigned delta_b[T::NPW][2];
-#pragma unroll
-            for (int ni = 0; ni < T::NPW; ++ni) {
-                const int col  = (n_start + ni * T::kWarps) * 8 + g;
-                delta_b[ni][0] = common::pack_bf16x2(
-                    p.suffix[2 * t] * sm.delta[value_index<DV>(2 * t, col)],
-                    p.suffix[2 * t + 1] * sm.delta[value_index<DV>(2 * t + 1, col)]);
-                delta_b[ni][1] = common::pack_bf16x2(
-                    p.suffix[2 * t + 8] * sm.delta[value_index<DV>(2 * t + 8, col)],
-                    p.suffix[2 * t + 9] * sm.delta[value_index<DV>(2 * t + 9, col)]);
-            }
+            const int col = n_start * 8 + g;
+            const unsigned delta_b[2] = {
+                common::pack_bf16x2(p.suffix[2 * t] * sm.delta[value_index<DV>(2 * t, col)],
+                                    p.suffix[2 * t + 1] * sm.delta[value_index<DV>(2 * t + 1, col)]),
+                common::pack_bf16x2(p.suffix[2 * t + 8] * sm.delta[value_index<DV>(2 * t + 8, col)],
+                                    p.suffix[2 * t + 9] * sm.delta[value_index<DV>(2 * t + 9, col)])};
+            const float decay = p.prefix[kChunkSize - 1];
 #pragma unroll
             for (int mi = 0; mi < T::MPW; ++mi) {
-                const int key     = (m_start + mi * T::MW) * 16 + g;
-                const float decay = p.prefix[kChunkSize - 1];
-#pragma unroll
-                for (int ni = 0; ni < T::NPW; ++ni) {
-                    state[ni][mi][0] *= decay;
-                    state[ni][mi][1] *= decay;
-                    state[ni][mi][2] *= decay;
-                    state[ni][mi][3] *= decay;
-                }
+                const int key = (m_start + mi * T::MW) * 16 + g;
+                state[mi][0] *= decay;
+                state[mi][1] *= decay;
+                state[mi][2] *= decay;
+                state[mi][3] *= decay;
                 unsigned af[4];
                 load_transposed_bf16_a(qk.k, key - g, lane, af);
-#pragma unroll
-                for (int ni = 0; ni < T::NPW; ++ni) {
-                    common::mma_bf16(state[ni][mi][0], state[ni][mi][1], state[ni][mi][2],
-                                     state[ni][mi][3], af[0], af[1], af[2], af[3], delta_b[ni][0],
-                                     delta_b[ni][1]);
-                }
+                common::mma_bf16(state[mi][0], state[mi][1], state[mi][2], state[mi][3], af[0],
+                                 af[1], af[2], af[3], delta_b[0], delta_b[1]);
             }
             __syncthreads();
             if (chunk + 2 < chunks) {
@@ -748,6 +702,221 @@ __global__ __launch_bounds__(kThreads<DV>, (DV >= 32 ? 2 : 4)) void recurrence_k
     }
 }
 
+namespace regs = chunked::registers;
+
+__device__ __forceinline__ void load_register_stage(regs::Stage& stage, const Operands& ops,
+                                                    const Workspace& ws, int head, int value_start,
+                                                    int chunk_id, int first, int valid, int tid) {
+    const int qh       = head / (ops.value_heads / ops.qk_heads);
+    const auto* qk_src = reinterpret_cast<const uint4*>(
+        ws.qk + static_cast<std::int64_t>(qh) * ws.chunk_capacity + chunk_id);
+    auto* qk_dst = reinterpret_cast<uint4*>(&stage.qk);
+#pragma unroll
+    for (int i = tid; i < sizeof(QkChunk) / 16; i += regs::kThreads)
+        common::cp_async<16, Cache::cg>(qk_dst + i, qk_src + i);
+    const auto* ctrl_src = reinterpret_cast<const uint4*>(
+        ws.control + static_cast<std::int64_t>(head) * ws.chunk_capacity + chunk_id);
+    auto* ctrl_dst = reinterpret_cast<uint4*>(&stage.control);
+#pragma unroll
+    for (int i = tid; i < sizeof(ControlChunk) / 16; i += regs::kThreads)
+        common::cp_async<16, Cache::cg>(ctrl_dst + i, ctrl_src + i);
+    constexpr int vectors = kChunkSize * regs::kValues / 8;
+#pragma unroll
+    for (int i = tid; i < vectors; i += regs::kThreads) {
+        const int row = i / (regs::kValues / 8), col = i % (regs::kValues / 8) * 8;
+        const int valid_token = row < valid ? first + row : first;
+        const auto off =
+            (static_cast<std::int64_t>(valid_token) * ops.value_heads + head) * kStateDim +
+            value_start + col;
+        common::cp_async_zfill<16, Cache::cg>(stage.value + regs::value_index(row, col),
+                                              ops.v + off, row < valid ? 16 : 0);
+    }
+    common::cp_commit();
+}
+
+// Recurrent route for one sub-segment on the sixteen value rows of a warp, four groups of four
+// rows. The groups share every key, query and gate, and each performs the arithmetic of
+// run_recurrent_sequence, so the result is bit-identical; the next token's inputs are loaded
+// before the current token's reductions so their latency overlaps the transition.
+template <bool Normalize>
+__device__ __forceinline__ void run_recurrent_rows(const Operands& ops, const SubSegment& sub,
+                                                   int head, int value_row, const float* read,
+                                                   float* destination, float* checkpoint) {
+    constexpr int kGroups = 16 / kDvPerWarp;
+    const int lane        = threadIdx.x & 31;
+    const SubSegmentAccess access{ops.q,         ops.k,           ops.v,
+                                  ops.g,         ops.beta,        ops.out,
+                                  ops.qk_heads,  ops.value_heads, sub.start,
+                                  ops.scale};
+    RecurrentCoordinates coord{};
+    coord.lane       = lane;
+    coord.warp       = threadIdx.x >> 5;
+    coord.value_head = static_cast<std::uint32_t>(head);
+    coord.qk_head    = static_cast<std::uint32_t>(head / (ops.value_heads / ops.qk_heads));
+    coord.dqk_base   = static_cast<std::uint32_t>(lane * kQkPerLane);
+
+    __align__(16) float state[kGroups][kDvPerWarp][kQkPerLane];
+#pragma unroll
+    for (int j = 0; j < kGroups; ++j) {
+        coord.dv_base = static_cast<std::uint32_t>(value_row + j * kDvPerWarp);
+        load_state_tile(state[j], read, coord);
+    }
+
+    const auto load_values = [&](int token) {
+        return lane < 16 ? __bfloat162float(access.value_ptr(coord, token)[value_row + lane])
+                         : 0.0f;
+    };
+    RawQkLane key    = load_raw_qk_lane(access.key_ptr(coord, 0), coord.dqk_base);
+    RawGatePair gate = access.load_gate(coord, 0);
+    float values     = load_values(0);
+    for (int token = 0; token < sub.length; ++token) {
+        const bool more = token + 1 < sub.length;
+        RawQkLane next_key{};
+        RawGatePair next_gate{};
+        float next_values = 0.0f;
+        if (more) {
+            next_key    = load_raw_qk_lane(access.key_ptr(coord, token + 1), coord.dqk_base);
+            next_gate   = access.load_gate(coord, token + 1);
+            next_values = load_values(token + 1);
+        }
+        RawQkLane query = load_raw_qk_lane(access.query_ptr(coord, token), coord.dqk_base);
+
+        normalize_qk_lane<Normalize>(key.value, lane);
+#pragma unroll
+        for (int j = 0; j < kGroups; ++j) {
+            const float shuffled = __shfl_sync(0xffffffff, values, j * kDvPerWarp + (lane & 3));
+            apply_gdn_transition(state[j], key.value, lane < kDvPerWarp ? shuffled : 0.0f, gate.g,
+                                 gate.beta);
+        }
+        normalize_qk_lane<Normalize>(query.value, lane);
+#pragma unroll
+        for (int j = 0; j < kGroups; ++j) {
+            float attn_val = 0.0f;
+#pragma unroll
+            for (int r = 0; r < kDvPerWarp; ++r) {
+                float partial = 0.0f;
+#pragma unroll
+                for (int c = 0; c < kQkPerLane; ++c) partial += state[j][r][c] * query.value[c];
+                partial = common::warp_sum<common::kWarpSize>(partial);
+                if (lane == r) attn_val = partial;
+            }
+            if (lane < kDvPerWarp)
+                access.output_ptr(coord, token)[value_row + j * kDvPerWarp + lane] =
+                    __float2bfloat16(attn_val * access.scale);
+        }
+        key    = next_key;
+        gate   = next_gate;
+        values = next_values;
+    }
+
+#pragma unroll
+    for (int j = 0; j < kGroups; ++j) {
+        coord.dv_base = static_cast<std::uint32_t>(value_row + j * kDvPerWarp);
+        store_state_tile(state[j], destination, coord);
+        if (checkpoint) store_state_tile(state[j], checkpoint, coord);
+    }
+}
+
+// The state-in-registers counterpart of recurrence_kernel for 64-value stripes: one CTA of four
+// warps owns one (row, value head, stripe) and walks the row's sub-segments in order. The state
+// stays in registers between consecutive chunked sub-segments. The recurrent route runs per warp
+// on the warp's own value rows, staging the state through the row destination record.
+__global__ __launch_bounds__(regs::kThreads, 4) void register_recurrence_kernel(
+    Operands ops, Workspace ws, bool normalize) {
+    extern __shared__ __align__(256) unsigned char backing[];
+    auto& sm              = *reinterpret_cast<regs::Shared*>(backing);
+    const int tid         = threadIdx.x, lane = tid & 31, warp = tid >> 5;
+    const int head        = blockIdx.x / (kStateDim / regs::kValues);
+    const int value_start = blockIdx.x % (kStateDim / regs::kValues) * regs::kValues;
+    const int value_row   = value_start + 16 * warp;
+    const int row         = blockIdx.y;
+    const auto out_pitch  = static_cast<std::int64_t>(ops.value_heads) * kStateDim;
+
+    const auto head_offset = static_cast<std::int64_t>(head) * kStateDim * kStateDim;
+    const auto* source = reinterpret_cast<const float*>(ops.source_base + ops.source_offsets[row]) +
+                         head_offset;
+    auto* destination =
+        reinterpret_cast<float*>(ops.destination_base + ops.destination_offsets[row]) + head_offset;
+    const int first_sub = ws.row_first[row], end_sub = ws.row_first[row + 1];
+
+    const auto checkpoint_of = [&](const SubSegment& sub) -> float* {
+        return sub.checkpoint >= 0
+                   ? reinterpret_cast<float*>(ops.checkpoint_base + sub.checkpoint) + head_offset
+                   : nullptr;
+    };
+
+    int s = first_sub;
+    while (s < end_sub) {
+        const float* read = s == first_sub ? source : destination;
+        if (ws.sub_segments[s].length < ops.chunked_threshold) {
+            const SubSegment sub = ws.sub_segments[s];
+            float* checkpoint    = checkpoint_of(sub);
+            __syncwarp(); // the lanes of this warp stored the state this route reads
+            if (normalize)
+                run_recurrent_rows<true>(ops, sub, head, value_row, read, destination, checkpoint);
+            else
+                run_recurrent_rows<false>(ops, sub, head, value_row, read, destination, checkpoint);
+            __syncwarp();
+            ++s;
+            continue;
+        }
+
+        // A run of consecutive chunked sub-segments keeps the state in registers.
+        regs::State state;
+        regs::load_state(state, read, value_row, lane);
+        for (; s < end_sub && ws.sub_segments[s].length >= ops.chunked_threshold; ++s) {
+            const SubSegment sub = ws.sub_segments[s];
+            float* checkpoint    = checkpoint_of(sub);
+            const int chunks     = chunks_of(sub.length, ops.chunked_threshold);
+            load_register_stage(sm.stage[0], ops, ws, head, value_start, sub.chunk_base,
+                                sub.start, min(kChunkSize, sub.length), tid);
+            if (chunks > 1)
+                load_register_stage(sm.stage[1], ops, ws, head, value_start, sub.chunk_base + 1,
+                                    sub.start + kChunkSize,
+                                    min(kChunkSize, sub.length - kChunkSize), tid);
+            int stage = 0;
+            for (int chunk = 0; chunk < chunks; ++chunk) {
+                const int first = sub.start + chunk * kChunkSize;
+                if (chunk + 1 < chunks)
+                    common::cp_wait<1>();
+                else
+                    common::cp_wait<0>();
+                __syncthreads();
+                if (chunk + 2 < chunks) {
+                    load_register_stage(sm.stage[(stage + 2) % regs::kStages], ops, ws, head,
+                                        value_start, sub.chunk_base + chunk + 2,
+                                        first + 2 * kChunkSize,
+                                        min(kChunkSize, sub.length - (chunk + 2) * kChunkSize),
+                                        tid);
+                }
+                auto* out = ops.out + (static_cast<std::int64_t>(first) * ops.value_heads + head) *
+                                          kStateDim + value_row;
+                regs::step(state, sm.stage[stage], sm.output[warp], out, out_pitch,
+                           min(kChunkSize, sub.length - chunk * kChunkSize), ops.scale, warp,
+                           lane);
+                stage = stage + 1 == regs::kStages ? 0 : stage + 1;
+            }
+
+            // The state after this sub-segment: checkpoint it, and publish it when the row ends
+            // or the next sub-segment takes the recurrent route.
+            if (checkpoint) regs::store_state(state, checkpoint, value_row, lane);
+            if (s + 1 == end_sub || ws.sub_segments[s + 1].length < ops.chunked_threshold)
+                regs::store_state(state, destination, value_row, lane);
+            __syncthreads(); // the next sub-segment restages the ring this one was still reading
+        }
+    }
+}
+
+void launch_registers(const Operands& ops, const Workspace& ws, bool normalize,
+                      cudaStream_t stream) {
+    constexpr int shared_bytes = sizeof(regs::Shared);
+    (void)common::prepare_shared<shared_bytes, register_recurrence_kernel, true>();
+    const dim3 grid(static_cast<unsigned>(ops.value_heads * (kStateDim / regs::kValues)),
+                    static_cast<unsigned>(ops.rows));
+    register_recurrence_kernel<<<grid, regs::kThreads, shared_bytes, stream>>>(ops, ws, normalize);
+    CUDA_CHECK(cudaGetLastError());
+}
+
 template <int DV>
 void launch_tile(const Operands& ops, const Workspace& ws, bool normalize, cudaStream_t stream) {
     constexpr int shared_bytes = sizeof(RecurrenceShared<DV>);
@@ -762,11 +931,13 @@ void launch_tile(const Operands& ops, const Workspace& ws, bool normalize, cudaS
 
 void launch(const Operands& ops, const Workspace& ws, bool normalize_qk, int value_tile,
             cudaStream_t stream) {
+    if (ops.value_heads / ops.qk_heads > kMaxGroup)
+        throw std::logic_error("linear attention: varlen value head group exceeds the prepare block");
     plan_kernel<<<1, kPlanThreads, 0, stream>>>(ops, ws.header, ws.sub_segments, ws.row_first);
     CUDA_CHECK(cudaGetLastError());
     if (ws.chunk_capacity > 0) {
         const unsigned blocks =
-            static_cast<unsigned>(static_cast<std::int64_t>(ops.value_heads) * ws.chunk_capacity);
+            static_cast<unsigned>(static_cast<std::int64_t>(ops.qk_heads) * ws.chunk_capacity);
         const int count = ops.rows + ops.boundaries;
         if (normalize_qk)
             prepare_kernel<true><<<blocks, 256, 0, stream>>>(ops, ws.header, ws.sub_segments,
@@ -780,7 +951,7 @@ void launch(const Operands& ops, const Workspace& ws, bool normalize_qk, int val
     }
     switch (value_tile) {
     case 64:
-        return launch_tile<64>(ops, ws, normalize_qk, stream);
+        return launch_registers(ops, ws, normalize_qk, stream);
     case 32:
         return launch_tile<32>(ops, ws, normalize_qk, stream);
     case 16:

@@ -10,6 +10,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <span>
 
 namespace ninfer::ops {
 
@@ -130,6 +131,42 @@ void causal_softmax_attention(const Tensor& q, const Tensor& k, const Tensor& v,
                               float scale, PagedKVBatchLayerView cache,
                               CausalAttentionExecutionEnvelope envelope, MemoryArena& workspace,
                               Tensor& out, CudaExecutionView execution);
+
+/**
+ * One run of B independent entries of W columns each on the shared token axis of
+ * causal_softmax_attention_groups. Entry b owns columns [token_offset+b*W, token_offset+(b+1)*W)
+ * and entry row+b of valid_columns and kv_table_rows. `envelope` bounds the keys the group sees as
+ * in causal_softmax_attention.
+ */
+struct CausalAttentionGroup {
+    std::uint32_t token_offset;
+    std::uint32_t width;
+    std::uint32_t batch;
+    std::uint32_t row;
+    CausalAttentionExecutionEnvelope envelope;
+};
+
+/**
+ * Append K/V and compute causal attention for several groups of entries that share one token
+ * axis. Each group is one causal_softmax_attention call on its slice of the axis, with that
+ * call's domain (B, W, valid columns, append and masking behavior, envelope), and its results do
+ * not depend on the other groups. A target with a fused route runs every group in one launch and
+ * splits no key range, so a result can differ from the separate call by FP32 summation order; the
+ * other targets run the separate calls.
+ *
+ * q/out are contiguous BF16 [D,Hq,T], k/v contiguous BF16 [D,Hkv,T], positions is contiguous
+ * device I32 [T], and valid_columns and kv_table_rows are non-empty contiguous device I32 [R].
+ * The groups are ordered by token_offset, cover disjoint columns of [0,T), and address distinct
+ * metadata entries below R. Transient storage is bounded by the capacity query of the separate
+ * calls; the fused route needs none.
+ */
+void causal_softmax_attention_groups(const Tensor& q, const Tensor& k, const Tensor& v,
+                                     const Tensor& positions, const Tensor& valid_columns,
+                                     const Tensor& kv_table_rows,
+                                     std::span<const CausalAttentionGroup> groups,
+                                     AttentionHeadGeometry geometry, float scale,
+                                     PagedKVBatchLayerView cache, MemoryArena& workspace,
+                                     Tensor& out, CudaExecutionView execution);
 
 /**
  * Read-only single-sequence causal attention over an already populated cache.

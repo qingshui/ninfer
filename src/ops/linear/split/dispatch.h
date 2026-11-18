@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ops/linear/kernels/fp8/fp8_a8_plan.h"
 #include "ops/linear/split/operands.h"
 
 #include <array>
@@ -43,6 +44,7 @@ extern const SplitShape kQ8SplitN6144K2560;
 extern const SplitShape kQ4Q5SplitN7168N7168K5120, kQ4Q5SplitN4096N12288K5120;
 extern const SplitShape kFp8SplitN14336K5120, kFp8SplitN16384K5120;
 extern const SplitShape kBf16SplitN3072K2048, kFp8RowFp32SplitN3072K2048;
+extern const SplitShape kFp8RowFp32SplitN20480K3072; // B200 only
 extern const SplitShape kNvfp4SplitN14336K5120, kNvfp4SplitN16384K5120, kNvfp4SplitN17408K3072;
 
 extern const SplitShape kMxfp8SplitN20480K1536;
@@ -63,4 +65,10 @@ const SplitShape& select_split_shape(ProjectionProfile weights, std::span<const 
 // validation; the route needs no workspace.
 void bf16_split_n20480_k3072_dispatch(const Tensor& x, const Weight& weight,
                                       std::span<const Tensor> outputs, cudaStream_t stream);
+
+// B200 only. The same geometry with E4M3 row-scaled weights: quantizes x into `workspace` and runs
+// the tcgen05 GEMM. The caller owns operand validation and the scratch.
+void fp8_split_n20480_k3072_dispatch(const Tensor& x, const Weight& weight,
+                                     std::span<const Tensor> outputs, Fp8A8Workspace workspace,
+                                     cudaStream_t stream);
 } // namespace ninfer::ops::detail::linear_split

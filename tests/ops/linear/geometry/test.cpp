@@ -2,7 +2,9 @@
 // segmentations must resolve on every target for the full token range; an unregistered geometry
 // must throw std::invalid_argument naming its parameters. The numerical contract of each
 // registered shape is covered by the projection and split suites.
+#include "core/platform.h"
 #include "ninfer/ops/linear.h"
+#include "ninfer/ops/linear_add.h"
 #include "ninfer/ops/linear_split.h"
 #include "ops/suite.h"
 
@@ -70,6 +72,51 @@ LinearProfile nvfp4_parent(int n, int k) {
 LinearProfile bf16_parent(int n, int k) {
     return {QType::BF16, n, k, LinearPolicy::A16Only, QuantLayout::Contiguous};
 }
+
+#if NINFER_TARGET_B200
+LinearProfile fp8_parent(int n, int k, LinearPolicy policy) {
+    return {QType::FP8_E4M3FN_ROW_FP32, n, k, policy, QuantLayout::RowScale};
+}
+
+// The tcgen05 FP8 route quantizes its activation, so only the A8-permitting policies resolve.
+int fp8_geometries() {
+    int failures = 0;
+    constexpr std::array<std::int32_t, 2> gdn{12288, 8192};
+    for (const auto policy : {LinearPolicy::AllowA8, LinearPolicy::AllowA4}) {
+        failures += accepted("split fp8 n20480_k3072", [&] {
+            if (split_capacity({fp8_parent(20480, 3072, policy), std::nullopt}, gdn) == 0)
+                throw std::logic_error("A8 route reported no workspace");
+        });
+        failures += accepted("linear_add fp8 n3072_k8192", [&] {
+            if (ops::linear_add_workspace_capacity_bytes(QType::FP8_E4M3FN_ROW_FP32, 3072, 8192,
+                                                         policy, 1, kMaxTokens) == 0)
+                throw std::logic_error("A8 route reported no workspace");
+        });
+    }
+    failures += rejected("split fp8 n20480_k3072 A16Only",
+                         [&] {
+                             (void)split_capacity(
+                                 {fp8_parent(20480, 3072, LinearPolicy::A16Only), std::nullopt},
+                                 gdn);
+                         },
+                         {"20480", "3072", "A8"});
+    failures += rejected("linear_add fp8 n3072_k8192 A16Only",
+                         [] {
+                             (void)ops::linear_add_workspace_capacity_bytes(
+                                 QType::FP8_E4M3FN_ROW_FP32, 3072, 8192, LinearPolicy::A16Only, 1,
+                                 kMaxTokens);
+                         },
+                         {"3072", "8192", "A8"});
+    failures += rejected("linear_add fp8 n3072_k4096",
+                         [] {
+                             (void)ops::linear_add_workspace_capacity_bytes(
+                                 QType::FP8_E4M3FN_ROW_FP32, 3072, 4096, LinearPolicy::AllowA8, 1,
+                                 kMaxTokens);
+                         },
+                         {"unsupported"});
+    return failures;
+}
+#endif
 
 int projection_registered() {
     int failures = 0;
@@ -149,5 +196,8 @@ int main(int argc, char** argv) {
     suite.add("linear/122b/projection_unregistered", projection_unregistered);
     suite.add("linear/122b/split_registered", split_registered);
     suite.add("linear/122b/split_unregistered", split_unregistered);
+#if NINFER_TARGET_B200
+    suite.add("linear/122b/fp8_geometries", fp8_geometries);
+#endif
     return suite.main(argc, argv);
 }

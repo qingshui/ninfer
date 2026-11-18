@@ -45,10 +45,13 @@ __global__ void scale_shared(__nv_bfloat16* h, const float* beta, int tokens) {
 template <class Output>
 __global__ void stage_routed(const float* coefficients, Storage storage, Output output,
                              int tokens) {
-    const int index = blockIdx.x * blockDim.x + threadIdx.x;
+    const int index = (blockIdx.x * blockDim.x + threadIdx.x) * 4;
     if (index >= tokens * H) return;
-    output.store(index, output.initial(index) +
-                            routed_value<Shape>(index / H, index % H, storage, coefficients));
+    const float4 routed = routed_value4<Shape>(index / H, index % H, storage, coefficients);
+    output.store(index, output.initial(index) + routed.x);
+    output.store(index + 1, output.initial(index + 1) + routed.y);
+    output.store(index + 2, output.initial(index + 2) + routed.z);
+    output.store(index + 3, output.initial(index + 3) + routed.w);
 }
 
 } // namespace
@@ -94,12 +97,35 @@ bool launch_shared_dense(const Tensor& x, const ScaledSwiGLUTerm& shared, const 
                                                                                     tokens);
     CUDA_CHECK(cudaGetLastError());
     with_output(destination, mode, [&](auto output) {
-        stage_routed<<<(tokens * H + 255) / 256, 256, 0, stream>>>(coefficients, storage, output,
-                                                                    tokens);
+        stage_routed<<<(tokens * H / 4 + 255) / 256, 256, 0, stream>>>(coefficients, storage, output,
+                                                                        tokens);
     });
     CUDA_CHECK(cudaGetLastError());
     const Sm100Epilogue epilogue{.kind = Sm100Epilogue::Add, .residual = y};
     launch_sm100_bf16_gemm({h, down, H, I, tokens}, epilogue, y, stream);
+    return true;
+}
+
+bool launch_control_shared_gate_up_dense(const Tensor& x, const MoeWeights& weights,
+                                         const Storage& storage, const Plan& plan,
+                                         CudaExecutionView execution) {
+    // Below this size the single mma.sync launch is cheaper than one more GEMM launch.
+    constexpr int kMinimumDenseTokens = 128;
+    const int tokens                  = static_cast<int>(x.ne[1]);
+    const auto& gu                    = weights.shared.gate_up.weight;
+    if (plan.shared_algorithm != SharedAlgorithm::Mma || plan.hidden != H || tokens < kMinimumDenseTokens ||
+        gu.qtype != QType::BF16 || gu.n != 2 * I || gu.k != H || !storage.shared_activation)
+        return false;
+    const auto stream = execution.stream();
+    auto* h           = static_cast<__nv_bfloat16*>(storage.shared_activation);
+    // The dense epilogue rounds once, so the split plane carries no correction.
+    if (plan.shared_split_activation)
+        CUDA_CHECK(cudaMemsetAsync(h + std::int64_t(tokens) * I, 0,
+                                   std::size_t(tokens) * I * sizeof(__nv_bfloat16), stream));
+    const Sm100Epilogue epilogue{.kind = Sm100Epilogue::SwiGLU};
+    launch_sm100_bf16_gemm({static_cast<const __nv_bfloat16*>(x.data),
+                            static_cast<const __nv_bfloat16*>(gu.qdata), 2 * I, H, tokens},
+                           epilogue, h, stream);
     return true;
 }
 

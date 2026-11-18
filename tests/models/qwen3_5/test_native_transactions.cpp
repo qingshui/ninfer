@@ -208,6 +208,16 @@ public:
         return std::move(*source);
     }
 
+    // The asynchronous binding contract: the lane publishes through a context operation that the
+    // caller settles. Synchronous bindings are covered by `bind` and the flight/fork cases.
+    q35::BindingReservation start_async(const q35::RequestBasePlan& base, runtime::LaneId lane,
+                                        const q35::SourceCandidate& source,
+                                        q35::ResumeState* resume = nullptr,
+                                        q35::ExecutionUnitKind kind = q35::ExecutionUnitKind::Decode,
+                                        std::uint32_t tokens        = 1) {
+        return program_.start_binding(base, lane, source, resume, kind, tokens, false);
+    }
+
     q35::SequenceHandle bind(const q35::RequestBasePlan& base, std::uint32_t lane = 0,
                              q35::ResumeState* resume           = nullptr,
                              q35::ExecutionUnitKind resume_kind = q35::ExecutionUnitKind::Decode) {
@@ -217,8 +227,8 @@ public:
                                     : resume->has_snapshot() ? GenerationRecoveryRoute::Snapshot
                                                              : GenerationRecoveryRoute::Direct;
         const auto target         = resume ? resume->frontier() : 0;
-        // A penalty-free root completes synchronously: the lane is schedulable when start_binding
-        // returns and no ContextProgress follows (the T05 root-binding contract).
+        // A root, or a binding from a Device checkpoint, completes synchronously: the lane is
+        // schedulable when start_binding returns and no ContextProgress follows.
         const auto reservation    = program_.start_binding(
             base, {lane}, source_for(base, resume), resume, resume_kind,
             resume_kind == q35::ExecutionUnitKind::Prefill ? 0 : 1);
@@ -279,7 +289,6 @@ public:
             require(!step.complete && !step.pending, "partial prefill sampled before its target");
             require(step.processed_prompt_tokens != 0, "partial prefill made no progress");
             processed += step.processed_prompt_tokens;
-            if (step.capture_ready) { program_.skip_capture(sequence); }
         }
         require(processed == tokens, "partial prefill crossed its requested frontier");
     }
@@ -292,9 +301,8 @@ public:
             reserve(sequence, q35::ExecutionUnitKind::Prefill);
             auto step = driver_.prefill(sequence);
             processed += step.processed_prompt_tokens;
-            if (step.capture_ready) { program_.skip_capture(sequence); }
             if (!step.complete) {
-                require(step.processed_prompt_tokens != 0 || step.capture_ready,
+                require(step.processed_prompt_tokens != 0,
                         "prefill made no observable progress");
                 continue;
             }
@@ -310,7 +318,6 @@ public:
                                                  (terminal ? runtime::CommitDisposition::Finishable
                                                            : runtime::CommitDisposition::Active),
                     "prefill commit returned the wrong request phase");
-            if (result.capture_ready[0]) { program_.skip_capture(sequence); }
             return step.summary;
         }
         throw std::runtime_error("prefill exceeded its bounded chunk count");
@@ -371,8 +378,6 @@ public:
             models::qwen::PreparedPromptAccess::take(std::move(prompt)), options);
         const auto sequence = bind(base);
         reserve(sequence, q35::ExecutionUnitKind::Prefill);
-        require(!program_.prepare_capture(sequence),
-                "history-disabled rewrite fixture requested a physical capture");
         auto step = driver_.prefill(sequence);
         require(step.complete && step.pending && !step.capture_ready &&
                     step.processed_prompt_tokens == tokens,
@@ -463,7 +468,8 @@ public:
         std::vector<std::uint32_t> frontiers;
     };
 
-    MarkerRequest marker_request() {
+    // `one_window` keeps the whole prompt inside one prefill chunk, so its only window is final.
+    MarkerRequest marker_request(bool one_window = false) {
         // Frontiers come from the real artifact tokenizer and public frontend markers.
         PromptInput input;
         ChatMessage system;
@@ -475,7 +481,7 @@ public:
         ChatMessage user;
         user.role = ChatRole::User;
         std::string content;
-        for (unsigned word = 0; word < 350; ++word) { content += "b "; }
+        for (unsigned word = 0; word < (one_window ? 8U : 350U); ++word) { content += "b "; }
         user.parts.push_back({.kind = MessagePartKind::Text, .text = content});
         input.messages.push_back(std::move(user));
         input.context_cache.allow_engine_automatic_shared_prefixes = false;
@@ -497,8 +503,11 @@ public:
         require(frontiers.size() == 3 && frontiers.front() != 0 && frontiers.back() < kChunk &&
                     std::adjacent_find(frontiers.begin(), frontiers.end()) == frontiers.end(),
                 "marker fixture did not create three distinct boundaries in one chunk");
-        require(prepared.token_ids.size() > frontiers.back() + 2 * kChunk,
-                "marker fixture has insufficient suffix to exercise ordinary chunks");
+        require(one_window ? prepared.token_ids.size() <= kChunk &&
+                                 prepared.token_ids.size() > frontiers.back() + 1
+                           : prepared.token_ids.size() > frontiers.back() + 2 * kChunk,
+                one_window ? "marker fixture does not fit one window after its boundaries"
+                           : "marker fixture has insufficient suffix to exercise ordinary chunks");
         runtime::ResolvedExecutionOptions options;
         options.requested_output_tokens = 8;
         options.allow_prefix_reuse      = true;
@@ -507,370 +516,94 @@ public:
                 std::move(frontiers)};
     }
 
-    q35::CheckpointHandle capture(q35::SequenceHandle sequence, std::uint32_t frontier,
-                                  runtime::CheckpointRole role) {
-        require(program_.capture_is_input(sequence) ==
-                    (role == runtime::CheckpointRole::InputReplay),
-                "capture offer confused an input recovery point with a shared prefix");
-        const auto before = program_.physical_usage();
-        require(program_.start_capture(sequence),
-                "offered semantic capture has no reserved destination");
-        const auto progress = settle();
-        require(progress.published && progress.captured_checkpoints.size() == 1,
-                "single-role capture did not publish exactly one recovery point");
-        const auto checkpoint = progress.captured_checkpoints.front();
-        const auto summary    = program_.checkpoint_summary(checkpoint);
-        require(summary.frontier == frontier && summary.role == role,
-                "capture publication changed its selected frontier or role");
-        if (role == runtime::CheckpointRole::InputReplay) {
-            const auto after = program_.physical_usage();
-            require(progress.operations.partial_tail_cow_pages == 0 &&
-                        after.kv_page_groups == before.kv_page_groups &&
-                        !transferred(progress, runtime::ContextTransferDirection::DeviceToDevice,
-                                     runtime::ContextTransferResource{q35::kTextKvPool}) &&
-                        !transferred(progress, runtime::ContextTransferDirection::DeviceToDevice,
-                                     runtime::ContextTransferResource{q35::kBackendKvPool}),
-                    "internal input recovery point copied or separately allocated KV history");
-        }
-        return checkpoint;
-    }
-
-    void capture_opportunities() {
-        auto marked          = marker_request();
-        const auto sequence  = bind(marked.base);
-        std::uint32_t cursor = 0;
-        std::vector<q35::CheckpointHandle> shared;
-        for (const auto frontier : marked.frontiers) {
-            reserve(sequence, q35::ExecutionUnitKind::Prefill);
-            const auto step = driver_.prefill(sequence);
-            require(step.processed_prompt_tokens == frontier - cursor && step.capture_ready &&
-                        !step.complete && !step.pending,
-                    "Native skipped an explicitly marked prefix boundary");
-            cursor = frontier;
-            shared.push_back(capture(sequence, frontier, runtime::CheckpointRole::SharedPrefix));
-        }
+    // A flight carries the explicit prefix boundaries of its window, cutting its traversal at each,
+    // and publishes them when it retires: no context operation, no quiet Session, at most two
+    // checkpoints per request. The caller takes them once the flight retired, and a second take
+    // finds nothing. A lane bound from such a checkpoint installs synchronously from the Device
+    // image.
+    void flight_checkpoints() {
+        auto marked         = marker_request();
+        const auto sequence = bind(marked.base);
         reserve(sequence, q35::ExecutionUnitKind::Prefill);
-        const auto ordinary = driver_.prefill(sequence);
-        require(ordinary.processed_prompt_tokens == kChunk && !ordinary.capture_ready &&
-                    !ordinary.complete && !ordinary.pending,
-                "ordinary prefill chunk created an unrequested recovery point");
-        require(driver_.abort(sequence).status == runtime::ConsumeStatus::Consumed,
-                "marker fixture did not release its active reader");
-        for (const auto point : shared) {
-            require(program_.release_checkpoint(point), "explicit prefix retained a reader");
+        const auto step = driver_.prefill(sequence);
+        require(step.processed_prompt_tokens == kChunk && !step.complete && !step.pending &&
+                    !step.capture_ready,
+                "a window with checkpoints stopped at a boundary or sampled");
+        require(!program_.has_context_operation(), "a flight checkpoint opened a context operation");
+        const auto taken = program_.take_flight_checkpoints(sequence);
+        require(taken.published.size() == 2 && taken.skipped == 0,
+                "the flight did not publish the first and the last marked boundary");
+        require(program_.take_flight_checkpoints(sequence).published.empty(),
+                "a flight checkpoint was taken twice");
+        std::vector<std::uint32_t> published;
+        for (const auto point : taken.published) {
+            const auto summary = program_.checkpoint_summary(point);
+            require(summary.role == runtime::CheckpointRole::SharedPrefix,
+                    "a flight checkpoint is not a shared prefix");
+            published.push_back(summary.frontier);
         }
-        expect_empty("explicit prefix captures leaked Context resources");
+        require(published == std::vector<std::uint32_t>{marked.frontiers.front(),
+                                                        marked.frontiers.back()},
+                "the flight checkpointed boundaries other than the first and the last");
 
-        for (const bool history : {true, false}) {
-            auto raw          = request(kPromptTokens, history);
-            const auto active = bind(raw);
-            for (unsigned chunk = 0; chunk < 2; ++chunk) {
-                reserve(active, q35::ExecutionUnitKind::Prefill);
-                const auto step = driver_.prefill(active);
-                require(step.processed_prompt_tokens == kChunk && !step.capture_ready &&
-                            !step.complete && !step.pending,
-                        "raw prefill chunk offered an unrequested recovery point");
-            }
-            require(driver_.abort(active).status == runtime::ConsumeStatus::Consumed,
-                    "raw chunk fixture did not release its lane");
-            expect_empty("ordinary chunks retained optional history");
-        }
+        const auto source = program_.inspect_source(marked.base, taken.published.back());
+        require(source.has_value(), "a published flight checkpoint is not a binding source");
+        const auto reservation = program_.start_binding(marked.base, {1}, *source);
+        require(static_cast<bool>(reservation) && reservation.synchronous &&
+                    reservation.sequence.has_value() && !program_.has_context_operation(),
+                "a Device checkpoint source did not bind synchronously");
+        driver_.idle();
+        require(!driver_.poll_context().has_value(),
+                "a synchronous checkpoint binding published a context operation");
+        reserve(*reservation.sequence, q35::ExecutionUnitKind::Prefill);
+        const auto resumed = driver_.prefill(*reservation.sequence);
+        require(resumed.processed_prompt_tokens != 0 && !resumed.complete,
+                "a lane bound from a checkpoint did not continue its prefill");
+        require(driver_.abort(*reservation.sequence).status == runtime::ConsumeStatus::Consumed &&
+                    driver_.abort(sequence).status == runtime::ConsumeStatus::Consumed,
+                "checkpoint fixture retained its lanes");
+        for (const auto point : taken.published)
+            require(program_.release_checkpoint(point), "a flight checkpoint retained a reader");
+        expect_empty("flight checkpoints leaked Context resources");
     }
 
-    void input_replay_lifecycle() {
-        // The non-page-aligned P shares its directory and tail with the active continuation.
-        constexpr std::uint32_t prompt_tokens = 2 * kChunk + 1;
-        auto base                             = request(prompt_tokens, true);
-        const auto active                     = bind(base);
-        prefill_prefix(active, 2 * kChunk);
-        reserve(active, q35::ExecutionUnitKind::Prefill);
-        auto begin = driver_.prefill(active);
-        require(begin.complete && begin.pending && begin.processed_prompt_tokens == 1,
-                "input replay fixture did not reach its full input boundary");
-        const std::array<runtime::CommitDecision, 1> accepted{{{.accepted_tokens = 1}}};
-        const auto committed = driver_.commit(std::move(*begin.pending), accepted);
-        require(committed.capture_ready[0], "full raw input did not offer its replay point");
-        const auto input = capture(active, prompt_tokens, runtime::CheckpointRole::InputReplay);
-
-        reserve(active, q35::ExecutionUnitKind::Decode, 1);
-        const std::array<q35::SequenceHandle, 1> members{active};
-        const std::array<runtime::RoundBudget, 1> budgets{{{.generated_tokens_remaining = 1}}};
-        auto pending = driver_.decode(members, budgets);
-        const std::array<runtime::CommitDecision, 1> terminal{
+    // The window that ends a request's prefill carries the checkpoints inside it like any other
+    // window. Its flight publishes them when it retires, which is after the commit of its token.
+    void final_window_checkpoints() {
+        auto marked         = marker_request(true);
+        const auto sequence = bind(marked.base);
+        reserve(sequence, q35::ExecutionUnitKind::Prefill);
+        auto step = driver_.prefill(sequence);
+        require(step.complete && step.pending && !step.capture_ready &&
+                    step.processed_prompt_tokens == marked.base.summary().prompt_tokens,
+                "the only window of a request did not end its prefill");
+        const auto early = program_.take_flight_checkpoints(sequence);
+        require(early.published.empty() && early.skipped == 0,
+                "a flight reported checkpoints before it retired");
+        const std::array<runtime::CommitDecision, 1> decision{
             {{.accepted_tokens = 1, .terminal = true}}};
-        (void)driver_.commit(std::move(pending), terminal);
-        const auto finished = driver_.finish(active);
-        require(finished.checkpoint && program_.valid_checkpoint(input),
-                "finishing E invalidated its retained input recovery point");
-        require(program_.release_checkpoint(*finished.checkpoint),
-                "input replay fixture could not retire the replaced endpoint");
-
-        const std::array<q35::CheckpointHandle, 1> points{input};
-        const auto candidate = program_.inspect_source(base, input, true, points);
-        require(candidate && candidate->reused_tokens == prompt_tokens && candidate->move_history &&
-                    !(candidate->state_action == q35::StateBindingAction::Move) &&
-                    candidate->private_points.size() == 1,
-                "repeated input did not retain P while adopting its private KV history");
-        require(static_cast<bool>(program_.start_binding(base, {1}, *candidate)),
-                "input replay could not reserve its writer");
-        const auto bound = settle();
-        require(bound.sequence &&
-                    bound.private_points == std::vector(points.begin(), points.end()) &&
-                    bound.retired_checkpoints.empty() && bound.operations.state_forks == 1 &&
-                    bound.operations.partial_tail_cow_pages == 0,
-                "input replay fork lost its carried point or copied a private KV tail");
-        finish_prefill(*bound.sequence, 0, true);
-        const auto repeated = driver_.finish(*bound.sequence);
-        require(repeated.checkpoint && program_.valid_checkpoint(input) &&
-                    program_.inspect_source(base, input).has_value(),
-                "carried input recovery point did not survive request completion");
-        require(program_.release_checkpoint(*repeated.checkpoint) &&
-                    program_.release_checkpoint(input),
-                "carried input point retained a completed request reader");
-        expect_empty("input recovery lifecycle leaked state or KV references");
-    }
-
-    void active_input_zero_growth_binding() {
-        for (const std::uint32_t prompt_tokens : {64U, 65U}) {
-            auto base           = request(prompt_tokens, true);
-            const auto original = bind(base);
-            reserve(original, q35::ExecutionUnitKind::Prefill);
-            auto begin = driver_.prefill(original);
-            require(begin.complete && begin.pending,
-                    "active input fixture did not reach its full input boundary");
-            const std::array<runtime::CommitDecision, 1> accepted{{{.accepted_tokens = 1}}};
-            const auto committed = driver_.commit(std::move(*begin.pending), accepted);
-            require(committed.capture_ready[0], "active input fixture did not offer P");
-            const auto input =
-                capture(original, prompt_tokens, runtime::CheckpointRole::InputReplay);
-
-            // Exact-input reuse needs no Main page beyond the exported prefix. The original
-            // request still owns the source writer while the second lane obtains its own view.
-            const auto candidate = program_.inspect_source(base, input);
-            require(candidate && candidate->reused_tokens == prompt_tokens &&
-                        static_cast<bool>(program_.start_binding(base, {1}, *candidate)),
-                    "active input could not reserve a second request without Main growth");
-            const bool copies_kv = std::any_of(
-                candidate->transfers.begin(), candidate->transfers.end(), [](const auto& transfer) {
-                    return !transfer.resource.is_state() &&
-                           transfer.direction == runtime::ContextTransferDirection::DeviceToDevice;
-                });
-            require(program_.context_blocks(original) == copies_kv,
-                    "binding blocked a writer inconsistently with its actual KV copy dependency");
-            const auto bound = settle();
-            require(bound.sequence && !program_.context_blocks(original) &&
-                        transferred(bound, runtime::ContextTransferDirection::DeviceToDevice,
-                                    runtime::ContextTransferResource{q35::kTextKvPool}) ==
-                            (prompt_tokens == 65),
-                    "active prefix binding did not settle its required tail copy and writer block");
-            finish_prefill(*bound.sequence, 0, false);
-
-            // Both writers must remain usable after the view publication, including growth at
-            // the page-aligned boundary and append within the separately copied partial tail.
-            for (const auto sequence : {original, *bound.sequence}) {
-                reserve(sequence, q35::ExecutionUnitKind::Decode, 1);
-                const std::array<q35::SequenceHandle, 1> members{sequence};
-                const std::array<runtime::RoundBudget, 1> budgets{
-                    {{.generated_tokens_remaining = 1}}};
-                auto pending = driver_.decode(members, budgets);
-                const std::array<runtime::CommitDecision, 1> terminal{
-                    {{.accepted_tokens = 1, .terminal = true}}};
-                const auto decoded = driver_.commit(std::move(pending), terminal);
-                require(decoded.rows[0].disposition == runtime::CommitDisposition::Finishable,
-                        "a writer could not progress after exporting its active prefix");
-                const auto finished = driver_.finish(sequence);
-                require(finished.checkpoint && program_.release_checkpoint(*finished.checkpoint) &&
-                            program_.valid_checkpoint(input),
-                        "independent completion invalidated the retained input point");
-            }
-            require(program_.release_checkpoint(input),
-                    "active prefix binding retained an independent writer reference");
-            expect_empty("zero-growth active input binding leaked physical resources");
-        }
-    }
-
-    void replay_carries_independent_input() {
-        constexpr std::uint32_t prompt_tokens = 65;
-        auto base                             = request(prompt_tokens, true);
-        // Equal input tokens, independently computed histories. B is a candidate for replay;
-        // A's retained P must continue to carry A's own state and KV together.
-        const auto source_b = checkpoint(base);
-        const auto active_a = bind(base);
-        reserve(active_a, q35::ExecutionUnitKind::Prefill);
-        auto begin = driver_.prefill(active_a);
-        require(begin.complete && begin.pending, "independent-history fixture did not begin A");
-        const std::array<runtime::CommitDecision, 1> accepted{{{.accepted_tokens = 1}}};
-        const auto committed = driver_.commit(std::move(*begin.pending), accepted);
-        require(committed.capture_ready[0], "independent-history fixture did not offer P_A");
-        const auto input_a = capture(active_a, prompt_tokens, runtime::CheckpointRole::InputReplay);
-        const std::array<q35::CheckpointHandle, 1> points_a{input_a};
-        const auto identity = [&](q35::CheckpointHandle point) {
-            const auto& snapshot = program_.checkpoints[point.index].value->snapshot;
-            auto result =
-                std::pair{snapshot.continuation().image, std::vector<models::context::HistoryId>{}};
-            for (const auto& prefix : snapshot.prefixes())
-                result.second.push_back(prefix.history());
-            return result;
-        };
-        const auto input_identity    = identity(input_a);
-        const auto source_identity   = identity(source_b);
-        const auto check_independent = [&] {
-            require(program_.valid_checkpoint(input_a) && program_.valid_checkpoint(source_b) &&
-                        identity(input_a) == input_identity &&
-                        identity(source_b) == source_identity,
-                    "recovery replaced an independently owned checkpoint identity");
-        };
-
-        reserve(active_a, q35::ExecutionUnitKind::Decode, 1);
-        const std::array<q35::SequenceHandle, 1> members{active_a};
-        const std::array<runtime::RoundBudget, 1> budgets{{{.generated_tokens_remaining = 1}}};
-        auto pending = driver_.decode(members, budgets);
-        (void)driver_.commit(std::move(pending), accepted);
-        require(program_.start_pause(active_a, {runtime::PauseKind::ReleaseAndReplay, {0}}),
-                "independent-history fixture could not pause A for replay");
-        auto paused = settle();
-        require(paused.paused && !paused.paused->has_snapshot() &&
-                    paused.paused->frontier() == prompt_tokens + 1,
-                "independent-history Replay pause lost A's committed target");
-        check_independent();
-        auto source = program_.inspect_source(base, source_b, false, points_a);
-        require(source.has_value(), "independent replay source did not match");
-        source->take_private   = true; // A owns these points even though B supplies the source.
-        const auto before_bind = program_.physical_usage();
-        require(source &&
-                    static_cast<bool>(program_.start_binding(base, {1}, *source, &*paused.paused)),
-                "A could not select independently computed B as its replay source");
-        auto rebound = settle();
-        paused.paused.reset();
-        require(rebound.sequence && (rebound.recovery.route == GenerationRecoveryRoute::Replay) &&
-                    rebound.private_points == std::vector<q35::CheckpointHandle>{input_a} &&
-                    program_.physical_usage().state_objects == before_bind.state_objects + 1,
-                "Replay did not transfer A's original point with exactly one new active writer");
-        check_independent();
-        reserve(*rebound.sequence, q35::ExecutionUnitKind::Replay);
-        const auto replayed = driver_.replay(*rebound.sequence);
-        require(replayed.complete && replayed.processed_tokens == 1 && !replayed.capture_ready,
-                "cross-source Replay rebuilt more than A's committed suffix");
-        require(program_.start_pause(*rebound.sequence, {runtime::PauseKind::HostSnapshot, {0}}),
-                "cross-source request could not snapshot its recovered execution");
-        auto snapshot = settle();
-        require(snapshot.paused && snapshot.paused->has_snapshot(),
-                "cross-source request lost its pause snapshot");
-        check_independent();
-        auto snapshot_source = source_for(base, &*snapshot.paused);
-        snapshot_source.private_points.assign(points_a.begin(), points_a.end());
-        snapshot_source.take_private = true;
-        require(static_cast<bool>(
-                    program_.start_binding(base, {0}, snapshot_source, &*snapshot.paused)),
-                "cross-source snapshot could not restore with its independent input point");
-        auto restored = settle();
-        snapshot.paused.reset();
-        require(restored.sequence &&
-                    !(restored.recovery.route == GenerationRecoveryRoute::Replay) &&
-                    restored.private_points == std::vector<q35::CheckpointHandle>{input_a},
-                "snapshot restore cloned or replaced A's owned input point");
-        check_independent();
-
-        // B's resumed writer remains active: P_A must still own a separately writable history.
-        const auto input_source = program_.inspect_source(base, input_a, true, points_a);
-        require(input_source && input_source->move_history &&
-                    static_cast<bool>(program_.start_binding(base, {1}, *input_source)),
-                "independent input point cannot bind while the recovered B history is active");
-        const auto input_bound = settle();
-        require(input_bound.sequence &&
-                    input_bound.private_points == std::vector<q35::CheckpointHandle>{input_a},
-                "independent input binding lost its retained recovery point");
-        finish_prefill(*input_bound.sequence, 0, true);
-        const auto finished = driver_.finish(*input_bound.sequence);
-        require(finished.checkpoint &&
-                    driver_.abort(*restored.sequence).status == runtime::ConsumeStatus::Consumed &&
-                    program_.release_checkpoint(*finished.checkpoint) &&
-                    program_.release_checkpoint(input_a) && program_.release_checkpoint(source_b),
-                "cross-source recovery did not release its independent history owners");
-        expect_empty("cross-source Replay and Snapshot retained physical references");
-    }
-
-    void retained_input_host_suffix() {
-        constexpr std::uint32_t prompt_tokens = 65;
-        auto base                             = request(prompt_tokens, true);
-        const auto active                     = bind(base);
-        reserve(active, q35::ExecutionUnitKind::Prefill);
-        auto begin = driver_.prefill(active);
-        require(begin.complete && begin.pending && begin.pending->tokens().size() == 1,
-                "Host suffix fixture did not produce one Begin token");
-        std::vector<TokenId> endpoint_input(prompt_tokens, 198);
-        endpoint_input.front() = 1000;
-        endpoint_input.push_back(begin.pending->tokens().front());
-        const std::array<runtime::CommitDecision, 1> accepted{{{.accepted_tokens = 1}}};
-        const auto committed = driver_.commit(std::move(*begin.pending), accepted);
-        require(committed.capture_ready[0], "Host suffix fixture did not offer P");
-        const auto input = capture(active, prompt_tokens, runtime::CheckpointRole::InputReplay);
-
-        // Extend the same history across complete KV pages, retaining the earlier input point.
-        const std::array<q35::SequenceHandle, 1> members{active};
-        std::array<TokenId, kChunk> forced;
-        forced.fill(198);
-        append_forced(active, forced);
-        endpoint_input.insert(endpoint_input.end(), forced.begin(), forced.end());
-        reserve(active, q35::ExecutionUnitKind::Decode, 1);
-        const std::array<runtime::RoundBudget, 1> budgets{{{.generated_tokens_remaining = 1}}};
-        auto pending = driver_.decode(members, budgets);
-        const std::array<runtime::CommitDecision, 1> terminal{
-            {{.accepted_tokens = 1, .terminal = true}}};
-        (void)driver_.commit(std::move(pending), terminal);
-        const auto finished = driver_.finish(active);
-        require(finished.checkpoint && program_.valid_checkpoint(input),
-                "Host suffix fixture lost its endpoint or retained input");
-        const auto endpoint = *finished.checkpoint;
-        const std::array<q35::CheckpointHandle, 2> history{input, endpoint};
-        demote_all(history);
-
-        runtime::ResolvedExecutionOptions options;
-        options.requested_output_tokens = 8;
-        options.allow_prefix_reuse      = true;
-        auto endpoint_base =
-            program_.plan_request(models::qwen::PreparedPromptAccess::take(
-                                      frontend_.prepare_tokens(std::move(endpoint_input))),
-                                  options);
-        const auto reader = program_.inspect_source(endpoint_base, endpoint);
-        require(reader && reader->reused_tokens == endpoint_base.summary().prompt_tokens,
-                "retained endpoint does not match its committed input");
-        const auto before_reader = program_.physical_usage();
-        require(static_cast<bool>(program_.start_binding(endpoint_base, {1}, *reader)),
-                "Host endpoint could not reserve an independent reader");
-        const std::array<q35::CheckpointHandle, 1> endpoint_set{endpoint};
-        require(program_.host_bytes_released(endpoint_set) == 0 &&
-                    !program_.release_checkpoint(endpoint),
-                "pending reader allowed its complete Host suffix to be reclaimed");
-        require(!settle(true).published, "Host suffix reader did not cancel");
-        expect_usage(before_reader, "cancelled Host reader changed retained history ownership");
-
-        const auto expected_release = program_.host_bytes_released(endpoint_set);
-        const auto before_release =
-            live_bytes(program_.physical_usage(), ContextMemoryDomain::Host);
-        require(expected_release > 0 && program_.release_checkpoint(endpoint),
-                "retiring E did not expose its unneeded Host suffix");
-        const auto after_release = live_bytes(program_.physical_usage(), ContextMemoryDomain::Host);
-        require(before_release >= after_release &&
-                    before_release - after_release == expected_release &&
-                    program_.valid_checkpoint(input),
-                "Host suffix release disagrees with its quote or invalidates retained P");
-
-        const std::array<q35::CheckpointHandle, 1> points{input};
-        const auto retained = program_.inspect_source(base, input, true, points);
-        require(retained && retained->reused_tokens == prompt_tokens &&
-                    static_cast<bool>(program_.start_binding(base, {0}, *retained)),
-                "retained P could not restore after its deeper endpoint was retired");
-        const auto restored = settle();
-        require(restored.sequence &&
-                    restored.private_points == std::vector<q35::CheckpointHandle>{input},
-                "restoring the trimmed history lost its retained input point");
-        finish_prefill(*restored.sequence, 0, true);
-        const auto repeated = driver_.finish(*restored.sequence);
-        require(repeated.checkpoint && program_.release_checkpoint(*repeated.checkpoint) &&
-                    program_.release_checkpoint(input),
-                "restored input history retained completed execution references");
-        expect_empty("retained input Host suffix fixture leaked physical resources");
+        const auto committed = driver_.commit(std::move(*step.pending), decision);
+        require(committed.rows.size() == 1 &&
+                    committed.rows[0].disposition == runtime::CommitDisposition::Finishable,
+                "the final window did not commit its first output");
+        const auto taken = program_.take_flight_checkpoints(sequence);
+        require(taken.published.size() == 2 && taken.skipped == 0,
+                "the final window did not publish the first and the last marked boundary");
+        std::vector<std::uint32_t> published;
+        for (const auto point : taken.published)
+            published.push_back(program_.checkpoint_summary(point).frontier);
+        require(published == std::vector<std::uint32_t>{marked.frontiers.front(),
+                                                        marked.frontiers.back()},
+                "the final window checkpointed boundaries other than the first and the last");
+        const auto finished = driver_.finish(sequence);
+        require(finished.status == runtime::ConsumeStatus::Consumed,
+                "the final window fixture did not finish");
+        if (finished.checkpoint)
+            require(program_.release_checkpoint(*finished.checkpoint),
+                    "the final window continuation retained a reader");
+        for (const auto point : taken.published)
+            require(program_.release_checkpoint(point), "a flight checkpoint retained a reader");
+        expect_empty("final window checkpoints leaked Context resources");
     }
 
     void private_move() {
@@ -880,7 +613,7 @@ public:
         require(candidate && (candidate->state_action == q35::StateBindingAction::Move) &&
                     candidate->move_history,
                 "exclusive continuation was not eligible for Move");
-        require(static_cast<bool>(program_.start_binding(base, {0}, *candidate)),
+        require(static_cast<bool>(start_async(base, {0}, *candidate)),
                 "exclusive continuation required a second State record");
         const auto bound = settle();
         require(bound.sequence && !program_.valid_checkpoint(source) &&
@@ -896,80 +629,12 @@ public:
         expect_empty("private Move retained its consumed owner");
     }
 
-    void capture_retry_after_reclaim() {
-        auto marked       = marker_request();
-        const auto active = bind(marked.base);
-        reserve(active, q35::ExecutionUnitKind::Prefill);
-        auto device_pressure = fill_capacity(models::context::ContextMemory::Device);
-        auto host_pressure   = fill_capacity(models::context::ContextMemory::Host);
-        const auto full      = program_.physical_usage();
-        for (unsigned attempt = 0; attempt < 2; ++attempt) {
-            const auto prepared = program_.prepare_capture(active);
-            require(prepared && !prepared->reserved &&
-                        prepared->frontier == marked.frontiers.front() &&
-                        !prepared->assessment.ready(),
-                    "failed capture lost its semantic boundary or capacity assessment");
-            expect_usage(full, "failed capture retained an unpublished reservation");
-        }
-        device_pressure.clear();
-        host_pressure.clear();
-        const auto prepared = program_.prepare_capture(active);
-        require(prepared && prepared->reserved && prepared->frontier == marked.frontiers.front(),
-                "capture did not retry its original boundary after capacity was reclaimed");
-        const auto step = driver_.prefill(active);
-        require(step.capture_ready && !step.complete &&
-                    step.processed_prompt_tokens == marked.frontiers.front(),
-                "retried capture advanced beyond its reserved boundary");
-        const auto saved =
-            capture(active, marked.frontiers.front(), runtime::CheckpointRole::SharedPrefix);
-        require(driver_.abort(active).status == runtime::ConsumeStatus::Consumed &&
-                    program_.release_checkpoint(saved),
-                "capture retry retained its owners");
-        expect_empty("capture retry retained physical ownership");
-    }
-
-    void capture_without_metadata() {
-        auto marked       = marker_request();
-        const auto active = bind(marked.base);
-        reserve(active, q35::ExecutionUnitKind::Prefill);
-        {
-            auto& budget = program_.directory.metadata_budget();
-            models::context::MetadataAccount pressure(budget);
-            pressure.acquire(budget.available());
-            require(!program_.prepare_capture(active),
-                    "unavailable checkpoint metadata was reported as State capacity pressure");
-        }
-        const auto step = driver_.prefill(active);
-        require(step.processed_prompt_tokens == kChunk && !step.complete && !step.capture_ready,
-                "optional metadata exhaustion blocked the reserved prefill unit");
-        require(driver_.abort(active).status == runtime::ConsumeStatus::Consumed,
-                "metadata pressure retained its active writer");
-        expect_empty("unavailable checkpoint metadata retained physical resources");
-    }
-
-    void capture_without_destination() {
-        auto marked       = marker_request();
-        const auto active = bind(marked.base);
-        reserve(active, q35::ExecutionUnitKind::Prefill);
-        auto device_pressure = fill_capacity(models::context::ContextMemory::Device);
-        auto host_pressure   = fill_capacity(models::context::ContextMemory::Host);
-        const auto step      = driver_.prefill(active);
-        require(step.processed_prompt_tokens == kChunk && !step.complete && !step.capture_ready,
-                "unavailable optional capture changed the native prefill unit");
-        require(driver_.abort(active).status == runtime::ConsumeStatus::Consumed,
-                "capture pressure retained its active writer");
-        device_pressure.clear();
-        host_pressure.clear();
-        expect_empty("unavailable optional capture retained resources");
-        next_request();
-    }
-
     void cancel_gpu_binding() {
         auto base         = request(65, true);
         const auto source = checkpoint(base);
         // An independent active writer makes the next binding require a real private tail.
         auto writer_candidate = program_.inspect_source(base, source);
-        require(writer_candidate && program_.start_binding(base, {1}, *writer_candidate),
+        require(writer_candidate && start_async(base, {1}, *writer_candidate),
                 "COW cancellation fixture could not bind its first writer");
         const auto writer = settle();
         require(writer.published && writer.sequence,
@@ -978,7 +643,7 @@ public:
         for (const bool submit_copy : {false, true}) {
             auto candidate = program_.inspect_source(base, source);
             require(candidate && candidate->reused_tokens == 65, "seed checkpoint is not reusable");
-            require(static_cast<bool>(program_.start_binding(base, {0}, *candidate)),
+            require(static_cast<bool>(start_async(base, {0}, *candidate)),
                     "checkpoint binding did not reserve its destinations");
             std::optional<q35::ContextProgress> completed;
             if (submit_copy) {
@@ -1035,7 +700,7 @@ public:
         const auto baseline = program_.physical_usage();
         auto candidate      = program_.inspect_source(base, source);
         require(candidate.has_value(), "Host checkpoint is not a valid recovery source");
-        require(static_cast<bool>(program_.start_binding(base, {1}, *candidate)),
+        require(static_cast<bool>(start_async(base, {1}, *candidate)),
                 "Host restore did not reserve its destinations");
         // start_binding has submitted H2D. Cancellation stays asserted while poll settles it.
         const auto cancelled = settle(true);
@@ -1184,152 +849,12 @@ public:
         next_request();
     }
 
-    void retired_host_image_preserves_input() {
-        auto base         = request(65, true);
-        const auto active = bind(base);
-        reserve(active, q35::ExecutionUnitKind::Prefill);
-        auto begin = driver_.prefill(active);
-        require(begin.pending.has_value(), "Host retirement fixture did not begin");
-        const std::array<runtime::CommitDecision, 1> accepted{{{.accepted_tokens = 1}}};
-        require(driver_.commit(std::move(*begin.pending), accepted).capture_ready[0],
-                "Host retirement fixture did not offer its input point");
-        const auto input = capture(active, 65, runtime::CheckpointRole::InputReplay);
-        reserve(active, q35::ExecutionUnitKind::Decode, 1);
-        const std::array<q35::SequenceHandle, 1> members{active};
-        const std::array<runtime::RoundBudget, 1> budgets{{{1}}};
-        auto output = driver_.decode(members, budgets);
-        const std::array<runtime::CommitDecision, 1> terminal{
-            {{.accepted_tokens = 1, .terminal = true}}};
-        (void)driver_.commit(std::move(output), terminal);
-        const auto finished = driver_.finish(active);
-        require(finished.checkpoint.has_value(), "Host retirement fixture lost its endpoint");
-        const auto endpoint = *finished.checkpoint;
-        const std::array retired{endpoint};
-        const auto quote = demotion(retired, runtime::ContextTransferResource{});
-        require(quote && program_.start_demote(*quote, {}) == runtime::ContextStart::Started &&
-                    settle().published,
-                "endpoint State could not move to Host");
-        auto device_pressure = fill_capacity(models::context::ContextMemory::Device);
-        auto host_pressure   = fill_capacity(models::context::ContextMemory::Host);
-        const std::array points{input};
-        const auto source = program_.inspect_source(base, input, true, points, retired);
-        require(source.has_value(), "retained input source was lost under capacity pressure");
-        const auto binding = program_.start_binding(base, {0}, *source);
-        require(binding && !binding.consumed_source,
-                "binding discarded input despite Host capacity released by authorized retirement");
-        const auto bound = settle();
-        require(bound.sequence && program_.valid_checkpoint(input) &&
-                    !program_.valid_checkpoint(endpoint) &&
-                    bound.private_points == std::vector(points.begin(), points.end()),
-                "retired Host capacity did not preserve the retained input checkpoint");
-        require(driver_.abort(*bound.sequence).status == runtime::ConsumeStatus::Consumed &&
-                    program_.release_checkpoint(input),
-                "Host retirement retained owners");
-        device_pressure.clear();
-        host_pressure.clear();
-        expect_empty("Host retirement leaked resources");
-    }
-
-    void rewind_binding_retirement() {
-        for (const bool releases_suffix : {false, true}) {
-            constexpr std::uint32_t prefix = 65;
-            auto original                  = request(prefix, true);
-            const auto active              = bind(original);
-            reserve(active, q35::ExecutionUnitKind::Prefill);
-            auto begin = driver_.prefill(active);
-            require(begin.pending.has_value(), "rewind fixture did not complete input");
-            const std::array<runtime::CommitDecision, 1> accepted{{{.accepted_tokens = 1}}};
-            require(driver_.commit(std::move(*begin.pending), accepted).capture_ready[0],
-                    "rewind fixture did not offer input recovery");
-            const auto input = capture(active, prefix, runtime::CheckpointRole::InputReplay);
-            const std::array<q35::SequenceHandle, 1> members{active};
-            if (releases_suffix) {
-                std::array<TokenId, kChunk> forced;
-                forced.fill(198);
-                append_forced(active, forced);
-            }
-            reserve(active, q35::ExecutionUnitKind::Decode, 1);
-            const std::array<runtime::RoundBudget, 1> budgets{{{.generated_tokens_remaining = 1}}};
-            auto output = driver_.decode(members, budgets);
-            const std::array<runtime::CommitDecision, 1> terminal{
-                {{.accepted_tokens = 1, .terminal = true}}};
-            (void)driver_.commit(std::move(output), terminal);
-            auto finished = driver_.finish(active);
-            require(finished.checkpoint.has_value(), "rewind fixture lost its deeper endpoint");
-            const auto endpoint = *finished.checkpoint;
-            auto competing      = request(kPromptTokens);
-            const auto blocker  = bind(competing, 1);
-            if (releases_suffix) {
-                prefill_prefix(blocker, 2 * kChunk);
-            } else {
-                finish_prefill(blocker, kPromptTokens, false);
-            }
-            auto rewritten = request(kCapacity, true);
-            const std::array<q35::CheckpointHandle, 1> retirement{endpoint};
-            auto choice = program_.inspect_source(rewritten, input, true, {}, retirement);
-            require(choice && choice->move_history &&
-                        (choice->state_action == q35::StateBindingAction::Move) &&
-                        program_.valid_checkpoint(input) && program_.valid_checkpoint(endpoint),
-                    "rewind evaluation mutated history or missed the authorized Move");
-            auto pressure = releases_suffix
-                                ? std::vector<models::context::ContextReservation>{}
-                                : fill_capacity(models::context::ContextMemory::Device, 0);
-            std::optional<models::context::StateDirectory::ReadLease> state_reader;
-            std::vector<models::context::PageDirectory::ReadLease> page_readers;
-            if (!releases_suffix) {
-                // Retiring an endpoint can now fund KV growth from its State block. Keep its
-                // physical readers alive so this branch tests a genuinely infeasible retirement.
-                const auto& record = program_.checkpoint(endpoint);
-                state_reader.emplace(program_.state_store->read(record.continuation().image));
-                for (const auto& prefix : record.snapshot.prefixes()) {
-                    auto& pool = program_.directory.pool(prefix.history().pool_id);
-                    for (std::uint32_t i = 0; i < pool.histories().mapped_pages(prefix.history());
-                         ++i)
-                        page_readers.push_back(pool.pages().pin_binding(
-                            pool.histories().logical_page(prefix.history(), i), 0,
-                            models::context::ContextMemory::Device));
-                }
-            }
-            const auto full = program_.physical_usage();
-            auto binding    = program_.start_binding(rewritten, {0}, *choice);
-            if (!releases_suffix) {
-                require(!binding && binding.source_valid && !binding.assessment.ready() &&
-                            !program_.has_context_operation() &&
-                            program_.valid_checkpoint(endpoint) && program_.valid_checkpoint(input),
-                        "failed rewind retired a still-useful checkpoint");
-                expect_usage(full, "failed rewind changed live resources");
-                page_readers.clear();
-                state_reader.reset();
-                pressure.clear();
-                require(driver_.abort(blocker).status == runtime::ConsumeStatus::Consumed,
-                        "rewind blocker could not release its resources");
-                binding = program_.start_binding(rewritten, {0}, *choice);
-            }
-            require(binding &&
-                        binding.retired_points ==
-                            std::vector(retirement.begin(), retirement.end()) &&
-                        !program_.valid_checkpoint(endpoint),
-                    "binding failed to fund its reservation from the authorized retired suffix");
-            const auto bound = settle();
-            require(bound.sequence && bound.operations.state_moves == 1 &&
-                        bound.operations.state_forks == 0 && !program_.valid_checkpoint(input),
-                    "rewind ownership handoff needlessly forked or retained its consumed source");
-            require(driver_.abort(*bound.sequence).status == runtime::ConsumeStatus::Consumed,
-                    "rewind binding could not release its writer");
-            if (releases_suffix) {
-                require(driver_.abort(blocker).status == runtime::ConsumeStatus::Consumed,
-                        "rewind suffix fixture leaked its blocking request");
-            }
-            expect_empty("rewind binding leaked retired history or unit reservations");
-        }
-    }
-
     void fork_capacity_retry() {
         auto prefix      = request(kCapacity - 1, true);
         const auto point = checkpoint(prefix);
         auto full        = request(kCapacity, true);
         const auto first = program_.inspect_source(full, point);
-        require(first && program_.start_binding(full, {1}, *first),
+        require(first && start_async(full, {1}, *first),
                 "fork fixture could not claim its first writer");
         const auto writer = settle();
         const auto source = program_.inspect_source(full, point);
@@ -1338,14 +863,14 @@ public:
         auto pressure      = fill_capacity(models::context::ContextMemory::Device);
         auto host_pressure = fill_capacity(models::context::ContextMemory::Host);
         const auto before  = program_.physical_usage();
-        const auto blocked = program_.start_binding(full, {0}, *source);
+        const auto blocked = start_async(full, {0}, *source);
         require(!blocked && blocked.source_valid && !blocked.assessment.ready() &&
                     program_.valid_checkpoint(point),
                 "blocked fork changed its retained source");
         expect_usage(before, "blocked fork leaked its partial reservation");
         pressure.clear();
         host_pressure.clear();
-        require(static_cast<bool>(program_.start_binding(full, {0}, *source)),
+        require(static_cast<bool>(start_async(full, {0}, *source)),
                 "fork failed after the competing reservation was released");
         const auto resumed = settle();
         require(resumed.sequence &&
@@ -1372,7 +897,7 @@ public:
             auto pressure     = fill_capacity(models::context::ContextMemory::Device, 0);
             const auto before = program_.physical_usage();
             const auto refused =
-                program_.start_binding(base, {0}, source_for(base, &*paused.paused),
+                start_async(base, {0}, source_for(base, &*paused.paused),
                                        &*paused.paused, q35::ExecutionUnitKind::Prefill, 0);
             require(!refused && !refused.assessment.ready() &&
                         paused.paused->has_snapshot() == snapshot,
@@ -1451,7 +976,7 @@ public:
                     "snapshot request fell back to replay instead of saving its snapshot");
             const auto saved = program_.physical_usage();
             {
-                require(static_cast<bool>(program_.start_binding(
+                require(static_cast<bool>(start_async(
                             base, {1}, source_for(base, &*paused.paused), &*paused.paused)),
                         "own snapshot could not reserve its complete restore");
                 const auto cancelled = settle(true);
@@ -1530,7 +1055,7 @@ public:
             std::optional<q35::SequenceHandle> writer;
             if (tokens % 64) {
                 const auto first = program_.inspect_source(seed, source);
-                require(first && program_.start_binding(seed, {1}, *first),
+                require(first && start_async(seed, {1}, *first),
                         "holder fixture could not obtain its independent tail writer");
                 const auto bound = settle();
                 require(bound.sequence.has_value(), "tail writer did not publish");
@@ -1538,7 +1063,7 @@ public:
             }
             auto extension    = request(tokens + 64, true);
             const auto choice = program_.inspect_source(extension, source);
-            require(choice && program_.start_binding(extension, {0}, *choice),
+            require(choice && start_async(extension, {0}, *choice),
                     "prefix fork failed");
             const auto bound = settle();
             require(bound.sequence.has_value(), "fork did not publish");
@@ -1628,7 +1153,7 @@ public:
         const auto host_bytes = program_.host_bytes_released(source_set);
         require(host_bytes > 0, "Host source has no releasable records");
         const auto candidate = program_.inspect_source(base, source);
-        require(candidate && program_.start_binding(base, {1}, *candidate),
+        require(candidate && start_async(base, {1}, *candidate),
                 "Host source could not bind");
         require(program_.host_bytes_released(source_set) == 0 &&
                     program_.plan_releases(source_set, {}, {}).releases.empty() &&
@@ -1655,7 +1180,7 @@ public:
                 "Host backup disagreed with its allocation quote");
         auto extension    = request(128, true);
         const auto choice = program_.inspect_source(extension, ancestor);
-        require(choice && program_.start_binding(extension, {1}, *choice),
+        require(choice && start_async(extension, {1}, *choice),
                 "shared Host fixture could not bind a descendant");
         const auto bound = settle();
         require(bound.sequence && program_.host_bytes_released(ancestor_set) == 0 &&
@@ -1710,7 +1235,7 @@ public:
                                         transfer.page_groups == 1;
                              }) == 1,
                 "mixed Device/Host recovery did not request exactly its missing prefix record");
-        require(static_cast<bool>(program_.start_binding(extension, {0}, *mixed)),
+        require(static_cast<bool>(start_async(extension, {0}, *mixed)),
                 "mixed Device/Host checkpoint could not restore");
         const auto restored = settle();
         require(restored.sequence &&
@@ -1811,6 +1336,7 @@ public:
             runtime::ResolvedExecutionOptions options;
             options.requested_output_tokens = 1;
             options.allow_prefix_reuse      = false;
+            // No sibling shares this prompt, so its prefill runs to the end.
             const auto base                 = program_.plan_request(
                 models::qwen::PreparedPromptAccess::take(frontend_.prepare_tokens(ids, false)),
                 options);
@@ -1836,7 +1362,6 @@ public:
                         "capped prefill unit processed more than its cap or nothing");
                 processed += step.processed_prompt_tokens;
                 require(processed <= kPromptTokens, "prefill crossed the prompt end");
-                if (step.capture_ready) program_.skip_capture(sequence);
             } while (!step.complete);
             rank.observer().submitted = nullptr;
             require(processed == kPromptTokens && row && step.pending &&
@@ -1888,142 +1413,6 @@ private:
     std::optional<runtime::ResidencyId> last_binding_;
 };
 
-void shared_capture_alignment(std::shared_ptr<const q35::ModelDefinition> definition,
-                              std::shared_ptr<const q35::ModelShard> model,
-                              std::shared_ptr<const q35::execution::ModelProfile> profile,
-                              ninfer::models::qwen::Frontend& frontend, EngineOptions options) {
-    options.max_context                       = 128;
-    options.max_concurrency                   = 2;
-    options.context_cache.enabled             = true;
-    options.context_cache.host_capacity_bytes = 0;
-    native::NativeRankFixture rank(definition, model, profile, options, {.retained_states = 2});
-    q35::detail::SessionImpl program(definition, std::move(rank.session_plan));
-    program.bind_executor(rank.executor());
-    native::EventDriver driver(program, rank);
-    const auto empty   = program.physical_usage();
-    const auto settle  = [&](bool cancelled = false) { return driver.settle(cancelled); };
-    const auto advance = [&](q35::SequenceHandle sequence) {
-        const std::array<q35::ExecutionUnit, 1> units{
-            {{sequence, q35::ExecutionUnitKind::Prefill}}};
-        require(static_cast<bool>(program.reserve_units(units)),
-                "aligned capture could not reserve its prefill unit");
-        auto step = driver.prefill(sequence);
-        if (step.pending) {
-            const std::array<runtime::CommitDecision, 1> accepted{{{.accepted_tokens = 1}}};
-            const auto committed = driver.commit(std::move(*step.pending), accepted);
-            step.capture_ready   = committed.capture_ready[0];
-        }
-        return step;
-    };
-    for (const std::uint32_t frontier : {64U, 65U}) {
-        for (const bool shared_input : {false, true}) {
-            // Exercise the Native contract with exact token positions. Frontend marker parsing
-            // is covered separately; these boundaries must not depend on a chat template.
-            const auto prompt_tokens = frontier + (shared_input ? 0U : 16U);
-            auto prepared            = ninfer::models::qwen::PreparedPromptAccess::take(
-                frontend.prepare_tokens(std::vector<TokenId>(prompt_tokens, 198)));
-            prepared.context_cache.opportunities.push_back(
-                {.kind     = PromptCacheMarkerKind::SharedStablePrefix,
-                 .evidence = SharedCandidateEvidence::ExplicitBoundary,
-                 .frontier = frontier});
-            runtime::ResolvedExecutionOptions request;
-            request.requested_output_tokens = 8;
-            request.allow_prefix_reuse      = true;
-            auto base                       = program.plan_request(std::move(prepared), request);
-            for (const bool cancel_capture : {true, false}) {
-                const auto root = program.inspect_source(base, std::nullopt);
-                // Penalty-free roots complete synchronously and publish no ContextProgress.
-                const auto reservation =
-                    program.start_binding(base, {0}, *root, nullptr,
-                                          q35::ExecutionUnitKind::Prefill, 0);
-                require(root && static_cast<bool>(reservation),
-                        "aligned capture could not bind its source writer");
-                std::optional<q35::SequenceHandle> bound;
-                if (reservation.synchronous) {
-                    driver.idle();
-                    bound = program.sequences[0].id;
-                } else {
-                    const auto published = settle();
-                    require(published.published && published.sequence,
-                            "aligned capture source did not publish");
-                    bound = published.sequence;
-                }
-                const auto original = *bound;
-                const auto step     = advance(original);
-                require(step.processed_prompt_tokens == frontier && step.capture_ready &&
-                            step.complete == shared_input,
-                        "aligned Shared capture was skipped or crossed its frontier");
-                require(program.start_capture(original),
-                        "aligned Shared capture could not reserve its destination");
-                const auto captured = settle(cancel_capture);
-                if (cancel_capture) {
-                    require(!captured.published && captured.captured_checkpoints.empty(),
-                            "cancelled aligned capture published a checkpoint");
-                } else {
-                    require(captured.published &&
-                                captured.captured_checkpoints.size() == (shared_input ? 2U : 1U),
-                            "aligned capture dropped its Shared or InputReplay role");
-                    std::optional<q35::CheckpointHandle> shared;
-                    for (const auto point : captured.captured_checkpoints) {
-                        const auto summary = program.checkpoint_summary(point);
-                        require(summary.frontier == frontier,
-                                "aligned capture published the wrong frontier");
-                        if (summary.role == runtime::CheckpointRole::SharedPrefix) {
-                            shared = point;
-                        } else {
-                            require(shared_input &&
-                                        summary.role == runtime::CheckpointRole::InputReplay,
-                                    "aligned capture published an unexpected role");
-                        }
-                    }
-                    require(shared && captured.operations.partial_tail_cow_pages == 0 &&
-                                !transferred(captured,
-                                             runtime::ContextTransferDirection::DeviceToDevice,
-                                             runtime::ContextTransferResource{q35::kTextKvPool}) &&
-                                !transferred(captured,
-                                             runtime::ContextTransferDirection::DeviceToDevice,
-                                             runtime::ContextTransferResource{q35::kBackendKvPool}),
-                            "read-only capture copied Main or backend tails");
-                    require(program.checkpoints[captured.captured_checkpoints.front().index]
-                                    .value->snapshot.continuation()
-                                    .image ==
-                                program.checkpoints[captured.captured_checkpoints.back().index]
-                                    .value->snapshot.continuation()
-                                    .image,
-                            "same-frontier capture allocated a State per logical role");
-
-                    // A real independent writer must adopt the saved prefix and compute only
-                    // its suffix while the original writer and both logical roles remain live.
-                    const auto source = program.inspect_source(base, *shared);
-                    require(
-                        source && source->reused_tokens == frontier &&
-                            static_cast<bool>(program.start_binding(
-                                base, {1}, *source, nullptr, q35::ExecutionUnitKind::Prefill, 0)),
-                        "captured aligned Shared prefix could not bind another request");
-                    const auto reused = settle();
-                    require(reused.sequence.has_value(), "Shared prefix binding did not publish");
-                    const auto suffix = advance(*reused.sequence);
-                    require(suffix.complete &&
-                                suffix.processed_prompt_tokens == prompt_tokens - frontier,
-                            "Shared prefix binding repeated or skipped the saved input");
-                    if (suffix.capture_ready) { program.skip_capture(*reused.sequence); }
-                    require(driver.abort(*reused.sequence).status ==
-                                runtime::ConsumeStatus::Consumed,
-                            "Shared prefix reader retained execution resources");
-                }
-                require(driver.abort(original).status == runtime::ConsumeStatus::Consumed,
-                        "aligned capture retained its source writer");
-                for (const auto point : captured.captured_checkpoints) {
-                    require(program.release_checkpoint(point),
-                            "aligned capture retained a checkpoint reader");
-                }
-                require(same_ownership(program.physical_usage(), empty),
-                        "aligned capture or cancellation leaked physical resources");
-            }
-        }
-    }
-}
-
 void replay_sampling_counts(std::shared_ptr<const q35::ModelDefinition> definition,
                             std::shared_ptr<const q35::ModelShard> model,
                             std::shared_ptr<const q35::execution::ModelProfile> profile,
@@ -2053,7 +1442,7 @@ void replay_sampling_counts(std::shared_ptr<const q35::ModelDefinition> definiti
     const auto bind   = [&](std::uint32_t lane, q35::ResumeState* resume) {
         auto source = program.inspect_source(base, std::nullopt);
         require(source && static_cast<bool>(program.start_binding(
-                              base, {lane}, *source, resume, q35::ExecutionUnitKind::Decode, 1)),
+                              base, {lane}, *source, resume, q35::ExecutionUnitKind::Decode, 1, false)),
                   "sampling-count fixture could not bind its lane");
         auto progress = settle();
         require(progress.published && progress.sequence,
@@ -2154,10 +1543,10 @@ void replay_sampling_counts(std::shared_ptr<const q35::ModelDefinition> definiti
             "sampling-count fixture leaked Context resources");
 }
 
-// Final windows pack with other segments and mix with decode rows; a penalty-free root binding
-// installs synchronously without publishing a context operation while a penalized one completes
-// asynchronously and publishes it, and a sample fork installs children that share the rested
-// parent's whole-page KV and decode the last prompt token with their own sampling.
+// Final windows pack with other segments and mix with decode rows; a root binding installs
+// synchronously without publishing a context operation, and a sample fork makes the parent branch 0
+// and installs children that share the rested parent's whole-page KV, all decoding the last prompt
+// token from the same flight.
 void sample_fork_and_packed_finals(std::shared_ptr<const q35::ModelDefinition> definition,
                                    std::shared_ptr<const q35::ModelShard> model,
                                    std::shared_ptr<const q35::execution::ModelProfile> profile,
@@ -2173,36 +1562,33 @@ void sample_fork_and_packed_finals(std::shared_ptr<const q35::ModelDefinition> d
     const auto empty = program.physical_usage();
     const auto stage = [](const char* label) { std::cerr << "stage: " << label << '\n'; };
 
-    const auto plan = [&](std::uint32_t tokens, float penalty) {
+    const auto plan = [&](std::uint32_t tokens, float penalty, std::uint32_t samples = 1) {
         std::vector<TokenId> ids(tokens, 198);
         ids.front()                              = 1000;
         runtime::ResolvedExecutionOptions request;
         request.requested_output_tokens          = 8;
         request.sampling.presence_penalty        = penalty;
         request.sampling.frequency_penalty       = penalty;
+        request.sample_count                     = samples;
         return program.plan_request(
             ninfer::models::qwen::PreparedPromptAccess::take(
                 frontend.prepare_tokens(std::move(ids), true)),
             request);
     };
-    const auto bind_root = [&](const q35::RequestBasePlan& base, std::uint32_t lane,
-                               bool synchronous_expected) {
+    // Every root binding completes synchronously, with or without penalties: its installation and
+    // State clearing ride the stream order of the lane's first flight.
+    const auto bind_root = [&](const q35::RequestBasePlan& base, std::uint32_t lane) {
         auto source = program.inspect_source(base, std::nullopt);
         require(source.has_value(), "fork fixture has no root source");
         auto reservation = program.start_binding(base, runtime::LaneId{lane}, *source, nullptr,
                                                  q35::ExecutionUnitKind::Prefill, 0);
         require(static_cast<bool>(reservation), "root binding did not reserve its lane");
-        require(reservation.synchronous == synchronous_expected,
-                synchronous_expected ? "penalty-free root binding was asynchronous"
-                                     : "penalized root binding completed synchronously");
+        require(reservation.synchronous && reservation.sequence.has_value(),
+                "root binding was asynchronous");
+        require(!program.has_context_operation(), "synchronous root binding opened a context operation");
         driver.idle();
-        if (synchronous_expected) {
-            require(!driver.poll_context().has_value(),
-                    "synchronous root binding published a context operation");
-        } else {
-            require(driver.poll_context().has_value(),
-                    "penalized root binding did not publish its asynchronous completion");
-        }
+        require(!driver.poll_context().has_value(),
+                "synchronous root binding published a context operation");
         return program.sequences[lane].id;
     };
     const auto reserve = [&](std::span<const q35::ExecutionUnit> units) {
@@ -2218,74 +1604,99 @@ void sample_fork_and_packed_finals(std::shared_ptr<const q35::ModelDefinition> d
         driver.idle();
     };
 
-    // A penalty-free prompt rests its parent at the fork frontier instead of sampling.
-    stage("penalty-free parent");
+    // The parent of a sample group rests at the fork frontier instead of sampling, with or without
+    // penalties: penalty counts cover generated tokens only, so every branch starts empty.
+    stage("penalized parent");
     const std::uint32_t prompt = 64;
-    const auto parent_base    = plan(prompt, 0.0F);
+    const auto unshared_base  = plan(prompt, 0.5F);
+    require(unshared_base.fork_frontier() == 0, "a prompt nobody shares gained a fork frontier");
+    const auto parent_base    = plan(prompt, 0.5F, 3);
     require(parent_base.fork_frontier() == prompt - 1,
-            "penalty-free request lost its sample fork frontier");
+            "sample group member lost its fork frontier");
     require(program.sample_fork_limit() == 4, "sample fork limit does not cover every free lane");
-    const auto parent = bind_root(parent_base, 0, true);
+    const auto parent = bind_root(parent_base, 0);
     prefill_window(parent, prompt - 1);
-    require(!program.start_prefill({&parent, 1}, {}).has_value(),
-            "fork parent admitted a window past its resting frontier");
+    const std::array<q35::ExecutionUnit, 1> rested{{{parent, q35::ExecutionUnitKind::Prefill}}};
+    require(!static_cast<bool>(program.reserve_units(rested)),
+            "fork parent reserved a window past its resting frontier");
     // Forking a parent that has not rested is rejected before any child lane changes.
-    const auto early_base = plan(prompt, 0.0F);
-    const auto early      = bind_root(early_base, 1, true);
+    const auto early_base = plan(prompt, 0.0F, 3);
+    const auto early      = bind_root(early_base, 1);
     bool rejected         = false;
     try {
-        const std::array<runtime::LaneId, 2> early_children{runtime::LaneId{2},
-                                                            runtime::LaneId{3}};
-        (void)program.fork(early, early_children);
+        const std::array<q35::ForkGroupRequest, 1> early_group{
+            {{.parent = early, .children = {runtime::LaneId{2}, runtime::LaneId{3}}}}};
+        (void)program.fork_batch(early_group);
     } catch (const std::logic_error&) { rejected = true; }
     require(rejected, "fork accepted a parent that did not rest at its frontier");
     require(driver.abort(early).status == runtime::ConsumeStatus::Consumed,
             "rejected fork fixture retained its lane");
 
-    // Children share the whole-page prefix and decode the last prompt token each.
-    stage("fork children");
-    const std::array<runtime::LaneId, 2> child_lanes{runtime::LaneId{2}, runtime::LaneId{3}};
-    const auto forked = program.fork(parent, child_lanes);
-    require(forked.reserved && forked.children.size() == 2,
+    // The parent is branch 0: the group decodes three rows, the parent and both children, from
+    // the same flight, with no context operation and no helper lane.
+    stage("fork batch");
+    const std::array<q35::ForkGroupRequest, 1> group{
+        {{.parent = parent, .children = {runtime::LaneId{2}, runtime::LaneId{3}}}}};
+    const auto forked = program.fork_batch(group);
+    require(forked.size() == 1 && forked[0].reserved && forked[0].children.size() == 2,
             "fork did not reserve the requested children");
+    require(!program.has_context_operation(), "fork opened a context operation");
     driver.idle();
     require(!driver.poll_context().has_value(), "fork published a context operation");
-    const std::array<q35::ExecutionUnit, 2> decode_units{
-        {{forked.children[0], q35::ExecutionUnitKind::Decode, 1},
-         {forked.children[1], q35::ExecutionUnitKind::Decode, 1}}};
+    const std::array<q35::SequenceHandle, 3> members{parent, forked[0].children[0],
+                                                     forked[0].children[1]};
+    const std::array<q35::ExecutionUnit, 3> decode_units{
+        {{members[0], q35::ExecutionUnitKind::Decode, 1},
+         {members[1], q35::ExecutionUnitKind::Decode, 1},
+         {members[2], q35::ExecutionUnitKind::Decode, 1}}};
     reserve(decode_units);
-    const std::array<q35::SequenceHandle, 2> members{forked.children[0], forked.children[1]};
-    const std::array<runtime::RoundBudget, 2> budgets{
-        {{.generated_tokens_remaining = 1}, {.generated_tokens_remaining = 1}}};
+    const std::array<runtime::RoundBudget, 3> budgets{{{.generated_tokens_remaining = 1},
+                                                       {.generated_tokens_remaining = 1},
+                                                       {.generated_tokens_remaining = 1}}};
     auto pending = driver.decode(members, budgets);
-    require(pending.row_count() == 2 && pending.tokens().size() == 2,
-            "fork children did not decode one token each");
-    const std::array<runtime::CommitDecision, 2> terminal{
-        {{.accepted_tokens = 1, .terminal = true}, {.accepted_tokens = 1, .terminal = true}}};
-    const auto committed = driver.commit(std::move(pending), terminal);
-    require(committed.row_count == 2 &&
+    require(pending.row_count() == 3 && pending.tokens().size() == 3,
+            "fork branches did not decode one token each");
+    const std::array<runtime::CommitDecision, 3> terminal3{{{.accepted_tokens = 1, .terminal = true},
+                                                            {.accepted_tokens = 1, .terminal = true},
+                                                            {.accepted_tokens = 1, .terminal = true}}};
+    const auto committed = driver.commit(std::move(pending), terminal3);
+    require(committed.row_count == 3 &&
                 std::all_of(committed.rows.begin(), committed.rows.end(),
                             [](const auto& row) {
                                 return row.disposition == runtime::CommitDisposition::Finishable;
                             }),
-            "fork children did not reach a finishable phase");
-    for (const auto child : forked.children) {
-        const auto finished = driver.finish(child);
+            "fork branches did not reach a finishable phase");
+    for (const auto branch : members) {
+        const auto finished = driver.finish(branch);
         require(finished.status == runtime::ConsumeStatus::Consumed,
-                "fork child did not release its execution resources");
+                "fork branch did not release its execution resources");
     }
-    require(driver.abort(parent).status == runtime::ConsumeStatus::Consumed,
-            "fork parent kept its lane after every child finished");
     require(same_ownership(program.physical_usage(), empty),
             "sample fork leaked Context resources");
 
+    // A group without children only moves its parent to decoding.
+    stage("fork without children");
+    const auto lone_base = plan(prompt, 0.0F, 2);
+    const auto lone      = bind_root(lone_base, 0);
+    prefill_window(lone, prompt - 1);
+    const std::array<q35::ForkGroupRequest, 1> lone_group{{{.parent = lone}}};
+    const auto lone_result = program.fork_batch(lone_group);
+    require(lone_result.size() == 1 && lone_result[0].reserved && lone_result[0].children.empty(),
+            "a group without children was not accepted");
+    require(driver.abort(lone).status == runtime::ConsumeStatus::Consumed,
+            "childless fork parent retained its lane");
+    require(same_ownership(program.physical_usage(), empty),
+            "childless fork leaked Context resources");
+
+    const std::array<runtime::CommitDecision, 2> terminal2{
+        {{.accepted_tokens = 1, .terminal = true}, {.accepted_tokens = 1, .terminal = true}}};
     // Two final windows pack into one prefill; each final segment carries one decision line.
     stage("packed finals");
     const std::uint32_t long_prompt = 200, short_prompt = 64;
     const auto long_base             = plan(long_prompt, 0.5F);
     const auto short_base            = plan(short_prompt, 0.5F);
-    const auto pack_long             = bind_root(long_base, 0, false);
-    const auto pack_short            = bind_root(short_base, 1, false);
+    const auto pack_long             = bind_root(long_base, 0);
+    const auto pack_short            = bind_root(short_base, 1);
     prefill_window(pack_long, 128);
     const std::array<q35::SequenceHandle, 2> pack{pack_long, pack_short};
     const std::array<q35::ExecutionUnit, 2> pack_units{
@@ -2313,7 +1724,7 @@ void sample_fork_and_packed_finals(std::shared_ptr<const q35::ModelDefinition> d
     // producing segment.
     stage("mixed final window");
     const auto mixed_base = plan(long_prompt, 0.5F);
-    const auto mixed_seq  = bind_root(mixed_base, 2, false);
+    const auto mixed_seq  = bind_root(mixed_base, 2);
     prefill_window(mixed_seq, 128);
     const std::array<q35::ExecutionUnit, 2> mixed_units{
         {{mixed_seq, q35::ExecutionUnitKind::Prefill},
@@ -2334,7 +1745,7 @@ void sample_fork_and_packed_finals(std::shared_ptr<const q35::ModelDefinition> d
             "mixed batch lost the producing segment or the decode row");
     const auto mixed_commit =
         driver.commit(std::move(mixed_progress.decode),
-                      std::span<const runtime::CommitDecision>{terminal});
+                      std::span<const runtime::CommitDecision>{terminal2});
     require(mixed_commit.row_count == 2, "mixed commit lost a decision row");
     for (const auto sequence : {mixed_seq, pack_short}) {
         require(driver.finish(sequence).status == runtime::ConsumeStatus::Consumed,
@@ -2466,15 +1877,10 @@ int main(int argc, char** argv) {
                 stage(label);
                 (fixture.*case_)();
             };
-            run("capture_without_metadata", &Fixture::capture_without_metadata);
-            run("capture_opportunities", &Fixture::capture_opportunities);
-            run("input_replay_lifecycle", &Fixture::input_replay_lifecycle);
-            run("active_input_zero_growth_binding", &Fixture::active_input_zero_growth_binding);
+            run("flight_checkpoints", &Fixture::flight_checkpoints);
+            run("final_window_checkpoints", &Fixture::final_window_checkpoints);
             run("consecutive_decode_terminal", &Fixture::consecutive_decode_terminal);
             run("rewrite_segments_share_prefill_unit", &Fixture::rewrite_segments_share_prefill_unit);
-            run("replay_carries_independent_input", &Fixture::replay_carries_independent_input);
-            run("retained_input_host_suffix", &Fixture::retained_input_host_suffix);
-            run("retired_host_image_preserves_input", &Fixture::retired_host_image_preserves_input);
             run("raw_identity_opt_out", &Fixture::raw_identity_opt_out);
             run("cancel_gpu_binding", &Fixture::cancel_gpu_binding);
             run("cancel_host_restore", &Fixture::cancel_host_restore);
@@ -2491,13 +1897,10 @@ int main(int argc, char** argv) {
             std::cerr << "fixture stage: rewind block\n";
             SessionFixture instance(definition, model, profile, options, {.retained_states = 2});
             Fixture fixture(instance.rank, instance.session, frontend);
-            fixture.rewind_binding_retirement();
             fixture.fork_capacity_retry();
             fixture.recovery_capacity_and_progress();
             fixture.restore_own_snapshot();
-            fixture.capture_without_destination();
             fixture.private_move();
-            fixture.capture_retry_after_reclaim();
         }
         {
             std::cerr << "fixture stage: bf16 geometry\n";
@@ -2507,8 +1910,6 @@ int main(int argc, char** argv) {
             Fixture fixture(instance.rank, instance.session, frontend);
             fixture.capped_prefill_matches_uncapped(instance.rank);
         }
-        std::cerr << "fixture stage: shared_capture_alignment\n";
-        shared_capture_alignment(definition, model, profile, frontend, options);
         std::cerr << "fixture stage: replay_sampling_counts\n";
         replay_sampling_counts(definition, model, profile, frontend, options);
         if (backend == SpeculativeBackend::None) {

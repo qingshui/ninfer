@@ -31,7 +31,8 @@ struct RuntimeTypes {
     using MixedProgress     = qwen3_5::MixedProgress;
     using PrefillStart      = qwen3_5::PrefillStart;
     using MixedStart        = qwen3_5::MixedStart;
-    using ForkResult        = qwen3_5::ForkResult;
+    using ForkGroupRequest  = qwen3_5::ForkGroupRequest;
+    using ForkGroupResult   = qwen3_5::ForkGroupResult;
     using ReplayProgress    = qwen3_5::ReplayProgress;
     using CommitResult      = qwen3_5::CommitResult;
     using DiscardResult     = qwen3_5::DiscardResult;

@@ -197,7 +197,10 @@ def qwen3_5_122b_nvfp4(model, recipe, sources):
     on BF16 weights alongside the NVFP4 expert-major banks, so the artifact stores
     the decoded shared matrices instead of preserving their published codes. Every
     expert of a layer still shares one activation divisor pair stored in a single
-    FP32 tensor.
+    FP32 tensor. The published BF16 GDN query/key/value/z and output projections
+    are quantized per row to E4M3 with FP32 scales, the representation of the B200
+    tcgen05 W8A8 route; the two small a/b projections stay BF16. The vocabulary
+    head is stored as BF16 for the tcgen05 BF16 route; the embedding stays Q8.
     """
     if "num_experts" not in model.config:
         raise ValueError("this official recipe requires Qwen3.5 MoE mathematics")
@@ -215,7 +218,7 @@ def qwen3_5_122b_nvfp4(model, recipe, sources):
     )
     _optional(model, recipe)
     _assign(recipe, "text/token_embedding", Q8)
-    _assign(recipe, "text/output_head", Q8)
+    _assign(recipe, "text/output_head", "bf16")
     recipe.place("text/*", (0,))
     if "vision" in model.components:
         recipe.place("vision/*", (1, 0))
@@ -240,6 +243,16 @@ def qwen3_5_122b_nvfp4(model, recipe, sources):
             method=import_encoded,
             activation_policy="AllowA4",
         )
+    for name in model.parameters:
+        if name.startswith("text/layers/") and name.endswith(
+            ("/gdn/query", "/gdn/key", "/gdn/value", "/gdn/z", "/gdn/output")
+        ):
+            recipe.assign(
+                name,
+                format=FP8_FP32,
+                method=fp8_row_fp32_maxabs,
+                activation_policy="AllowA8",
+            )
     for name, parameter in model.parameters.items():
         if not name.startswith("text/layers/") or not parameter.projection:
             continue

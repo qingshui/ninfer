@@ -108,8 +108,9 @@ std::vector<PauseOption> SessionImpl::pause_options(SequenceHandle handle) const
     const auto frontier = control.lifecycle == Lifecycle::Prefilling
                               ? control.prefill->cursor
                               : state.continuation.metadata.execution_frontier;
+    // A lane whose installation still waits for its first flight holds no State to snapshot.
     bool can_snapshot   = control.lifecycle != Lifecycle::Replaying && frontier && state.kv &&
-                        state_store->valid(state.continuation.image);
+                        !deferred_bindings[index] && state_store->valid(state.continuation.image);
     if (can_snapshot && control.base->vision)
         can_snapshot = control.base->vision->can_checkpoint(frontier);
 
@@ -118,11 +119,11 @@ std::vector<PauseOption> SessionImpl::pause_options(SequenceHandle handle) const
         state_store->can_abort_write(state.continuation.image, state.write_state()))
         optional_storage = directory.state_release(state.write_state());
 
-    if (control.capture_reservation) {
-        const auto destination = control.capture_reservation->state;
-        if (state_store->can_release(destination))
-            optional_storage.merge(directory.state_release(destination));
-    }
+    // The State images reserved for checkpoints of a window no flight carries yet are optional
+    // storage a pause can return.
+    for (const auto& flight : control.reserved_checkpoints)
+        if (flight.image.valid() && state_store->can_release(flight.image))
+            optional_storage.merge(directory.state_release(flight.image));
 
     std::vector<PauseOption> result;
     if (can_snapshot) {
@@ -186,11 +187,7 @@ bool SessionImpl::pause_contributes(SequenceHandle handle, const PauseOption& op
     if (assessment.metadata_contribution(option.released) ||
         directory.useful_release_bytes(option.released, assessment))
         return true;
-    const auto index    = lane(handle);
-    const auto& capture = requests[index].capture_reservation;
-    if (capture && capture->host &&
-        capture->host->contributes_to(assessment.placement, assessment.metadata_shortage))
-        return true;
+    const auto index  = lane(handle);
     const auto& state = sequences[index];
     if (!state.kv) return false;
     return text_kv_histories->growth_contributes(state.kv->text.handle(), assessment.placement,
@@ -211,7 +208,8 @@ bool SessionImpl::prepare_pause(SequenceHandle handle, runtime::PauseAction acti
     const auto index = lane(handle);
     auto& state      = sequences[index];
     auto& control    = requests[index];
-    control.capture_reservation.reset();
+    // The pause counted the State images reserved for the lane's next window as storage it frees.
+    control.reserved_checkpoints.clear();
     const auto released = checkpoint_release_set(host_victims);
     if (!released) return false;
     ContextDemand demand;
@@ -282,8 +280,8 @@ bool SessionImpl::start_pause(SequenceHandle handle, runtime::PauseAction action
 
 bool SessionImpl::continue_pause_ready(SequenceHandle handle, runtime::PauseAction action) {
     auto& control = requests[lane(handle)];
-    control.capture_reservation.reset();
-    if (control.capture_pending) skip_capture(handle);
+    // A pause returns the State images reserved for the lane's next window.
+    control.reserved_checkpoints.clear();
     control.recovery.reset();
     if (pause_reservation_->normalization) {
         auto execution = std::move(*pause_reservation_->normalization);
@@ -315,7 +313,12 @@ bool SessionImpl::begin_pause(SequenceHandle handle, runtime::PauseAction action
     auto& control            = requests[lane];
     if (!pause_reservation_) throw std::logic_error("pause has no context execution reservation");
     const auto residency = state.residency;
-    control.capture_reservation.reset();
+    // A lane that never ran has installed nothing: its deferred installation is discarded and its
+    // residency has nothing to release.
+    const bool uninstalled = deferred_bindings[lane] && deferred_bindings[lane]->install;
+    if (deferred_bindings[lane] && save_snapshot)
+        throw std::logic_error("a lane awaiting its first flight cannot save a snapshot");
+    discard_deferred_binding(lane);
     auto saved      = std::make_unique<ResumeStateImpl>();
     saved->owner    = this;
     saved->frontier = control.lifecycle == Lifecycle::Prefilling ? control.prefill->cursor
@@ -361,7 +364,7 @@ bool SessionImpl::begin_pause(SequenceHandle handle, runtime::PauseAction action
         if (pause_cancelled_) migration.cancel();
         pause_cancelled_ = false;
         ContextWork work;
-        work.releases.push_back(residency);
+        if (!uninstalled) work.releases.push_back(residency);
         (void)submit_context(*context_operation_, std::move(work));
         return true;
     } catch (...) {

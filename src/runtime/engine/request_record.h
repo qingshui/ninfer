@@ -178,6 +178,9 @@ struct RequestRecord {
         return model_state == EngineRequestState::ModelFinished;
     }
 
+    // Still waiting in the pending queue: neither admitted nor completed. Worker thread only.
+    [[nodiscard]] bool is_queued() const noexcept { return !admitted_at && !response_done; }
+
     // The process range follows Request ownership across submit, worker, and consumer threads.
     nvtx::ScopedAsyncRange generation_range;
     const std::uint64_t id;
@@ -209,6 +212,8 @@ struct RequestRecord {
     std::uint64_t placement_tokens = 0;
     std::atomic<bool> cancelled{false};
     EngineRequestState model_state        = EngineRequestState::Waiting;
+    // Only a Session that cannot write checkpoints inside its flights (see EngineCore's
+    // kInFlightCapture) ever sets these two.
     bool capture_pending                  = false;
     EngineRequestState post_capture_state = EngineRequestState::Prefill;
     std::optional<FinishReason> terminal_reason;
@@ -216,10 +221,6 @@ struct RequestRecord {
     bool consumed_by_commit = false;
 
     std::optional<BasePlan> base_plan;
-    // A clone of the request's prompt kept for the fork-path parent helper, stashed before the
-    // request's own plan consumes the prompt. Empty once the helper took it or the request is
-    // not forkable.
-    std::optional<PreparedPrompt> fork_prompt;
     std::optional<ResumeState> suspended;
     ContinuationOwnerToken continuation_owner = 0;
     std::uint64_t device_to_host_bytes        = 0;
@@ -236,12 +237,9 @@ struct RequestRecord {
     bool completion_observed              = false;
     std::optional<RecoveryProgress> recovery;
     std::optional<Clock::time_point> last_progress;
-    // Sample-group linkage. A group member names its group by id and its branch by index; the
-    // fork-path parent helper is engine-internal: it carries no consumer, counts no request
-    // statistic, and only prefills the shared prefix before the fork.
+    // Sample-group linkage. A group member names its group by id and its branch by index.
     std::uint64_t sample_group_id  = 0;
     std::uint32_t branch_index     = 0;
-    bool sample_helper             = false;
     std::uint64_t preemption_count  = 0;
     std::uint64_t replay_restores   = 0;
     std::uint64_t snapshot_restores = 0;

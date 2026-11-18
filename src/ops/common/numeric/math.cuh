@@ -66,6 +66,14 @@ __device__ __forceinline__ float rcp_approx_ftz(float x) {
     return y;
 }
 
+// silu from the hardware exponential and reciprocal: 3.2e-7 worst relative error against the
+// IEEE form (about three FP32 ulp), and the BF16 rounding of the result differs for 4 inputs in a
+// million. For callers that round to BF16 or FP4 right after, where the IEEE expf and division
+// sequences are what bounds the kernel.
+__device__ __forceinline__ float silu_approx(float x) {
+    return x * rcp_approx_ftz(1.0f + exp_approx_ftz(-x));
+}
+
 template <bool TanhApprox>
 __device__ __forceinline__ float gelu(float value) {
     constexpr float kInvSqrt2 = 0.70710678118654752440f;

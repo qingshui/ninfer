@@ -38,7 +38,7 @@ __global__ __launch_bounds__(Block) void causal_conv_temporal_kernel(
             const float a  = fmaf(w3.x, x.x, fmaf(w2.x, h2.x, fmaf(w1.x, h1.x, w0.x * h0.x)));
             const float b  = fmaf(w3.y, x.y, fmaf(w2.y, h2.y, fmaf(w1.y, h1.y, w0.y * h0.y)));
             *destination.at(static_cast<std::int32_t>(t)) =
-                __floats2bfloat162_rn(common::silu(a), common::silu(b));
+                __floats2bfloat162_rn(common::silu_approx(a), common::silu_approx(b));
             h0 = h1;
             h1 = h2;
             h2 = x;

@@ -1,5 +1,7 @@
 #include "support.h"
 
+#include "ops/linear/fp8_row_fp32_t4/reps.h"
+
 namespace ninfer::test::gdn_input_conv {
 namespace {
 quantized_weight::PackedWeight make_first(Profile p, bool record) {
@@ -45,25 +47,40 @@ const char* policy_name(ops::LinearPolicy p) {
     throw std::logic_error("unknown policy");
 }
 
-Weights::Weights(Profile p, bool record) : profile(p), first(make_first(p, record)) {
+Weights::Weights(Profile p, bool record) : profile(p) {
+    if (p.format == QType::FP8_E4M3FN_ROW_FP32) {
+        fp8 = std::make_unique<t4::Fp8RowFp32Rep>(2 * p.qk_rows + 2 * p.value_rows(), p.hidden);
+        return;
+    }
+    first.emplace(make_first(p, record));
     if (p.format == QType::Q4_G64_FP16)
         second.emplace(quantized_weight::make_patterned_weight(
             QType::Q5_G64_FP16, 2 * p.value_rows(), p.hidden, record ? 1403 : 619));
 }
 
+Weights::~Weights() = default;
+
 ops::ProjectionWeights Weights::projection(ops::LinearPolicy policy) const {
-    if (second) return ops::PairedProjectionWeights{{first.view()}, {second->view()}};
-    return ops::SingleProjectionWeight{first.view(), policy};
+    if (fp8) return ops::SingleProjectionWeight{fp8->view(), policy};
+    if (second) return ops::PairedProjectionWeights{{first->view()}, {second->view()}};
+    return ops::SingleProjectionWeight{first->view(), policy};
 }
 
 double Weights::project(int row, const float* input) const {
+    if (fp8) {
+        const auto decoded = fp8->decode_row(row);
+        double acc         = 0.0;
+        for (int c = 0; c < profile.hidden; ++c) acc += decoded[c] * static_cast<double>(input[c]);
+        return acc;
+    }
     if (second && row >= 4096)
         return quantized_weight::dot_fp64(second->host, row - 4096, input, profile.hidden);
-    return quantized_weight::dot_fp64(first.host, row, input, profile.hidden);
+    return quantized_weight::dot_fp64(first->host, row, input, profile.hidden);
 }
 
 int Weights::preserved() const {
-    return first.verify_preserved("input-conv first weight") +
+    if (fp8) return fp8->verify_preserved("input-conv fp8 weight");
+    return first->verify_preserved("input-conv first weight") +
            (second ? second->verify_preserved("input-conv second weight") : 0);
 }
 } // namespace ninfer::test::gdn_input_conv

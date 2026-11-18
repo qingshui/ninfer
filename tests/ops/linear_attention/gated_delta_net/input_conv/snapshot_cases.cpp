@@ -94,6 +94,17 @@ std::vector<SnapshotCase> cases(Profile p) {
         batch(1, 17, {}, 1043U);
         batch(1, 520, {}, 1051U);
         result.back().graph = true;
+    } else if (p.format == QType::FP8_E4M3FN_ROW_FP32) {
+        // Qwen3.5-122B on B200: the tcgen05 route multiplies E4M3 codes, so every case permits A8.
+        for (int t : {2, 15, 16, 17, 129, 1025}) {
+            batch(t, 1, {}, 1021U + t, Policy::AllowA8);
+            result.back().full_reference = t == 2;
+        }
+        batch(16, 3, {16, 9, 4}, 1031U, Policy::AllowA8);
+        batch(8, 8, {8, 7, 6, 5, 4, 3, 2, 1}, 1037U, Policy::AllowA8);
+        batch(1, 17, {}, 1043U, Policy::AllowA8);
+        batch(1, 520, {}, 1051U, Policy::AllowA8);
+        result.back().graph = true;
     } else {
         result = {{.width = 1},
                   {3},
@@ -113,7 +124,8 @@ std::vector<SnapshotCase> cases(Profile p) {
         batch(16, 8, {16, 13, 11, 7, 5, 3, 2, 1}, 941, Policy::AllowA8);
     }
     // The persistent single-token publication has its own public entry and offset mapping.
-    batch(1, 1, {}, 977U);
+    batch(1, 1, {}, 977U,
+          p.format == QType::FP8_E4M3FN_ROW_FP32 ? Policy::AllowA8 : Policy::A16Only);
     result.back().graph = true;
     return result;
 }
@@ -244,6 +256,34 @@ int snapshot_capacity_contract() {
         std::cerr << "BF16 snapshot capacity admitted a batch past the decode-lane ceiling\n";
         ++failures;
     } catch (const std::invalid_argument&) {}
+#if NINFER_TARGET_B200
+    // The 122B FP8 profile runs the tcgen05 route: A16-only permission has no route, and the
+    // interval query covers the activation quantization scratch of its widest execution.
+    const auto fp8_tcgen05_capacity = [&](ops::LinearPolicy policy, std::int32_t batch,
+                                          std::int32_t first, std::int32_t last) {
+        return ops::gdn_input_proj_conv_snapshot_workspace_capacity_bytes(
+            ops::SingleProjectionWeight{capacity_weight(QType::FP8_E4M3FN_ROW_FP32, 20480, 3072),
+                                        policy},
+            batch, first, last);
+    };
+    try {
+        (void)fp8_tcgen05_capacity(ops::LinearPolicy::A16Only, 1, 1, 16);
+        std::cerr << "FP8 tcgen05 snapshot capacity accepted A16Only\n";
+        ++failures;
+    } catch (const std::invalid_argument&) {}
+    {
+        std::size_t peak = 0;
+        for (int width = 1; width <= 16; ++width)
+            peak = std::max(peak,
+                            fp8_tcgen05_capacity(ops::LinearPolicy::AllowA8, full_lanes, width,
+                                                 width));
+        if (peak == 0 ||
+            fp8_tcgen05_capacity(ops::LinearPolicy::AllowA8, full_lanes, 1, 16) != peak) {
+            std::cerr << "FP8 tcgen05 snapshot interval missed its interior high-water\n";
+            ++failures;
+        }
+    }
+#endif
     return failures;
 }
 
