@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 554" width="880" height="554" role="img" aria-labelledby="t d" font-family="'DejaVu Sans', Verdana, system-ui, -apple-system, 'Segoe UI', sans-serif">
+<title id="t">Static retention cap against the pool-headroom controller</title><desc id="d">Request throughput of the locked harness for static retained-point caps and for the pool-headroom controller on the phase A tree</desc>
+<style>svg{--surface:#fcfcfb;--ink1:#0b0b0b;--ink2:#52514e;--muted:#898781;--grid:#e1e0d9;--axis:#c3c2b7;--s1:#2a78d6;--s2:#eb6834;--s3:#1baf7a;--s4:#eda100;--s5:#e87ba4;--s6:#008300;--s7:#6250d6;--s8:#e34948;--b250:#86b6ef;--b100:#cde2fb;--white:#ffffff;--good:#006300}@media (prefers-color-scheme:dark){svg{--surface:#1a1a19;--ink1:#f0efec;--ink2:#c3c2b7;--muted:#898781;--grid:#2c2c2a;--axis:#383835;--s1:#3987e5;--s2:#d95926;--s3:#199e70;--s4:#c98500;--s5:#d55181;--s6:#008300;--s7:#9085e9;--s8:#e66767;--b250:#3987e5;--b100:#184f95;--white:#ffffff;--good:#0ca30c}}.f-surface{fill:#fcfcfb;fill:var(--surface)}.s-surface{stroke:#fcfcfb;stroke:var(--surface)}.f-ink1{fill:#0b0b0b;fill:var(--ink1)}.s-ink1{stroke:#0b0b0b;stroke:var(--ink1)}.f-ink2{fill:#52514e;fill:var(--ink2)}.s-ink2{stroke:#52514e;stroke:var(--ink2)}.f-muted{fill:#898781;fill:var(--muted)}.s-muted{stroke:#898781;stroke:var(--muted)}.f-grid{fill:#e1e0d9;fill:var(--grid)}.s-grid{stroke:#e1e0d9;stroke:var(--grid)}.f-axis{fill:#c3c2b7;fill:var(--axis)}.s-axis{stroke:#c3c2b7;stroke:var(--axis)}.f-s1{fill:#2a78d6;fill:var(--s1)}.s-s1{stroke:#2a78d6;stroke:var(--s1)}.f-s2{fill:#eb6834;fill:var(--s2)}.s-s2{stroke:#eb6834;stroke:var(--s2)}.f-s3{fill:#1baf7a;fill:var(--s3)}.s-s3{stroke:#1baf7a;stroke:var(--s3)}.f-s4{fill:#eda100;fill:var(--s4)}.s-s4{stroke:#eda100;stroke:var(--s4)}.f-s5{fill:#e87ba4;fill:var(--s5)}.s-s5{stroke:#e87ba4;stroke:var(--s5)}.f-s6{fill:#008300;fill:var(--s6)}.s-s6{stroke:#008300;stroke:var(--s6)}.f-s7{fill:#6250d6;fill:var(--s7)}.s-s7{stroke:#6250d6;stroke:var(--s7)}.f-s8{fill:#e34948;fill:var(--s8)}.s-s8{stroke:#e34948;stroke:var(--s8)}.f-b250{fill:#86b6ef;fill:var(--b250)}.s-b250{stroke:#86b6ef;stroke:var(--b250)}.f-b100{fill:#cde2fb;fill:var(--b100)}.s-b100{stroke:#cde2fb;stroke:var(--b100)}.f-white{fill:#ffffff;fill:var(--white)}.s-white{stroke:#ffffff;stroke:var(--white)}.f-good{fill:#006300;fill:var(--good)}.s-good{stroke:#006300;stroke:var(--good)}</style>
+<rect class="f-surface" width="880" height="554"/>
+<text x="24" y="30" font-size="16" text-anchor="start" class="f-ink1" font-weight="700">Retention control: static cap against pool-headroom controller (req/s)</text>
+<text x="24" y="50" font-size="12" text-anchor="start" class="f-ink2">Single runs of the locked harness (c=130, n=4) on the phase A tree, original artifact. Higher is better.</text>
+<path d="M26,71H32A2,2 0 0 1 34,73V79A2,2 0 0 1 32,81H26A2,2 0 0 1 24,79V73A2,2 0 0 1 26,71Z" class="f-muted"/>
+<text x="39" y="80" font-size="12" text-anchor="start" class="f-ink2">Static retained-point cap (superseded)</text>
+<path d="M292.72,71H298.72A2,2 0 0 1 300.72,73V79A2,2 0 0 1 298.72,81H292.72A2,2 0 0 1 290.72,79V73A2,2 0 0 1 292.72,71Z" class="f-b250"/>
+<text x="305.72" y="80" font-size="12" text-anchor="start" class="f-ink2">Pool-headroom controller</text>
+<text x="24" y="110" font-size="12" text-anchor="start" class="f-ink1" font-weight="700">A. Static cap on retained checkpoints: a cliff once the pool fills</text>
+<line x1="274.5" y1="120" x2="274.5" y2="270" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="274.5" y="285" font-size="11" text-anchor="middle" class="f-muted">0</text>
+<line x1="406.5" y1="120" x2="406.5" y2="270" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="406.5" y="285" font-size="11" text-anchor="middle" class="f-muted">20</text>
+<line x1="539.5" y1="120" x2="539.5" y2="270" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="539.5" y="285" font-size="11" text-anchor="middle" class="f-muted">40</text>
+<line x1="671.5" y1="120" x2="671.5" y2="270" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="671.5" y="285" font-size="11" text-anchor="middle" class="f-muted">60</text>
+<line x1="804.5" y1="120" x2="804.5" y2="270" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="804.5" y="285" font-size="11" text-anchor="middle" class="f-muted">80</text>
+<line x1="274.5" y1="120" x2="274.5" y2="270" class="s-axis" stroke-width="1" stroke-linecap="butt"/>
+<text x="264" y="139" font-size="12" text-anchor="end" class="f-ink2">cap 290</text>
+<path d="M274,127H652.82A4,4 0 0 1 656.82,131V139A4,4 0 0 1 652.82,143H274V127Z" class="f-muted"><title>cap 290: 57.78 req/s</title></path>
+<text x="664.82" y="139" font-size="12" text-anchor="start" class="f-ink1">57.78</text>
+<text x="264" y="163" font-size="12" text-anchor="end" class="f-ink2">cap 330</text>
+<path d="M274,151H660.84A4,4 0 0 1 664.84,155V163A4,4 0 0 1 660.84,167H274V151Z" class="f-muted"><title>cap 330: 58.99 req/s</title></path>
+<text x="672.84" y="163" font-size="12" text-anchor="start" class="f-ink1">58.99</text>
+<text x="264" y="187" font-size="12" text-anchor="end" class="f-ink2">cap 380</text>
+<path d="M274,175H575.77A4,4 0 0 1 579.77,179V187A4,4 0 0 1 575.77,191H274V175Z" class="f-muted"><title>cap 380: 46.15 req/s</title></path>
+<text x="587.77" y="187" font-size="12" text-anchor="start" class="f-ink1">46.15</text>
+<text x="264" y="211" font-size="12" text-anchor="end" class="f-ink2">cap 420</text>
+<path d="M274,199H527.2A4,4 0 0 1 531.2,203V211A4,4 0 0 1 527.2,215H274V199Z" class="f-muted"><title>cap 420: 38.82 req/s</title></path>
+<text x="539.2" y="211" font-size="12" text-anchor="start" class="f-ink1">38.82</text>
+<text x="264" y="235" font-size="12" text-anchor="end" class="f-ink2">cap 480</text>
+<path d="M274,223H492.95A4,4 0 0 1 496.95,227V235A4,4 0 0 1 492.95,239H274V223Z" class="f-muted"><title>cap 480: 33.65 req/s</title></path>
+<text x="504.95" y="235" font-size="12" text-anchor="start" class="f-ink1">33.65</text>
+<text x="264" y="259" font-size="12" text-anchor="end" class="f-ink2">cap 700</text>
+<path d="M274,247H487.71A4,4 0 0 1 491.71,251V259A4,4 0 0 1 487.71,263H274V247Z" class="f-muted"><title>cap 700: 32.86 req/s</title></path>
+<text x="499.71" y="259" font-size="12" text-anchor="start" class="f-ink1">32.86</text>
+<text x="24" y="310" font-size="12" text-anchor="start" class="f-ink1" font-weight="700">B. Controller: trim the least valuable checkpoints when free pool bytes fall below a share of capacity</text>
+<line x1="274.5" y1="320" x2="274.5" y2="470" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="274.5" y="485" font-size="11" text-anchor="middle" class="f-muted">0</text>
+<line x1="406.5" y1="320" x2="406.5" y2="470" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="406.5" y="485" font-size="11" text-anchor="middle" class="f-muted">20</text>
+<line x1="539.5" y1="320" x2="539.5" y2="470" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="539.5" y="485" font-size="11" text-anchor="middle" class="f-muted">40</text>
+<line x1="671.5" y1="320" x2="671.5" y2="470" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="671.5" y="485" font-size="11" text-anchor="middle" class="f-muted">60</text>
+<line x1="804.5" y1="320" x2="804.5" y2="470" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="804.5" y="485" font-size="11" text-anchor="middle" class="f-muted">80</text>
+<line x1="274.5" y1="320" x2="274.5" y2="470" class="s-axis" stroke-width="1" stroke-linecap="butt"/>
+<text x="264" y="339" font-size="12" text-anchor="end" class="f-ink2">free pool &gt;= 12.5% (1/8)</text>
+<path d="M274,327H651.96A4,4 0 0 1 655.96,331V339A4,4 0 0 1 651.96,343H274V327Z" class="f-b250"><title>free pool &gt;= 12.5% (1/8): 57.65 req/s</title></path>
+<text x="663.96" y="339" font-size="12" text-anchor="start" class="f-ink1">57.65</text>
+<text x="264" y="363" font-size="12" text-anchor="end" class="f-ink2">free pool &gt;= 10% (1/10)</text>
+<path d="M274,351H651.76A4,4 0 0 1 655.76,355V363A4,4 0 0 1 651.76,367H274V351Z" class="f-b250"><title>free pool &gt;= 10% (1/10): 57.62 req/s</title></path>
+<text x="663.76" y="363" font-size="12" text-anchor="start" class="f-ink1">57.62</text>
+<text x="264" y="387" font-size="12" text-anchor="end" class="f-ink2">free pool &gt;= 8.3% (1/12)</text>
+<path d="M274,375H652.23A4,4 0 0 1 656.23,379V387A4,4 0 0 1 652.23,391H274V375Z" class="f-b250"><title>free pool &gt;= 8.3% (1/12): 57.69 req/s</title></path>
+<text x="664.23" y="387" font-size="12" text-anchor="start" class="f-ink1">57.69</text>
+<text x="264" y="411" font-size="12" text-anchor="end" class="f-ink2">free pool &gt;= 6.25% (1/16)</text>
+<path d="M274,399H654.94A4,4 0 0 1 658.94,403V411A4,4 0 0 1 654.94,415H274V399Z" class="f-b250"><title>free pool &gt;= 6.25% (1/16): 58.10 req/s</title></path>
+<text x="666.94" y="411" font-size="12" text-anchor="start" class="f-ink1">58.10</text>
+<text x="264" y="435" font-size="12" text-anchor="end" class="f-ink1" font-weight="700">free pool &gt;= 5% (1/20, default)</text>
+<path d="M274,423H657.53A4,4 0 0 1 661.53,427V435A4,4 0 0 1 657.53,439H274V423Z" class="f-b250"><title>free pool &gt;= 5% (1/20, default): 58.49 req/s</title></path>
+<text x="669.53" y="435" font-size="12" text-anchor="start" class="f-ink1" font-weight="700">58.49</text>
+<text x="264" y="459" font-size="12" text-anchor="end" class="f-ink2">free pool &gt;= 4.2% (1/24)</text>
+<path d="M274,447H662.1A4,4 0 0 1 666.1,451V459A4,4 0 0 1 662.1,463H274V447Z" class="f-b250"><title>free pool &gt;= 4.2% (1/24): 59.18 req/s</title></path>
+<text x="674.1" y="459" font-size="12" text-anchor="start" class="f-ink1">59.18</text>
+<text x="24" y="498" font-size="10.5" text-anchor="start" class="f-muted">Run-to-run spread in phase A was about 0.5 req/s, so differences among the controller rows are not resolved by single runs.</text>
+<text x="24" y="512" font-size="10.5" text-anchor="start" class="f-muted">Lineage-first eviction was on for caps 290 and 330 (cap 330 without it: 57.33); the notes do not record it for caps 380 to 700.</text>
+<text x="24" y="526" font-size="10.5" text-anchor="start" class="f-muted">The 1/24 row had persistent skipped checkpoints and was not chosen; 1/20 had none in steady state. Rows are runs 23 to 35.</text>
+</svg>

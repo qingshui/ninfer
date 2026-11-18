@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 360" width="880" height="360" role="img" aria-labelledby="t d" font-family="'DejaVu Sans', Verdana, system-ui, -apple-system, 'Segoe UI', sans-serif">
+<title id="t">Serving throughput before and after</title><desc id="d">Request throughput of the locked harness for HEAD, the build after phase A, the sglang reference and the final build</desc>
+<style>svg{--surface:#fcfcfb;--ink1:#0b0b0b;--ink2:#52514e;--muted:#898781;--grid:#e1e0d9;--axis:#c3c2b7;--s1:#2a78d6;--s2:#eb6834;--s3:#1baf7a;--s4:#eda100;--s5:#e87ba4;--s6:#008300;--s7:#6250d6;--s8:#e34948;--b250:#86b6ef;--b100:#cde2fb;--white:#ffffff;--good:#006300}@media (prefers-color-scheme:dark){svg{--surface:#1a1a19;--ink1:#f0efec;--ink2:#c3c2b7;--muted:#898781;--grid:#2c2c2a;--axis:#383835;--s1:#3987e5;--s2:#d95926;--s3:#199e70;--s4:#c98500;--s5:#d55181;--s6:#008300;--s7:#9085e9;--s8:#e66767;--b250:#3987e5;--b100:#184f95;--white:#ffffff;--good:#0ca30c}}.f-surface{fill:#fcfcfb;fill:var(--surface)}.s-surface{stroke:#fcfcfb;stroke:var(--surface)}.f-ink1{fill:#0b0b0b;fill:var(--ink1)}.s-ink1{stroke:#0b0b0b;stroke:var(--ink1)}.f-ink2{fill:#52514e;fill:var(--ink2)}.s-ink2{stroke:#52514e;stroke:var(--ink2)}.f-muted{fill:#898781;fill:var(--muted)}.s-muted{stroke:#898781;stroke:var(--muted)}.f-grid{fill:#e1e0d9;fill:var(--grid)}.s-grid{stroke:#e1e0d9;stroke:var(--grid)}.f-axis{fill:#c3c2b7;fill:var(--axis)}.s-axis{stroke:#c3c2b7;stroke:var(--axis)}.f-s1{fill:#2a78d6;fill:var(--s1)}.s-s1{stroke:#2a78d6;stroke:var(--s1)}.f-s2{fill:#eb6834;fill:var(--s2)}.s-s2{stroke:#eb6834;stroke:var(--s2)}.f-s3{fill:#1baf7a;fill:var(--s3)}.s-s3{stroke:#1baf7a;stroke:var(--s3)}.f-s4{fill:#eda100;fill:var(--s4)}.s-s4{stroke:#eda100;stroke:var(--s4)}.f-s5{fill:#e87ba4;fill:var(--s5)}.s-s5{stroke:#e87ba4;stroke:var(--s5)}.f-s6{fill:#008300;fill:var(--s6)}.s-s6{stroke:#008300;stroke:var(--s6)}.f-s7{fill:#6250d6;fill:var(--s7)}.s-s7{stroke:#6250d6;stroke:var(--s7)}.f-s8{fill:#e34948;fill:var(--s8)}.s-s8{stroke:#e34948;stroke:var(--s8)}.f-b250{fill:#86b6ef;fill:var(--b250)}.s-b250{stroke:#86b6ef;stroke:var(--b250)}.f-b100{fill:#cde2fb;fill:var(--b100)}.s-b100{stroke:#cde2fb;stroke:var(--b100)}.f-white{fill:#ffffff;fill:var(--white)}.s-white{stroke:#ffffff;stroke:var(--white)}.f-good{fill:#006300;fill:var(--good)}.s-good{stroke:#006300;stroke:var(--good)}</style>
+<rect class="f-surface" width="880" height="360"/>
+<text x="24" y="30" font-size="16" text-anchor="start" class="f-ink1" font-weight="700">Request throughput of the locked harness (2000 requests, c=130, n=4)</text>
+<text x="24" y="50" font-size="12" text-anchor="start" class="f-ink2">req/s, higher is better. Same client, dataset and serving flags for every bar. The vertical line is the 91.5 req/s target.</text>
+<line x1="194.5" y1="94" x2="194.5" y2="270" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="194.5" y="285" font-size="11" text-anchor="middle" class="f-muted">0</text>
+<line x1="316.5" y1="94" x2="316.5" y2="270" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="316.5" y="285" font-size="11" text-anchor="middle" class="f-muted">20</text>
+<line x1="438.5" y1="94" x2="438.5" y2="270" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="438.5" y="285" font-size="11" text-anchor="middle" class="f-muted">40</text>
+<line x1="560.5" y1="94" x2="560.5" y2="270" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="560.5" y="285" font-size="11" text-anchor="middle" class="f-muted">60</text>
+<line x1="682.5" y1="94" x2="682.5" y2="270" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="682.5" y="285" font-size="11" text-anchor="middle" class="f-muted">80</text>
+<line x1="804.5" y1="94" x2="804.5" y2="270" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="804.5" y="285" font-size="11" text-anchor="middle" class="f-muted">100</text>
+<line x1="194.5" y1="94" x2="194.5" y2="270" class="s-axis" stroke-width="1" stroke-linecap="butt"/>
+<text x="184" y="118" font-size="12" text-anchor="end" class="f-ink2">HEAD 3e31d5a4</text>
+<path d="M194,104H203.48A4,4 0 0 1 207.48,108V120A4,4 0 0 1 203.48,124H194V104Z" class="f-muted"><title>HEAD, re-measured, 1 run: 2.21 req/s</title></path>
+<text x="184" y="152" font-size="12" text-anchor="end" class="f-ink2">After phase A</text>
+<path d="M194,138H552.68A4,4 0 0 1 556.68,142V154A4,4 0 0 1 552.68,158H194V138Z" class="f-b250"><title>After phase A, mean of 3 runs: 59.45 req/s</title></path>
+<text x="184" y="186" font-size="12" text-anchor="end" class="f-ink2">sglang reference</text>
+<path d="M194,172H562.12A4,4 0 0 1 566.12,176V188A4,4 0 0 1 562.12,192H194V172Z" class="f-s2"><title>sglang baseline, recorded run</title></path>
+<text x="184" y="220" font-size="12" text-anchor="end" class="f-ink2">Final, mean of 3 runs</text>
+<path d="M194,206H766.17A4,4 0 0 1 770.17,210V222A4,4 0 0 1 766.17,226H194V206Z" class="f-s1"><title>Final, canonical artifact, mean of 3 runs</title></path>
+<text x="184" y="254" font-size="12" text-anchor="end" class="f-ink1" font-weight="700">Final, official run</text>
+<path d="M194,240H771.15A4,4 0 0 1 775.15,244V256A4,4 0 0 1 771.15,260H194V240Z" class="f-s1"><title>Final, official ninfer_e2e.sh run</title></path>
+<line x1="752.5" y1="88" x2="752.5" y2="270" class="s-ink2" stroke-width="1.5" stroke-linecap="butt"/>
+<text x="752.5" y="84" font-size="11" text-anchor="middle" class="f-ink2">target 91.5</text>
+<rect x="212.48" y="106" width="32.72" height="16" class="f-surface"/>
+<text x="215.48" y="118" font-size="12" text-anchor="start" class="f-ink1">2.21</text>
+<rect x="561.68" y="140" width="40.35" height="16" class="f-surface"/>
+<text x="564.68" y="152" font-size="12" text-anchor="start" class="f-ink1">59.45</text>
+<rect x="571.12" y="174" width="40.35" height="16" class="f-surface"/>
+<text x="574.12" y="186" font-size="12" text-anchor="start" class="f-ink1">61.00</text>
+<rect x="775.17" y="208" width="40.35" height="16" class="f-surface"/>
+<text x="778.17" y="220" font-size="12" text-anchor="start" class="f-ink1">94.45</text>
+<rect x="780.15" y="242" width="43.96" height="16" class="f-surface"/>
+<text x="783.15" y="254" font-size="12" text-anchor="start" class="f-ink1" font-weight="700">95.26</text>
+<text x="499.02" y="302" font-size="11" text-anchor="middle" class="f-muted">req/s</text>
+<text x="24" y="318" font-size="10.5" text-anchor="start" class="f-muted">HEAD was re-measured for this report with the same locked client (905 s for 2000 requests); the pipeline&#x27;s own recorded run of HEAD was 2.14 req/s.</text>
+<text x="24" y="332" font-size="10.5" text-anchor="start" class="f-muted">After phase A and Final are means over 3 runs of the same harness; the official run is one execution of the locked ninfer_e2e.sh.</text>
+</svg>

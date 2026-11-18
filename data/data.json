@@ -1,0 +1,266 @@
+{
+ "sglang": {
+  "request_throughput": 60.99902307583726,
+  "mean_ttft_ms": 1778.947394198738,
+  "p99_ttft_ms": 2517.5748156383634,
+  "mean_tpot_ms": 8.481835579734508,
+  "mean_e2el_ms": 2095.9878400284797,
+  "duration_s": 32.78741034120321,
+  "completed": 2000,
+  "failed": 0
+ },
+ "target": 91.5,
+ "phase_a": {
+  "runs": [
+   {
+    "request_throughput": 59.41253520380809,
+    "mean_ttft_ms": 363.7528011491522,
+    "p99_ttft_ms": 1887.4375064112246,
+    "mean_tpot_ms": 55.20022847429694,
+    "mean_e2el_ms": 2167.4046101765707,
+    "duration_s": 33.6629297696054,
+    "completed": 2000,
+    "failed": 0
+   },
+   {
+    "request_throughput": 59.66359631257675,
+    "mean_ttft_ms": 354.3444810109213,
+    "p99_ttft_ms": 1766.244753729552,
+    "mean_tpot_ms": 55.20395005253313,
+    "mean_e2el_ms": 2158.2231188369915,
+    "duration_s": 33.52127802558243,
+    "completed": 2000,
+    "failed": 0
+   },
+   {
+    "request_throughput": 59.27869230931805,
+    "mean_ttft_ms": 364.39155818428844,
+    "p99_ttft_ms": 1722.2078899480402,
+    "mean_tpot_ms": 54.86863971786507,
+    "mean_e2el_ms": 2172.0066468473524,
+    "duration_s": 33.73893589898944,
+    "completed": 2000,
+    "failed": 0
+   }
+  ],
+  "n": 3,
+  "mean_request_throughput": 59.45160794190097,
+  "mean_ttft_ms": 360.82961344812065,
+  "mean_p99_ttft_ms": 1791.9633833629389,
+  "mean_tpot_ms": 55.09093941489838,
+  "mean_e2el_ms": 2165.8781252869717,
+  "mean_duration_s": 33.64104789805909,
+  "mean_completed": 2000,
+  "mean_failed": 0,
+  "telemetry": {
+   "prefill_ktok_s": 24.45,
+   "prefill_tok": 122146.0,
+   "decode_tok_s": 214.0,
+   "running": 351.0,
+   "waiting": 86.0,
+   "batch": 62.94,
+   "chunk_ms": 135.5,
+   "step_ms": 14.8,
+   "host_pct": 69.7,
+   "flights": 37.0,
+   "prefill_per_flight": 3341.45,
+   "decode_rows_per_flight": 286.15,
+   "gpu_busy_pct": 97.2,
+   "counter_prefill_per_flight": 3237.2152269399708,
+   "flight_counter_share": 0.9577472006107594,
+   "n": 18
+  }
+ },
+ "pipeline_head_recorded": {
+  "request_throughput": 2.1385317717106624,
+  "mean_ttft_ms": 2489.061357755214,
+  "p99_ttft_ms": 49286.17693210021,
+  "mean_tpot_ms": 1869.2787387992134,
+  "mean_e2el_ms": 60263.3410221776,
+  "duration_s": 935.221083201468,
+  "completed": 2000,
+  "failed": 0
+ },
+ "final_official": {
+  "request_throughput": 95.2644498009012,
+  "mean_ttft_ms": 199.36799401883036,
+  "p99_ttft_ms": 1156.202444601804,
+  "mean_tpot_ms": 35.67255972219732,
+  "mean_e2el_ms": 1347.6536517739296,
+  "duration_s": 20.994190426543355,
+  "completed": 2000,
+  "failed": 0,
+  "telemetry": {
+   "prefill_ktok_s": 40.3,
+   "prefill_tok": 201611.0,
+   "decode_tok_s": 74.0,
+   "running": 358.5,
+   "waiting": 62.0,
+   "batch": 26.535,
+   "chunk_ms": 97.4,
+   "step_ms": 52.45,
+   "host_pct": 60.400000000000006,
+   "flights": 51.0,
+   "prefill_per_flight": 3875.45,
+   "decode_rows_per_flight": 314.8,
+   "gpu_busy_pct": 95.55000000000001,
+   "counter_prefill_per_flight": 3740.610810810811,
+   "flight_counter_share": 0.9550372608607063,
+   "n": 4
+  }
+ },
+ "head": {
+  "runs": [
+   {
+    "request_throughput": 2.2096899411841266,
+    "mean_ttft_ms": 1764.8694792781025,
+    "p99_ttft_ms": 19684.471024870872,
+    "mean_tpot_ms": 1845.1877981771336,
+    "mean_e2el_ms": 58348.06551261712,
+    "duration_s": 905.1043599937111,
+    "completed": 2000,
+    "failed": 0
+   }
+  ],
+  "n": 1,
+  "mean_request_throughput": 2.2096899411841266,
+  "mean_ttft_ms": 1764.8694792781025,
+  "mean_p99_ttft_ms": 19684.471024870872,
+  "mean_tpot_ms": 1845.1877981771336,
+  "mean_e2el_ms": 58348.06551261712,
+  "mean_duration_s": 905.1043599937111,
+  "mean_completed": 2000,
+  "mean_failed": 0,
+  "telemetry": {
+   "prefill_ktok_s": 3.55,
+   "prefill_tok": 17750.0,
+   "decode_tok_s": 42.4,
+   "running": 241.0,
+   "waiting": 4.0,
+   "capture_pending": 1.0,
+   "batch": 2.42,
+   "chunk_ms": 59.8,
+   "step_ms": 28.2,
+   "host_pct": 63.0,
+   "flights": 192.0,
+   "prefill_per_flight": 61.9,
+   "decode_rows_per_flight": 1.6,
+   "gpu_busy_pct": 172.9,
+   "counter_prefill_per_flight": 94.24878830197979,
+   "flight_counter_share": 0.6660507081685066,
+   "n": 127
+  }
+ },
+ "final_c": {
+  "runs": [
+   {
+    "request_throughput": 95.26840942789467,
+    "mean_ttft_ms": 204.938915560022,
+    "p99_ttft_ms": 1071.9957725331187,
+    "mean_tpot_ms": 35.5264158336881,
+    "mean_e2el_ms": 1348.3355100061744,
+    "duration_s": 20.993317848071456,
+    "completed": 2000,
+    "failed": 0
+   },
+   {
+    "request_throughput": 94.22131284675135,
+    "mean_ttft_ms": 202.47105380613357,
+    "p99_ttft_ms": 1139.5275318995118,
+    "mean_tpot_ms": 36.17830649203265,
+    "mean_e2el_ms": 1363.0688220709562,
+    "duration_s": 21.22661996074021,
+    "completed": 2000,
+    "failed": 0
+   },
+   {
+    "request_throughput": 93.85322743792742,
+    "mean_ttft_ms": 200.88029406405985,
+    "p99_ttft_ms": 1106.9106854125857,
+    "mean_tpot_ms": 36.2923524809956,
+    "mean_e2el_ms": 1368.7699586953968,
+    "duration_s": 21.309869192540646,
+    "completed": 2000,
+    "failed": 0
+   }
+  ],
+  "n": 3,
+  "mean_request_throughput": 94.44764990419114,
+  "mean_ttft_ms": 202.76342114340514,
+  "mean_p99_ttft_ms": 1106.1446632817388,
+  "mean_tpot_ms": 35.999024935572116,
+  "mean_e2el_ms": 1360.0580969241757,
+  "mean_duration_s": 21.176602333784103,
+  "mean_completed": 2000,
+  "mean_failed": 0,
+  "telemetry": {
+   "prefill_ktok_s": 39.55,
+   "prefill_tok": 197700.5,
+   "decode_tok_s": 73.80000000000001,
+   "running": 359.5,
+   "waiting": 68.0,
+   "batch": 24.94,
+   "chunk_ms": 97.9,
+   "step_ms": 38.25,
+   "host_pct": 60.400000000000006,
+   "flights": 50.5,
+   "prefill_per_flight": 3836.95,
+   "decode_rows_per_flight": 312.25,
+   "gpu_busy_pct": 96.1,
+   "counter_prefill_per_flight": 3681.9966159052456,
+   "flight_counter_share": 0.961625736422709,
+   "n": 12
+  }
+ },
+ "final_o": {
+  "runs": [
+   {
+    "request_throughput": 83.13100432849453,
+    "mean_ttft_ms": 271.49284969829023,
+    "p99_ttft_ms": 1278.671961762011,
+    "mean_tpot_ms": 38.157429384946894,
+    "mean_e2el_ms": 1545.8177329162136,
+    "duration_s": 24.05841257609427,
+    "completed": 2000,
+    "failed": 0
+   },
+   {
+    "request_throughput": 83.63731904442673,
+    "mean_ttft_ms": 264.5210876269266,
+    "p99_ttft_ms": 1226.777940467,
+    "mean_tpot_ms": 38.72175244178361,
+    "mean_e2el_ms": 1537.731033843942,
+    "duration_s": 23.912770314142108,
+    "completed": 2000,
+    "failed": 0
+   }
+  ],
+  "n": 2,
+  "mean_request_throughput": 83.38416168646063,
+  "mean_ttft_ms": 268.0069686626084,
+  "mean_p99_ttft_ms": 1252.7249511145055,
+  "mean_tpot_ms": 38.43959091336525,
+  "mean_e2el_ms": 1541.7743833800778,
+  "mean_duration_s": 23.98559144511819,
+  "mean_completed": 2000,
+  "mean_failed": 0,
+  "telemetry": {
+   "prefill_ktok_s": 35.4,
+   "prefill_tok": 177113.0,
+   "decode_tok_s": 144.0,
+   "running": 352.0,
+   "waiting": 70.0,
+   "batch": 43.675,
+   "chunk_ms": 105.0,
+   "step_ms": 14.0,
+   "host_pct": 56.9,
+   "flights": 47.5,
+   "prefill_per_flight": 3729.6499999999996,
+   "decode_rows_per_flight": 314.55,
+   "gpu_busy_pct": 96.5,
+   "counter_prefill_per_flight": 3593.7455470737914,
+   "flight_counter_share": 0.9666298247874806,
+   "n": 8
+  }
+ }
+}

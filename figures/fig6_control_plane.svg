@@ -1,0 +1,89 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 502" width="880" height="502" role="img" aria-labelledby="t d" font-family="'DejaVu Sans', Verdana, system-ui, -apple-system, 'Segoe UI', sans-serif">
+<title id="t">Control plane before and after</title><desc id="d">Schematic of how a request with n samples is prefilled, checkpointed and forked in HEAD and in the final engine</desc>
+<style>svg{--surface:#fcfcfb;--ink1:#0b0b0b;--ink2:#52514e;--muted:#898781;--grid:#e1e0d9;--axis:#c3c2b7;--s1:#2a78d6;--s2:#eb6834;--s3:#1baf7a;--s4:#eda100;--s5:#e87ba4;--s6:#008300;--s7:#6250d6;--s8:#e34948;--b250:#86b6ef;--b100:#cde2fb;--white:#ffffff;--good:#006300}@media (prefers-color-scheme:dark){svg{--surface:#1a1a19;--ink1:#f0efec;--ink2:#c3c2b7;--muted:#898781;--grid:#2c2c2a;--axis:#383835;--s1:#3987e5;--s2:#d95926;--s3:#199e70;--s4:#c98500;--s5:#d55181;--s6:#008300;--s7:#9085e9;--s8:#e66767;--b250:#3987e5;--b100:#184f95;--white:#ffffff;--good:#0ca30c}}.f-surface{fill:#fcfcfb;fill:var(--surface)}.s-surface{stroke:#fcfcfb;stroke:var(--surface)}.f-ink1{fill:#0b0b0b;fill:var(--ink1)}.s-ink1{stroke:#0b0b0b;stroke:var(--ink1)}.f-ink2{fill:#52514e;fill:var(--ink2)}.s-ink2{stroke:#52514e;stroke:var(--ink2)}.f-muted{fill:#898781;fill:var(--muted)}.s-muted{stroke:#898781;stroke:var(--muted)}.f-grid{fill:#e1e0d9;fill:var(--grid)}.s-grid{stroke:#e1e0d9;stroke:var(--grid)}.f-axis{fill:#c3c2b7;fill:var(--axis)}.s-axis{stroke:#c3c2b7;stroke:var(--axis)}.f-s1{fill:#2a78d6;fill:var(--s1)}.s-s1{stroke:#2a78d6;stroke:var(--s1)}.f-s2{fill:#eb6834;fill:var(--s2)}.s-s2{stroke:#eb6834;stroke:var(--s2)}.f-s3{fill:#1baf7a;fill:var(--s3)}.s-s3{stroke:#1baf7a;stroke:var(--s3)}.f-s4{fill:#eda100;fill:var(--s4)}.s-s4{stroke:#eda100;stroke:var(--s4)}.f-s5{fill:#e87ba4;fill:var(--s5)}.s-s5{stroke:#e87ba4;stroke:var(--s5)}.f-s6{fill:#008300;fill:var(--s6)}.s-s6{stroke:#008300;stroke:var(--s6)}.f-s7{fill:#6250d6;fill:var(--s7)}.s-s7{stroke:#6250d6;stroke:var(--s7)}.f-s8{fill:#e34948;fill:var(--s8)}.s-s8{stroke:#e34948;stroke:var(--s8)}.f-b250{fill:#86b6ef;fill:var(--b250)}.s-b250{stroke:#86b6ef;stroke:var(--b250)}.f-b100{fill:#cde2fb;fill:var(--b100)}.s-b100{stroke:#cde2fb;stroke:var(--b100)}.f-white{fill:#ffffff;fill:var(--white)}.s-white{stroke:#ffffff;stroke:var(--white)}.f-good{fill:#006300;fill:var(--good)}.s-good{stroke:#006300;stroke:var(--good)}</style>
+<rect class="f-surface" width="880" height="502"/>
+<text x="24" y="30" font-size="16" text-anchor="start" class="f-ink1" font-weight="700">Control plane: how n samples of one request are prefilled, checkpointed and forked</text>
+<text x="24" y="50" font-size="12" text-anchor="start" class="f-ink2">Schematic, not to scale. Orange boxes are the serialized steps, blue boxes are the steps that replace them.</text>
+<text x="24" y="88" font-size="13" text-anchor="start" class="f-ink1" font-weight="700">Before: HEAD 3e31d5a4</text>
+<path d="M30,100H165.2A6,6 0 0 1 171.2,106V170A6,6 0 0 1 165.2,176H30A6,6 0 0 1 24,170V106A6,6 0 0 1 30,100Z" class="f-surface s-axis" stroke-width="1"><title>HEAD prefills the prompt on a hidden helper lane, so a group of n samples occupies n+1 lanes</title></path>
+<text x="97.6" y="120.1" font-size="11" text-anchor="middle" class="f-ink1" font-weight="700">Helper lane</text>
+<text x="97.6" y="134.6" font-size="11" text-anchor="middle" class="f-ink1">prefill</text>
+<text x="97.6" y="149.1" font-size="11" text-anchor="middle" class="f-ink1">hidden extra lane:</text>
+<text x="97.6" y="163.6" font-size="11" text-anchor="middle" class="f-ink1">n+1 = 5 lanes, n=4</text>
+<path d="M201.2,100H336.4A6,6 0 0 1 342.4,106V170A6,6 0 0 1 336.4,176H201.2A6,6 0 0 1 195.2,170V106A6,6 0 0 1 201.2,100Z" class="f-s2 s-s2" stroke-width="1.25" fill-opacity="0.16"><title>Needs the Session&#x27;s single context-operation slot and an iteration with no flight running</title></path>
+<text x="268.8" y="120.1" font-size="11" text-anchor="middle" class="f-ink1" font-weight="700">Capture</text>
+<text x="268.8" y="134.6" font-size="11" text-anchor="middle" class="f-ink1">context operation</text>
+<text x="268.8" y="149.1" font-size="11" text-anchor="middle" class="f-ink1">copies the State</text>
+<text x="268.8" y="163.6" font-size="11" text-anchor="middle" class="f-ink1">(about 150 MiB)</text>
+<line x1="174.2" y1="138" x2="188.2" y2="138" class="s-ink2" stroke-width="1.5" stroke-linecap="butt"/>
+<polygon points="193.2,138 185.2,142 185.2,134" class="f-ink2"/>
+<path d="M372.4,100H507.6A6,6 0 0 1 513.6,106V170A6,6 0 0 1 507.6,176H372.4A6,6 0 0 1 366.4,170V106A6,6 0 0 1 372.4,100Z" class="f-s2 s-s2" stroke-width="1.25" fill-opacity="0.16"><title>Each sample receives its own copy of the parent State</title></path>
+<text x="440" y="120.1" font-size="11" text-anchor="middle" class="f-ink1" font-weight="700">Fork</text>
+<text x="440" y="134.6" font-size="11" text-anchor="middle" class="f-ink1">context operation</text>
+<text x="440" y="149.1" font-size="11" text-anchor="middle" class="f-ink1">one State copy</text>
+<text x="440" y="163.6" font-size="11" text-anchor="middle" class="f-ink1">per sample</text>
+<line x1="345.4" y1="138" x2="359.4" y2="138" class="s-ink2" stroke-width="1.5" stroke-linecap="butt"/>
+<polygon points="364.4,138 356.4,142 356.4,134" class="f-ink2"/>
+<path d="M543.6,100H678.8A6,6 0 0 1 684.8,106V170A6,6 0 0 1 678.8,176H543.6A6,6 0 0 1 537.6,170V106A6,6 0 0 1 543.6,100Z" class="f-s2 s-s2" stroke-width="1.25" fill-opacity="0.16"><title>Binding also waits for the context-operation slot</title></path>
+<text x="611.2" y="120.1" font-size="11" text-anchor="middle" class="f-ink1" font-weight="700">Bind lanes</text>
+<text x="611.2" y="134.6" font-size="11" text-anchor="middle" class="f-ink1">context operation</text>
+<text x="611.2" y="149.1" font-size="11" text-anchor="middle" class="f-ink1">at a quiescent</text>
+<text x="611.2" y="163.6" font-size="11" text-anchor="middle" class="f-ink1">iteration</text>
+<line x1="516.6" y1="138" x2="530.6" y2="138" class="s-ink2" stroke-width="1.5" stroke-linecap="butt"/>
+<polygon points="535.6,138 527.6,142 527.6,134" class="f-ink2"/>
+<path d="M714.8,100H850A6,6 0 0 1 856,106V170A6,6 0 0 1 850,176H714.8A6,6 0 0 1 708.8,170V106A6,6 0 0 1 714.8,100Z" class="f-surface s-axis" stroke-width="1"><title>Decode starts after the chain</title></path>
+<text x="782.4" y="127.35" font-size="11" text-anchor="middle" class="f-ink1" font-weight="700">Samples decode</text>
+<text x="782.4" y="141.85" font-size="11" text-anchor="middle" class="f-ink1">n lanes join the</text>
+<text x="782.4" y="156.35" font-size="11" text-anchor="middle" class="f-ink1">running batch</text>
+<line x1="687.8" y1="138" x2="701.8" y2="138" class="s-ink2" stroke-width="1.5" stroke-linecap="butt"/>
+<polygon points="706.8,138 698.8,142 698.8,134" class="f-ink2"/>
+<line x1="195.2" y1="190" x2="684.8" y2="190" class="s-ink2" stroke-width="1.25" stroke-linecap="butt"/>
+<line x1="195.2" y1="185" x2="195.2" y2="190" class="s-ink2" stroke-width="1.25" stroke-linecap="butt"/>
+<line x1="684.8" y1="185" x2="684.8" y2="190" class="s-ink2" stroke-width="1.25" stroke-linecap="butt"/>
+<text x="440" y="205" font-size="11" text-anchor="middle" class="f-ink2">one context-operation slot, a quiescent iteration for each: flights are held</text>
+<path d="M28,214H852A4,4 0 0 1 856,218V236A4,4 0 0 1 852,240H28A4,4 0 0 1 24,236V218A4,4 0 0 1 28,214Z" class="f-grid" fill-opacity="0.7"/>
+<text x="34" y="231" font-size="12" text-anchor="start" class="f-ink1" font-weight="700">Measured:</text>
+<text x="113.31" y="231" font-size="12" text-anchor="start" class="f-ink1">62 prefill tokens and 1.6 decode rows per flight (median), 2.21 req/s</text>
+<text x="24" y="284" font-size="13" text-anchor="start" class="f-ink1" font-weight="700">After: final engine</text>
+<path d="M30,296H165.2A6,6 0 0 1 171.2,302V366A6,6 0 0 1 165.2,372H30A6,6 0 0 1 24,366V302A6,6 0 0 1 30,296Z" class="f-surface s-axis" stroke-width="1"><title>The parent prefill runs on the first sample lane</title></path>
+<text x="97.6" y="316.1" font-size="11" text-anchor="middle" class="f-ink1" font-weight="700">Parent prefill</text>
+<text x="97.6" y="330.6" font-size="11" text-anchor="middle" class="f-ink1">one of the n sample</text>
+<text x="97.6" y="345.1" font-size="11" text-anchor="middle" class="f-ink1">lanes, no helper</text>
+<text x="97.6" y="359.6" font-size="11" text-anchor="middle" class="f-ink1">lane</text>
+<path d="M201.2,296H336.4A6,6 0 0 1 342.4,302V366A6,6 0 0 1 336.4,372H201.2A6,6 0 0 1 195.2,366V302A6,6 0 0 1 201.2,296Z" class="f-s1 s-s1" stroke-width="1.25" fill-opacity="0.16"><title>Checkpoints ride the final prefill window, at most 2 per request</title></path>
+<text x="268.8" y="316.1" font-size="11" text-anchor="middle" class="f-ink1" font-weight="700">Checkpoint</text>
+<text x="268.8" y="330.6" font-size="11" text-anchor="middle" class="f-ink1">written in flight</text>
+<text x="268.8" y="345.1" font-size="11" text-anchor="middle" class="f-ink1">the final prefill</text>
+<text x="268.8" y="359.6" font-size="11" text-anchor="middle" class="f-ink1">window writes it</text>
+<line x1="174.2" y1="334" x2="188.2" y2="334" class="s-ink2" stroke-width="1.5" stroke-linecap="butt"/>
+<polygon points="193.2,334 185.2,338 185.2,330" class="f-ink2"/>
+<path d="M372.4,296H507.6A6,6 0 0 1 513.6,302V366A6,6 0 0 1 507.6,372H372.4A6,6 0 0 1 366.4,366V302A6,6 0 0 1 372.4,296Z" class="f-surface s-axis" stroke-width="1"><title>take_flight_checkpoints, then publish_flight_checkpoint at retirement</title></path>
+<text x="440" y="316.1" font-size="11" text-anchor="middle" class="f-ink1" font-weight="700">Publish</text>
+<text x="440" y="330.6" font-size="11" text-anchor="middle" class="f-ink1">host registers it</text>
+<text x="440" y="345.1" font-size="11" text-anchor="middle" class="f-ink1">when the flight</text>
+<text x="440" y="359.6" font-size="11" text-anchor="middle" class="f-ink1">retires</text>
+<line x1="345.4" y1="334" x2="359.4" y2="334" class="s-ink2" stroke-width="1.5" stroke-linecap="butt"/>
+<polygon points="364.4,334 356.4,338 356.4,330" class="f-ink2"/>
+<path d="M543.6,296H678.8A6,6 0 0 1 684.8,302V366A6,6 0 0 1 678.8,372H543.6A6,6 0 0 1 537.6,366V302A6,6 0 0 1 543.6,296Z" class="f-s1 s-s1" stroke-width="1.25" fill-opacity="0.16"><title>One Session call forks all sample lanes from a frozen shared anchor</title></path>
+<text x="611.2" y="316.1" font-size="11" text-anchor="middle" class="f-ink1" font-weight="700">fork_batch</text>
+<text x="611.2" y="330.6" font-size="11" text-anchor="middle" class="f-ink1">n lanes share one</text>
+<text x="611.2" y="345.1" font-size="11" text-anchor="middle" class="f-ink1">frozen StateAnchor,</text>
+<text x="611.2" y="359.6" font-size="11" text-anchor="middle" class="f-ink1">no State copy</text>
+<line x1="516.6" y1="334" x2="530.6" y2="334" class="s-ink2" stroke-width="1.5" stroke-linecap="butt"/>
+<polygon points="535.6,334 527.6,338 527.6,330" class="f-ink2"/>
+<path d="M714.8,296H850A6,6 0 0 1 856,302V366A6,6 0 0 1 850,372H714.8A6,6 0 0 1 708.8,366V302A6,6 0 0 1 714.8,296Z" class="f-surface s-axis" stroke-width="1"><title>Decode starts right after the fork</title></path>
+<text x="782.4" y="323.35" font-size="11" text-anchor="middle" class="f-ink1" font-weight="700">Samples decode</text>
+<text x="782.4" y="337.85" font-size="11" text-anchor="middle" class="f-ink1">n lanes join the</text>
+<text x="782.4" y="352.35" font-size="11" text-anchor="middle" class="f-ink1">running batch</text>
+<line x1="687.8" y1="334" x2="701.8" y2="334" class="s-ink2" stroke-width="1.5" stroke-linecap="butt"/>
+<polygon points="706.8,334 698.8,338 698.8,330" class="f-ink2"/>
+<line x1="195.2" y1="386" x2="684.8" y2="386" class="s-ink2" stroke-width="1.25" stroke-linecap="butt"/>
+<line x1="195.2" y1="381" x2="195.2" y2="386" class="s-ink2" stroke-width="1.25" stroke-linecap="butt"/>
+<line x1="684.8" y1="381" x2="684.8" y2="386" class="s-ink2" stroke-width="1.25" stroke-linecap="butt"/>
+<text x="440" y="401" font-size="11" text-anchor="middle" class="f-ink2">bindings are synchronous: no context operation, no quiescent iteration, flights keep running</text>
+<path d="M28,410H852A4,4 0 0 1 856,414V432A4,4 0 0 1 852,436H28A4,4 0 0 1 24,432V414A4,4 0 0 1 28,410Z" class="f-b100" fill-opacity="0.7"/>
+<text x="34" y="427" font-size="12" text-anchor="start" class="f-ink1" font-weight="700">Measured:</text>
+<text x="113.31" y="427" font-size="12" text-anchor="start" class="f-ink1">3,837 prefill tokens and 312 decode rows per flight (median), 94.45 req/s</text>
+<text x="24" y="460" font-size="10.5" text-anchor="start" class="f-muted">Flight shape is the median of the engine&#x27;s 5 s throughput log lines while 100 or more requests run (same data as the flight-shape figure).</text>
+<text x="24" y="474" font-size="10.5" text-anchor="start" class="f-muted">Only qwen3_5 uses the new path (Session::captures_in_flight); the other model Sessions keep the old capture and context-operation path.</text>
+</svg>

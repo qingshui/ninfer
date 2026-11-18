@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 430" width="880" height="430" role="img" aria-labelledby="t d" font-family="'DejaVu Sans', Verdana, system-ui, -apple-system, 'Segoe UI', sans-serif">
+<title id="t">FP8 GDN projections and BF16 head: artifact and throughput</title><desc id="d">Weight bytes before and after the recipe change, and throughput of the same final build on the two artifacts</desc>
+<style>svg{--surface:#fcfcfb;--ink1:#0b0b0b;--ink2:#52514e;--muted:#898781;--grid:#e1e0d9;--axis:#c3c2b7;--s1:#2a78d6;--s2:#eb6834;--s3:#1baf7a;--s4:#eda100;--s5:#e87ba4;--s6:#008300;--s7:#6250d6;--s8:#e34948;--b250:#86b6ef;--b100:#cde2fb;--white:#ffffff;--good:#006300}@media (prefers-color-scheme:dark){svg{--surface:#1a1a19;--ink1:#f0efec;--ink2:#c3c2b7;--muted:#898781;--grid:#2c2c2a;--axis:#383835;--s1:#3987e5;--s2:#d95926;--s3:#199e70;--s4:#c98500;--s5:#d55181;--s6:#008300;--s7:#9085e9;--s8:#e66767;--b250:#3987e5;--b100:#184f95;--white:#ffffff;--good:#0ca30c}}.f-surface{fill:#fcfcfb;fill:var(--surface)}.s-surface{stroke:#fcfcfb;stroke:var(--surface)}.f-ink1{fill:#0b0b0b;fill:var(--ink1)}.s-ink1{stroke:#0b0b0b;stroke:var(--ink1)}.f-ink2{fill:#52514e;fill:var(--ink2)}.s-ink2{stroke:#52514e;stroke:var(--ink2)}.f-muted{fill:#898781;fill:var(--muted)}.s-muted{stroke:#898781;stroke:var(--muted)}.f-grid{fill:#e1e0d9;fill:var(--grid)}.s-grid{stroke:#e1e0d9;stroke:var(--grid)}.f-axis{fill:#c3c2b7;fill:var(--axis)}.s-axis{stroke:#c3c2b7;stroke:var(--axis)}.f-s1{fill:#2a78d6;fill:var(--s1)}.s-s1{stroke:#2a78d6;stroke:var(--s1)}.f-s2{fill:#eb6834;fill:var(--s2)}.s-s2{stroke:#eb6834;stroke:var(--s2)}.f-s3{fill:#1baf7a;fill:var(--s3)}.s-s3{stroke:#1baf7a;stroke:var(--s3)}.f-s4{fill:#eda100;fill:var(--s4)}.s-s4{stroke:#eda100;stroke:var(--s4)}.f-s5{fill:#e87ba4;fill:var(--s5)}.s-s5{stroke:#e87ba4;stroke:var(--s5)}.f-s6{fill:#008300;fill:var(--s6)}.s-s6{stroke:#008300;stroke:var(--s6)}.f-s7{fill:#6250d6;fill:var(--s7)}.s-s7{stroke:#6250d6;stroke:var(--s7)}.f-s8{fill:#e34948;fill:var(--s8)}.s-s8{stroke:#e34948;stroke:var(--s8)}.f-b250{fill:#86b6ef;fill:var(--b250)}.s-b250{stroke:#86b6ef;stroke:var(--b250)}.f-b100{fill:#cde2fb;fill:var(--b100)}.s-b100{stroke:#cde2fb;stroke:var(--b100)}.f-white{fill:#ffffff;fill:var(--white)}.s-white{stroke:#ffffff;stroke:var(--white)}.f-good{fill:#006300;fill:var(--good)}.s-good{stroke:#006300;stroke:var(--good)}</style>
+<rect class="f-surface" width="880" height="430"/>
+<text x="24" y="30" font-size="16" text-anchor="start" class="f-ink1" font-weight="700">Recipe change: GDN projections in FP8, output head in BF16</text>
+<text x="24" y="50" font-size="12" text-anchor="start" class="f-ink2">Artifact payload 74.76 GB to 72.31 GB (-2.45 GB). Weight bytes by tensor group:</text>
+<path d="M26,71H32A2,2 0 0 1 34,73V79A2,2 0 0 1 32,81H26A2,2 0 0 1 24,79V73A2,2 0 0 1 26,71Z" class="f-muted"/>
+<text x="39" y="80" font-size="12" text-anchor="start" class="f-ink2">Before (HEAD recipe)</text>
+<path d="M188.27,71H194.27A2,2 0 0 1 196.27,73V79A2,2 0 0 1 194.27,81H188.27A2,2 0 0 1 186.27,79V73A2,2 0 0 1 188.27,71Z" class="f-s1"/>
+<text x="201.27" y="80" font-size="12" text-anchor="start" class="f-ink2">After (qwen3_5_122b_nvfp4 now)</text>
+<line x1="314.5" y1="98" x2="314.5" y2="252" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="314.5" y="267" font-size="11" text-anchor="middle" class="f-muted">0</text>
+<line x1="478.5" y1="98" x2="478.5" y2="252" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="478.5" y="267" font-size="11" text-anchor="middle" class="f-muted">2</text>
+<line x1="642.5" y1="98" x2="642.5" y2="252" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="642.5" y="267" font-size="11" text-anchor="middle" class="f-muted">4</text>
+<line x1="806.5" y1="98" x2="806.5" y2="252" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="806.5" y="267" font-size="11" text-anchor="middle" class="f-muted">6</text>
+<line x1="314.5" y1="98" x2="314.5" y2="252" class="s-axis" stroke-width="1" stroke-linecap="butt"/>
+<text x="304" y="129" font-size="12" text-anchor="end" class="f-ink2">GDN input projection, 36 layers (20480 x 3072)</text>
+<path d="M314,109.5H681.74A4,4 0 0 1 685.74,113.5V119.5A4,4 0 0 1 681.74,123.5H314V109.5Z" class="f-muted"><title>GDN input projection, 36 layers (20480 x 3072): before 4,529,848,320 B</title></path>
+<text x="693.74" y="120.5" font-size="11.5" text-anchor="start" class="f-ink1">4.53 GB</text>
+<path d="M314,126.5H496.11A4,4 0 0 1 500.11,130.5V136.5A4,4 0 0 1 496.11,140.5H314V126.5Z" class="f-s1"><title>GDN input projection, 36 layers (20480 x 3072): after 2,267,873,280 B</title></path>
+<text x="508.11" y="137.5" font-size="11.5" text-anchor="start" class="f-ink1" font-weight="700">2.27 GB (-2.26)</text>
+<text x="304" y="179" font-size="12" text-anchor="end" class="f-ink2">GDN output projection, 36 layers (3072 x 8192)</text>
+<path d="M314,159.5H458.7A4,4 0 0 1 462.7,163.5V169.5A4,4 0 0 1 458.7,173.5H314V159.5Z" class="f-muted"><title>GDN output projection, 36 layers (3072 x 8192): before 1,811,939,328 B</title></path>
+<text x="470.7" y="170.5" font-size="11.5" text-anchor="start" class="f-ink1">1.81 GB</text>
+<path d="M314,176.5H384.38A4,4 0 0 1 388.38,180.5V186.5A4,4 0 0 1 384.38,190.5H314V176.5Z" class="f-s1"><title>GDN output projection, 36 layers (3072 x 8192): after 906,412,032 B</title></path>
+<text x="396.38" y="187.5" font-size="11.5" text-anchor="start" class="f-ink1" font-weight="700">0.91 GB (-0.91)</text>
+<text x="304" y="229" font-size="12" text-anchor="end" class="f-ink2">Output head (248320 x 3072)</text>
+<path d="M314,209.5H376.52A4,4 0 0 1 380.52,213.5V219.5A4,4 0 0 1 376.52,223.5H314V209.5Z" class="f-muted"><title>Output head (248320 x 3072): before 810,516,480 B</title></path>
+<text x="388.52" y="220.5" font-size="11.5" text-anchor="start" class="f-ink1">0.81 GB</text>
+<path d="M314,226.5H435.2A4,4 0 0 1 439.2,230.5V236.5A4,4 0 0 1 435.2,240.5H314V226.5Z" class="f-s1"><title>Output head (248320 x 3072): after 1,525,678,080 B</title></path>
+<text x="447.2" y="237.5" font-size="11.5" text-anchor="start" class="f-ink1" font-weight="700">1.53 GB (+0.72)</text>
+<text x="24" y="288" font-size="12" text-anchor="start" class="f-ink1" font-weight="700">Same final build, same client: throughput on the two artifacts</text>
+<line x1="314.5" y1="298" x2="314.5" y2="368" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="314.5" y="383" font-size="11" text-anchor="middle" class="f-muted">0</text>
+<line x1="406.5" y1="298" x2="406.5" y2="368" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="406.5" y="383" font-size="11" text-anchor="middle" class="f-muted">20</text>
+<line x1="498.5" y1="298" x2="498.5" y2="368" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="498.5" y="383" font-size="11" text-anchor="middle" class="f-muted">40</text>
+<line x1="590.5" y1="298" x2="590.5" y2="368" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="590.5" y="383" font-size="11" text-anchor="middle" class="f-muted">60</text>
+<line x1="682.5" y1="298" x2="682.5" y2="368" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="682.5" y="383" font-size="11" text-anchor="middle" class="f-muted">80</text>
+<line x1="774.5" y1="298" x2="774.5" y2="368" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="774.5" y="383" font-size="11" text-anchor="middle" class="f-muted">100</text>
+<line x1="314.5" y1="298" x2="314.5" y2="368" class="s-axis" stroke-width="1" stroke-linecap="butt"/>
+<text x="304" y="321" font-size="12" text-anchor="end" class="f-ink2">Original artifact (BF16 GDN, Q8 head)</text>
+<path d="M314,308H693.6A4,4 0 0 1 697.6,312V322A4,4 0 0 1 693.6,326H314V308Z" class="f-muted"><title>mean of 83.13, 83.64</title></path>
+<text x="705.6" y="321" font-size="12" text-anchor="start" class="f-ink1">83.4 req/s</text>
+<text x="304" y="353" font-size="12" text-anchor="end" class="f-ink1" font-weight="700">Canonical artifact (FP8 GDN, BF16 head)</text>
+<path d="M314,340H744.5A4,4 0 0 1 748.5,344V354A4,4 0 0 1 744.5,358H314V340Z" class="f-s1"><title>mean of 95.27, 94.22, 93.85</title></path>
+<text x="756.5" y="353" font-size="12" text-anchor="start" class="f-ink1" font-weight="700">94.4 req/s</text>
+<text x="24" y="402" font-size="10.5" text-anchor="start" class="f-muted">The canonical artifact is 13.3% faster on this workload. Runs: original 83.13, 83.64; canonical 95.27, 94.22, 93.85 req/s.</text>
+</svg>

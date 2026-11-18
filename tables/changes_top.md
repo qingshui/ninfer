@@ -1,0 +1,16 @@
+| 文件 | 新增 | 删除 |
+| --- | --- | --- |
+| `tests/models/qwen3_5/test_native_transactions.cpp` | 200 | 799 |
+| `src/runtime/engine/engine_schedule.inl` | 363 | 357 |
+| `src/ops/linear_attention/gated_delta_net/recurrence/varlen/recurrence.cu` | 402 | 231 |
+| `src/models/qwen3_5/session/capture.cpp` | 205 | 251 |
+| `src/ops/moe/kernels/cuda/block_scaled/nvfp4/b200/grouped_tcgen05.cuh` | 253 | 145 |
+| `src/models/qwen3_5/session/sequence.cpp` | 187 | 105 |
+| `src/models/qwen3_5/session/internal.h` | 179 | 91 |
+| `src/ops/softmax_attention/kernels/causal/sm100/fmha.cuh` | 200 | 70 |
+| `tests/models/qwen3_5/test_capture_nonblocking.cpp` | 0 | 260 |
+| `src/ops/moe/kernels/cuda/block_scaled/nvfp4/b200/launch.cu` | 141 | 89 |
+| `src/models/qwen3_5/session/binding.cpp` | 103 | 104 |
+| `src/runtime/engine/engine_core.h` | 114 | 53 |
+| `src/ops/linear_attention/causal_conv/varlen.cu` | 114 | 52 |
+| `src/ops/sampling/kernels/distribution.cuh` | 133 | 30 |

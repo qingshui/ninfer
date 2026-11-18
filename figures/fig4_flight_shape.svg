@@ -1,0 +1,97 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 434" width="880" height="434" role="img" aria-labelledby="t d" font-family="'DejaVu Sans', Verdana, system-ui, -apple-system, 'Segoe UI', sans-serif">
+<title id="t">Flight shape of the engine before and after</title><desc id="d">Median engine telemetry over the steady state of the locked harness for HEAD, after phase A and the final build</desc>
+<style>svg{--surface:#fcfcfb;--ink1:#0b0b0b;--ink2:#52514e;--muted:#898781;--grid:#e1e0d9;--axis:#c3c2b7;--s1:#2a78d6;--s2:#eb6834;--s3:#1baf7a;--s4:#eda100;--s5:#e87ba4;--s6:#008300;--s7:#6250d6;--s8:#e34948;--b250:#86b6ef;--b100:#cde2fb;--white:#ffffff;--good:#006300}@media (prefers-color-scheme:dark){svg{--surface:#1a1a19;--ink1:#f0efec;--ink2:#c3c2b7;--muted:#898781;--grid:#2c2c2a;--axis:#383835;--s1:#3987e5;--s2:#d95926;--s3:#199e70;--s4:#c98500;--s5:#d55181;--s6:#008300;--s7:#9085e9;--s8:#e66767;--b250:#3987e5;--b100:#184f95;--white:#ffffff;--good:#0ca30c}}.f-surface{fill:#fcfcfb;fill:var(--surface)}.s-surface{stroke:#fcfcfb;stroke:var(--surface)}.f-ink1{fill:#0b0b0b;fill:var(--ink1)}.s-ink1{stroke:#0b0b0b;stroke:var(--ink1)}.f-ink2{fill:#52514e;fill:var(--ink2)}.s-ink2{stroke:#52514e;stroke:var(--ink2)}.f-muted{fill:#898781;fill:var(--muted)}.s-muted{stroke:#898781;stroke:var(--muted)}.f-grid{fill:#e1e0d9;fill:var(--grid)}.s-grid{stroke:#e1e0d9;stroke:var(--grid)}.f-axis{fill:#c3c2b7;fill:var(--axis)}.s-axis{stroke:#c3c2b7;stroke:var(--axis)}.f-s1{fill:#2a78d6;fill:var(--s1)}.s-s1{stroke:#2a78d6;stroke:var(--s1)}.f-s2{fill:#eb6834;fill:var(--s2)}.s-s2{stroke:#eb6834;stroke:var(--s2)}.f-s3{fill:#1baf7a;fill:var(--s3)}.s-s3{stroke:#1baf7a;stroke:var(--s3)}.f-s4{fill:#eda100;fill:var(--s4)}.s-s4{stroke:#eda100;stroke:var(--s4)}.f-s5{fill:#e87ba4;fill:var(--s5)}.s-s5{stroke:#e87ba4;stroke:var(--s5)}.f-s6{fill:#008300;fill:var(--s6)}.s-s6{stroke:#008300;stroke:var(--s6)}.f-s7{fill:#6250d6;fill:var(--s7)}.s-s7{stroke:#6250d6;stroke:var(--s7)}.f-s8{fill:#e34948;fill:var(--s8)}.s-s8{stroke:#e34948;stroke:var(--s8)}.f-b250{fill:#86b6ef;fill:var(--b250)}.s-b250{stroke:#86b6ef;stroke:var(--b250)}.f-b100{fill:#cde2fb;fill:var(--b100)}.s-b100{stroke:#cde2fb;stroke:var(--b100)}.f-white{fill:#ffffff;fill:var(--white)}.s-white{stroke:#ffffff;stroke:var(--white)}.f-good{fill:#006300;fill:var(--good)}.s-good{stroke:#006300;stroke:var(--good)}</style>
+<rect class="f-surface" width="880" height="434"/>
+<text x="24" y="30" font-size="16" text-anchor="start" class="f-ink1" font-weight="700">What one flight carries (engine telemetry, steady state)</text>
+<text x="24" y="50" font-size="12" text-anchor="start" class="f-ink2">Median of the 5 s throughput log lines while 100 or more requests are running.</text>
+<path d="M26,71H32A2,2 0 0 1 34,73V79A2,2 0 0 1 32,81H26A2,2 0 0 1 24,79V73A2,2 0 0 1 26,71Z" class="f-muted"/>
+<text x="39" y="80" font-size="12" text-anchor="start" class="f-ink2">HEAD</text>
+<path d="M95.06,71H101.06A2,2 0 0 1 103.06,73V79A2,2 0 0 1 101.06,81H95.06A2,2 0 0 1 93.06,79V73A2,2 0 0 1 95.06,71Z" class="f-b250"/>
+<text x="108.06" y="80" font-size="12" text-anchor="start" class="f-ink2">After phase A</text>
+<path d="M210.92,71H216.92A2,2 0 0 1 218.92,73V79A2,2 0 0 1 216.92,81H210.92A2,2 0 0 1 208.92,79V73A2,2 0 0 1 210.92,71Z" class="f-s1"/>
+<text x="223.92" y="80" font-size="12" text-anchor="start" class="f-ink2">Final</text>
+<text x="24" y="104" font-size="12" text-anchor="start" class="f-ink1" font-weight="700">Prefill tokens per flight</text>
+<line x1="120.5" y1="116" x2="120.5" y2="206" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="120.5" y="221" font-size="11" text-anchor="middle" class="f-muted">0</text>
+<line x1="185.5" y1="116" x2="185.5" y2="206" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="185.5" y="221" font-size="11" text-anchor="middle" class="f-muted">1,000</text>
+<line x1="251.5" y1="116" x2="251.5" y2="206" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="251.5" y="221" font-size="11" text-anchor="middle" class="f-muted">2,000</text>
+<line x1="316.5" y1="116" x2="316.5" y2="206" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="316.5" y="221" font-size="11" text-anchor="middle" class="f-muted">3,000</text>
+<line x1="382.5" y1="116" x2="382.5" y2="206" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="382.5" y="221" font-size="11" text-anchor="middle" class="f-muted">4,000</text>
+<line x1="120.5" y1="116" x2="120.5" y2="206" class="s-axis" stroke-width="1" stroke-linecap="butt"/>
+<text x="110" y="137" font-size="12" text-anchor="end" class="f-ink2">HEAD</text>
+<rect x="120" y="125" width="4.06" height="16" class="f-muted"><title>HEAD: 62</title></rect>
+<text x="132.06" y="137" font-size="12" text-anchor="start" class="f-ink1">62</text>
+<text x="110" y="165" font-size="12" text-anchor="end" class="f-ink2">After phase A</text>
+<path d="M120,153H334.9A4,4 0 0 1 338.9,157V165A4,4 0 0 1 334.9,169H120V153Z" class="f-b250"><title>After phase A: 3,341</title></path>
+<text x="346.9" y="165" font-size="12" text-anchor="start" class="f-ink1">3,341</text>
+<text x="110" y="193" font-size="12" text-anchor="end" class="f-ink1" font-weight="700">Final</text>
+<path d="M120,181H367.36A4,4 0 0 1 371.36,185V193A4,4 0 0 1 367.36,197H120V181Z" class="f-s1"><title>Final: 3,837</title></path>
+<text x="379.36" y="193" font-size="12" text-anchor="start" class="f-ink1" font-weight="700">3,837</text>
+<text x="464" y="104" font-size="12" text-anchor="start" class="f-ink1" font-weight="700">Decode rows per flight</text>
+<line x1="560.5" y1="116" x2="560.5" y2="206" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="560.5" y="221" font-size="11" text-anchor="middle" class="f-muted">0</text>
+<line x1="625.5" y1="116" x2="625.5" y2="206" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="625.5" y="221" font-size="11" text-anchor="middle" class="f-muted">100</text>
+<line x1="691.5" y1="116" x2="691.5" y2="206" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="691.5" y="221" font-size="11" text-anchor="middle" class="f-muted">200</text>
+<line x1="756.5" y1="116" x2="756.5" y2="206" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="756.5" y="221" font-size="11" text-anchor="middle" class="f-muted">300</text>
+<line x1="822.5" y1="116" x2="822.5" y2="206" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="822.5" y="221" font-size="11" text-anchor="middle" class="f-muted">400</text>
+<line x1="560.5" y1="116" x2="560.5" y2="206" class="s-axis" stroke-width="1" stroke-linecap="butt"/>
+<text x="550" y="137" font-size="12" text-anchor="end" class="f-ink2">HEAD</text>
+<rect x="560" y="125" width="1.05" height="16" class="f-muted"><title>HEAD: 1.6</title></rect>
+<text x="569.05" y="137" font-size="12" text-anchor="start" class="f-ink1">1.6</text>
+<text x="550" y="165" font-size="12" text-anchor="end" class="f-ink2">After phase A</text>
+<path d="M560,153H743.46A4,4 0 0 1 747.46,157V165A4,4 0 0 1 743.46,169H560V153Z" class="f-b250"><title>After phase A: 286.1</title></path>
+<text x="755.46" y="165" font-size="12" text-anchor="start" class="f-ink1">286.1</text>
+<text x="550" y="193" font-size="12" text-anchor="end" class="f-ink1" font-weight="700">Final</text>
+<path d="M560,181H760.56A4,4 0 0 1 764.56,185V193A4,4 0 0 1 760.56,197H560V181Z" class="f-s1"><title>Final: 312.2</title></path>
+<text x="772.56" y="193" font-size="12" text-anchor="start" class="f-ink1" font-weight="700">312.2</text>
+<text x="24" y="254" font-size="12" text-anchor="start" class="f-ink1" font-weight="700">Mean flight time (ms)</text>
+<line x1="120.5" y1="266" x2="120.5" y2="356" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="120.5" y="371" font-size="11" text-anchor="middle" class="f-muted">0</text>
+<line x1="211.5" y1="266" x2="211.5" y2="356" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="211.5" y="371" font-size="11" text-anchor="middle" class="f-muted">50</text>
+<line x1="303.5" y1="266" x2="303.5" y2="356" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="303.5" y="371" font-size="11" text-anchor="middle" class="f-muted">100</text>
+<line x1="394.5" y1="266" x2="394.5" y2="356" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="394.5" y="371" font-size="11" text-anchor="middle" class="f-muted">150</text>
+<line x1="120.5" y1="266" x2="120.5" y2="356" class="s-axis" stroke-width="1" stroke-linecap="butt"/>
+<text x="110" y="287" font-size="12" text-anchor="end" class="f-ink2">HEAD</text>
+<path d="M120,275H163.73A4,4 0 0 1 167.73,279V287A4,4 0 0 1 163.73,291H120V275Z" class="f-muted"><title>HEAD: 26</title></path>
+<text x="175.73" y="287" font-size="12" text-anchor="start" class="f-ink1">26</text>
+<text x="110" y="315" font-size="12" text-anchor="end" class="f-ink2">After phase A</text>
+<path d="M120,303H363.7A4,4 0 0 1 367.7,307V315A4,4 0 0 1 363.7,319H120V303Z" class="f-b250"><title>After phase A: 135</title></path>
+<text x="375.7" y="315" font-size="12" text-anchor="start" class="f-ink1">135</text>
+<text x="110" y="343" font-size="12" text-anchor="end" class="f-ink1" font-weight="700">Final</text>
+<path d="M120,331H297.49A4,4 0 0 1 301.49,335V343A4,4 0 0 1 297.49,347H120V331Z" class="f-s1"><title>Final: 99</title></path>
+<text x="309.49" y="343" font-size="12" text-anchor="start" class="f-ink1" font-weight="700">99</text>
+<text x="464" y="254" font-size="12" text-anchor="start" class="f-ink1" font-weight="700">Prefill throughput (k tok/s)</text>
+<line x1="560.5" y1="266" x2="560.5" y2="356" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="560.5" y="371" font-size="11" text-anchor="middle" class="f-muted">0</text>
+<line x1="627.5" y1="266" x2="627.5" y2="356" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="627.5" y="371" font-size="11" text-anchor="middle" class="f-muted">10</text>
+<line x1="695.5" y1="266" x2="695.5" y2="356" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="695.5" y="371" font-size="11" text-anchor="middle" class="f-muted">20</text>
+<line x1="762.5" y1="266" x2="762.5" y2="356" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="762.5" y="371" font-size="11" text-anchor="middle" class="f-muted">30</text>
+<line x1="830.5" y1="266" x2="830.5" y2="356" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="830.5" y="371" font-size="11" text-anchor="middle" class="f-muted">40</text>
+<line x1="560.5" y1="266" x2="560.5" y2="356" class="s-axis" stroke-width="1" stroke-linecap="butt"/>
+<text x="550" y="287" font-size="12" text-anchor="end" class="f-ink2">HEAD</text>
+<path d="M560,275H580A4,4 0 0 1 584,279V287A4,4 0 0 1 580,291H560V275Z" class="f-muted"><title>HEAD: 3.5</title></path>
+<text x="592" y="287" font-size="12" text-anchor="start" class="f-ink1">3.5</text>
+<text x="550" y="315" font-size="12" text-anchor="end" class="f-ink2">After phase A</text>
+<path d="M560,303H721.28A4,4 0 0 1 725.28,307V315A4,4 0 0 1 721.28,319H560V303Z" class="f-b250"><title>After phase A: 24.4</title></path>
+<text x="733.28" y="315" font-size="12" text-anchor="start" class="f-ink1">24.4</text>
+<text x="550" y="343" font-size="12" text-anchor="end" class="f-ink1" font-weight="700">Final</text>
+<path d="M560,331H823.35A4,4 0 0 1 827.35,335V343A4,4 0 0 1 823.35,347H560V331Z" class="f-s1"><title>Final: 39.5</title></path>
+<text x="835.35" y="343" font-size="12" text-anchor="start" class="f-ink1" font-weight="700">39.5</text>
+<text x="24" y="392" font-size="10.5" text-anchor="start" class="f-muted">Flight time is 5 s divided by the flights logged in the interval. HEAD and final were re-measured for this report;</text>
+<text x="24" y="406" font-size="10.5" text-anchor="start" class="f-muted">after phase A comes from the serve logs of its three recorded runs (59.41, 59.66 and 59.28 req/s).</text>
+</svg>

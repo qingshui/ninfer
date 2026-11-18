@@ -1,0 +1,10 @@
+[
+  ["GDN prefill (varlen/chunked)", "^(recurrence_kernel|register_recurrence_kernel|prepare_kernel|chunk_recurrence_kernel|chunk_register_kernel|varlen_output_kernel|varlen_state_kernel|plan_kernel|gdn_projected_conv_kernel|causal_conv1d_.*|conv_varlen.*)$"],
+  ["GDN decode (state update)", "^(recurrent_batch_update_kernel|recurrent_bf16_direct_kernel|recurrent_.*)$"],
+  ["Full attention", "^(fmha_kernel|fmha_group_kernel|causal_natural_merge_kernel|rope_generic_kernel|write_fp8.*|sigmoid_mul_bf16x8_kernel|scatter_columns_kernel)$"],
+  ["MoE experts", "^(grouped_gemm_kernel|gather_input|stage_routed|quantize_input|scan_assignments|index_assignments|group_small|vector_gate|vector_down|reduce)$"],
+  ["MoE routing and shared expert", "^(route_selection|shared_mma|shared_vector|scale_shared)$"],
+  ["Dense linear", "^(sm100_gemm_kernel|q8_a16.*|mma_kernel|fp8_a8_quantize_kernel|nvfp4_a4_quantize_kernel|embed_gather_q8_kernel)$"],
+  ["Norm and elementwise", "^(rmsnorm.*)$"],
+  ["Sampling", "^(sample.*|sampling.*|increment_.*)$"]
+]

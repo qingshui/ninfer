@@ -1,0 +1,80 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 706" width="880" height="706" role="img" aria-labelledby="t d" font-family="'DejaVu Sans', Verdana, system-ui, -apple-system, 'Segoe UI', sans-serif">
+<title id="t">Gated DeltaNet chunk step before and after</title><desc id="d">Schematic of the varlen GDN recurrence chunk step with a shared-memory state snapshot and with a register-resident state</desc>
+<style>svg{--surface:#fcfcfb;--ink1:#0b0b0b;--ink2:#52514e;--muted:#898781;--grid:#e1e0d9;--axis:#c3c2b7;--s1:#2a78d6;--s2:#eb6834;--s3:#1baf7a;--s4:#eda100;--s5:#e87ba4;--s6:#008300;--s7:#6250d6;--s8:#e34948;--b250:#86b6ef;--b100:#cde2fb;--white:#ffffff;--good:#006300}@media (prefers-color-scheme:dark){svg{--surface:#1a1a19;--ink1:#f0efec;--ink2:#c3c2b7;--muted:#898781;--grid:#2c2c2a;--axis:#383835;--s1:#3987e5;--s2:#d95926;--s3:#199e70;--s4:#c98500;--s5:#d55181;--s6:#008300;--s7:#9085e9;--s8:#e66767;--b250:#3987e5;--b100:#184f95;--white:#ffffff;--good:#0ca30c}}.f-surface{fill:#fcfcfb;fill:var(--surface)}.s-surface{stroke:#fcfcfb;stroke:var(--surface)}.f-ink1{fill:#0b0b0b;fill:var(--ink1)}.s-ink1{stroke:#0b0b0b;stroke:var(--ink1)}.f-ink2{fill:#52514e;fill:var(--ink2)}.s-ink2{stroke:#52514e;stroke:var(--ink2)}.f-muted{fill:#898781;fill:var(--muted)}.s-muted{stroke:#898781;stroke:var(--muted)}.f-grid{fill:#e1e0d9;fill:var(--grid)}.s-grid{stroke:#e1e0d9;stroke:var(--grid)}.f-axis{fill:#c3c2b7;fill:var(--axis)}.s-axis{stroke:#c3c2b7;stroke:var(--axis)}.f-s1{fill:#2a78d6;fill:var(--s1)}.s-s1{stroke:#2a78d6;stroke:var(--s1)}.f-s2{fill:#eb6834;fill:var(--s2)}.s-s2{stroke:#eb6834;stroke:var(--s2)}.f-s3{fill:#1baf7a;fill:var(--s3)}.s-s3{stroke:#1baf7a;stroke:var(--s3)}.f-s4{fill:#eda100;fill:var(--s4)}.s-s4{stroke:#eda100;stroke:var(--s4)}.f-s5{fill:#e87ba4;fill:var(--s5)}.s-s5{stroke:#e87ba4;stroke:var(--s5)}.f-s6{fill:#008300;fill:var(--s6)}.s-s6{stroke:#008300;stroke:var(--s6)}.f-s7{fill:#6250d6;fill:var(--s7)}.s-s7{stroke:#6250d6;stroke:var(--s7)}.f-s8{fill:#e34948;fill:var(--s8)}.s-s8{stroke:#e34948;stroke:var(--s8)}.f-b250{fill:#86b6ef;fill:var(--b250)}.s-b250{stroke:#86b6ef;stroke:var(--b250)}.f-b100{fill:#cde2fb;fill:var(--b100)}.s-b100{stroke:#cde2fb;stroke:var(--b100)}.f-white{fill:#ffffff;fill:var(--white)}.s-white{stroke:#ffffff;stroke:var(--white)}.f-good{fill:#006300;fill:var(--good)}.s-good{stroke:#006300;stroke:var(--good)}</style>
+<rect class="f-surface" width="880" height="706"/>
+<text x="24" y="30" font-size="16" text-anchor="start" class="f-ink1" font-weight="700">Gated DeltaNet recurrence: one 16-token chunk step</text>
+<text x="24" y="50" font-size="12" text-anchor="start" class="f-ink2">Schematic, not to scale. Orange boxes are replaced by the blue ones.</text>
+<text x="24" y="88" font-size="13" text-anchor="start" class="f-ink1" font-weight="700">Before: HEAD recurrence_kernel&lt;64&gt;</text>
+<text x="450" y="88" font-size="13" text-anchor="start" class="f-ink1" font-weight="700">After: register-state chunk step</text>
+<path d="M30,100H424A6,6 0 0 1 430,106V146A6,6 0 0 1 424,152H30A6,6 0 0 1 24,146V106A6,6 0 0 1 30,100Z" class="f-surface s-axis" stroke-width="1"><title>16-token chunk, 256 threads</title></path>
+<text x="227" y="122.6" font-size="11" text-anchor="middle" class="f-ink1" font-weight="700">Load chunk tiles</text>
+<text x="227" y="137.1" font-size="11" text-anchor="middle" class="f-ink1">K, Q, V by cp.async, 2 stages</text>
+<path d="M30,170H424A6,6 0 0 1 430,176V216A6,6 0 0 1 424,222H30A6,6 0 0 1 24,216V176A6,6 0 0 1 30,170Z" class="f-s2 s-s2" stroke-width="1.25" fill-opacity="0.16"><title>The state lives in registers between chunks and is copied to shared memory for each chunk step</title></path>
+<text x="227" y="192.6" font-size="11" text-anchor="middle" class="f-ink1" font-weight="700">Snapshot the FP32 state to shared memory</text>
+<text x="227" y="207.1" font-size="11" text-anchor="middle" class="f-ink1">128x64 state, 32 KB written every chunk</text>
+<line x1="227" y1="154" x2="227" y2="164" class="s-ink2" stroke-width="1.5" stroke-linecap="butt"/>
+<polygon points="227,169 223,161 231,161" class="f-ink2"/>
+<path d="M30,240H424A6,6 0 0 1 430,246V286A6,6 0 0 1 424,292H30A6,6 0 0 1 24,286V246A6,6 0 0 1 30,240Z" class="f-s2 s-s2" stroke-width="1.25" fill-opacity="0.16"><title>ncu: L1/TEX 93%, compute 39%, mio_throttle 2.30 and short_scoreboard 1.92 of 9.16 stall cycles per instruction</title></path>
+<text x="227" y="262.6" font-size="11" text-anchor="middle" class="f-ink1" font-weight="700">MMA with operands read from shared memory</text>
+<text x="227" y="277.1" font-size="11" text-anchor="middle" class="f-ink1">scalar LDS.32 B fragments, 2.4-way bank conflicts</text>
+<line x1="227" y1="224" x2="227" y2="234" class="s-ink2" stroke-width="1.5" stroke-linecap="butt"/>
+<polygon points="227,239 223,231 231,231" class="f-ink2"/>
+<path d="M30,310H424A6,6 0 0 1 430,316V356A6,6 0 0 1 424,362H30A6,6 0 0 1 24,356V316A6,6 0 0 1 30,310Z" class="f-s2 s-s2" stroke-width="1.25" fill-opacity="0.16"><title>barrier stall 0.63 cycles per instruction</title></path>
+<text x="227" y="332.6" font-size="11" text-anchor="middle" class="f-ink1" font-weight="700">Update the state and synchronize</text>
+<text x="227" y="347.1" font-size="11" text-anchor="middle" class="f-ink1">4 __syncthreads per chunk</text>
+<line x1="227" y1="294" x2="227" y2="304" class="s-ink2" stroke-width="1.5" stroke-linecap="butt"/>
+<polygon points="227,309 223,301 231,301" class="f-ink2"/>
+<path d="M456,100H850A6,6 0 0 1 856,106V146A6,6 0 0 1 850,152H456A6,6 0 0 1 450,146V106A6,6 0 0 1 456,100Z" class="f-surface s-axis" stroke-width="1"><title>16-token chunk, 128 threads</title></path>
+<text x="653" y="122.6" font-size="11" text-anchor="middle" class="f-ink1" font-weight="700">Load chunk tiles</text>
+<text x="653" y="137.1" font-size="11" text-anchor="middle" class="f-ink1">K, Q, V by cp.async, 3 stages, V^T by ldmatrix</text>
+<path d="M456,170H850A6,6 0 0 1 856,176V216A6,6 0 0 1 850,222H456A6,6 0 0 1 450,216V176A6,6 0 0 1 456,170Z" class="f-s1 s-s1" stroke-width="1.25" fill-opacity="0.16"><title>S^T[value, key] is never copied to shared memory</title></path>
+<text x="653" y="192.6" font-size="11" text-anchor="middle" class="f-ink1" font-weight="700">State stays in MMA accumulators</text>
+<text x="653" y="207.1" font-size="11" text-anchor="middle" class="f-ink1">each warp owns 16 value rows, 64 FP32 per lane</text>
+<line x1="653" y1="154" x2="653" y2="164" class="s-ink2" stroke-width="1.5" stroke-linecap="butt"/>
+<polygon points="653,169 649,161 657,161" class="f-ink2"/>
+<path d="M456,240H850A6,6 0 0 1 856,246V286A6,6 0 0 1 850,292H456A6,6 0 0 1 450,286V246A6,6 0 0 1 456,240Z" class="f-s1 s-s1" stroke-width="1.25" fill-opacity="0.16"><title>72 MMAs per warp per chunk; K.S in TF32, Q.S on the BF16-rounded state</title></path>
+<text x="653" y="262.6" font-size="11" text-anchor="middle" class="f-ink1" font-weight="700">MMA with operands taken from registers</text>
+<text x="653" y="277.1" font-size="11" text-anchor="middle" class="f-ink1">TF32 A fragments straight from the accumulators</text>
+<line x1="653" y1="224" x2="653" y2="234" class="s-ink2" stroke-width="1.5" stroke-linecap="butt"/>
+<polygon points="653,239 649,231 657,231" class="f-ink2"/>
+<path d="M456,310H850A6,6 0 0 1 856,316V356A6,6 0 0 1 850,362H456A6,6 0 0 1 450,356V316A6,6 0 0 1 456,310Z" class="f-s1 s-s1" stroke-width="1.25" fill-opacity="0.16"><title>FP32 master state is kept</title></path>
+<text x="653" y="332.6" font-size="11" text-anchor="middle" class="f-ink1" font-weight="700">Update the state and synchronize</text>
+<text x="653" y="347.1" font-size="11" text-anchor="middle" class="f-ink1">1 __syncthreads per chunk</text>
+<line x1="653" y1="294" x2="653" y2="304" class="s-ink2" stroke-width="1.5" stroke-linecap="butt"/>
+<polygon points="653,309 649,301 657,301" class="f-ink2"/>
+<text x="24" y="392" font-size="11" text-anchor="start" class="f-muted" font-weight="700"></text>
+<text x="356.8" y="392" font-size="11" text-anchor="start" class="f-muted" font-weight="700">HEAD</text>
+<text x="556.48" y="392" font-size="11" text-anchor="start" class="f-muted" font-weight="700">Final</text>
+<line x1="24" y1="398" x2="856" y2="398" class="s-axis" stroke-width="1" stroke-linecap="butt"/>
+<text x="24" y="414" font-size="11" text-anchor="start" class="f-ink2">Threads per CTA</text>
+<text x="356.8" y="414" font-size="11" text-anchor="start" class="f-ink1">256</text>
+<text x="556.48" y="414" font-size="11" text-anchor="start" class="f-ink1" font-weight="700">128</text>
+<text x="24" y="432" font-size="11" text-anchor="start" class="f-ink2">Dynamic shared memory per CTA</text>
+<text x="356.8" y="432" font-size="11" text-anchor="start" class="f-ink1">61,952 B</text>
+<text x="556.48" y="432" font-size="11" text-anchor="start" class="f-ink1" font-weight="700">40,704 B</text>
+<text x="24" y="450" font-size="11" text-anchor="start" class="f-ink2">__syncthreads per 16-token chunk</text>
+<text x="356.8" y="450" font-size="11" text-anchor="start" class="f-ink1">4</text>
+<text x="556.48" y="450" font-size="11" text-anchor="start" class="f-ink1" font-weight="700">1</text>
+<text x="24" y="468" font-size="11" text-anchor="start" class="f-ink2">cp.async stages</text>
+<text x="356.8" y="468" font-size="11" text-anchor="start" class="f-ink1">2</text>
+<text x="556.48" y="468" font-size="11" text-anchor="start" class="f-ink1" font-weight="700">3</text>
+<text x="24" y="486" font-size="11" text-anchor="start" class="f-ink2">CTAs per SM</text>
+<text x="356.8" y="486" font-size="11" text-anchor="start" class="f-ink1">2 (25% occupancy, measured)</text>
+<text x="556.48" y="486" font-size="11" text-anchor="start" class="f-ink1" font-weight="700">asks for 3 (single) / 4 (varlen)</text>
+<text x="24" y="504" font-size="11" text-anchor="start" class="f-ink2">Profile of the chunk step</text>
+<text x="356.8" y="504" font-size="11" text-anchor="start" class="f-ink1">L1/TEX 93%, compute 39%</text>
+<text x="556.48" y="504" font-size="11" text-anchor="start" class="f-ink1" font-weight="700">tensor pipe 41-46%, issue ~47%</text>
+<path d="M28,530H852A4,4 0 0 1 856,534V552A4,4 0 0 1 852,556H28A4,4 0 0 1 24,552V534A4,4 0 0 1 28,530Z" class="f-grid" fill-opacity="0.7"/>
+<text x="34" y="547" font-size="12" text-anchor="start" class="f-ink1" font-weight="700">Isolated bench:</text>
+<text x="146.44" y="547" font-size="12" text-anchor="start" class="f-ink1">recurrence kernel 353 to 178 us (8 rows, 4270 tokens, no boundaries)</text>
+<path d="M28,562H852A4,4 0 0 1 856,566V584A4,4 0 0 1 852,588H28A4,4 0 0 1 24,584V566A4,4 0 0 1 28,562Z" class="f-b100" fill-opacity="0.7"/>
+<text x="34" y="579" font-size="12" text-anchor="start" class="f-ink1" font-weight="700">Production flights:</text>
+<text x="167.84" y="579" font-size="12" text-anchor="start" class="f-ink1">varlen recurrence 11.7 to 7.44 ms per flight (nsys); end to end 87.3 to 90.7 req/s</text>
+<path d="M28,594H852A4,4 0 0 1 856,598V616A4,4 0 0 1 852,620H28A4,4 0 0 1 24,616V598A4,4 0 0 1 28,594Z" class="f-b100" fill-opacity="0.7"/>
+<text x="34" y="611" font-size="12" text-anchor="start" class="f-ink1" font-weight="700">Controlled A/B:</text>
+<text x="144.24" y="611" font-size="12" text-anchor="start" class="f-ink1">final engine with HEAD&#x27;s GDN kernels 85.57 req/s, with the final kernels 94.11 (+10.0%)</text>
+<text x="24" y="636" font-size="10.5" text-anchor="start" class="f-muted">Numbers come from ncu, nsys and microbenchmarks run on GPU 1 during development and are recorded in notes; they were not re-measured for this report.</text>
+<text x="24" y="650" font-size="10.5" text-anchor="start" class="f-muted">The controlled A/B was run for this report: the four GDN recurrence files reverted to HEAD, everything else final, three interleaved rounds.</text>
+<text x="24" y="664" font-size="10.5" text-anchor="start" class="f-muted">Contract: varlen output, row destinations and checkpoints equal the per-sub-segment single-segment op bit for bit and stay within FP64-reference budgets.</text>
+<text x="24" y="678" font-size="10.5" text-anchor="start" class="f-muted">The new chunk step is not bit-identical to HEAD&#x27;s: it uses two TF32 accumulation chains.</text>
+</svg>

@@ -1,0 +1,98 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 454" width="880" height="454" role="img" aria-labelledby="t d" font-family="'DejaVu Sans', Verdana, system-ui, -apple-system, 'Segoe UI', sans-serif">
+<title id="t">GPU kernel time per request by category</title><desc id="d">Sum of GPU kernel time per completed request for HEAD and the final build, from nsys profiles of the locked workload</desc>
+<style>svg{--surface:#fcfcfb;--ink1:#0b0b0b;--ink2:#52514e;--muted:#898781;--grid:#e1e0d9;--axis:#c3c2b7;--s1:#2a78d6;--s2:#eb6834;--s3:#1baf7a;--s4:#eda100;--s5:#e87ba4;--s6:#008300;--s7:#6250d6;--s8:#e34948;--b250:#86b6ef;--b100:#cde2fb;--white:#ffffff;--good:#006300}@media (prefers-color-scheme:dark){svg{--surface:#1a1a19;--ink1:#f0efec;--ink2:#c3c2b7;--muted:#898781;--grid:#2c2c2a;--axis:#383835;--s1:#3987e5;--s2:#d95926;--s3:#199e70;--s4:#c98500;--s5:#d55181;--s6:#008300;--s7:#9085e9;--s8:#e66767;--b250:#3987e5;--b100:#184f95;--white:#ffffff;--good:#0ca30c}}.f-surface{fill:#fcfcfb;fill:var(--surface)}.s-surface{stroke:#fcfcfb;stroke:var(--surface)}.f-ink1{fill:#0b0b0b;fill:var(--ink1)}.s-ink1{stroke:#0b0b0b;stroke:var(--ink1)}.f-ink2{fill:#52514e;fill:var(--ink2)}.s-ink2{stroke:#52514e;stroke:var(--ink2)}.f-muted{fill:#898781;fill:var(--muted)}.s-muted{stroke:#898781;stroke:var(--muted)}.f-grid{fill:#e1e0d9;fill:var(--grid)}.s-grid{stroke:#e1e0d9;stroke:var(--grid)}.f-axis{fill:#c3c2b7;fill:var(--axis)}.s-axis{stroke:#c3c2b7;stroke:var(--axis)}.f-s1{fill:#2a78d6;fill:var(--s1)}.s-s1{stroke:#2a78d6;stroke:var(--s1)}.f-s2{fill:#eb6834;fill:var(--s2)}.s-s2{stroke:#eb6834;stroke:var(--s2)}.f-s3{fill:#1baf7a;fill:var(--s3)}.s-s3{stroke:#1baf7a;stroke:var(--s3)}.f-s4{fill:#eda100;fill:var(--s4)}.s-s4{stroke:#eda100;stroke:var(--s4)}.f-s5{fill:#e87ba4;fill:var(--s5)}.s-s5{stroke:#e87ba4;stroke:var(--s5)}.f-s6{fill:#008300;fill:var(--s6)}.s-s6{stroke:#008300;stroke:var(--s6)}.f-s7{fill:#6250d6;fill:var(--s7)}.s-s7{stroke:#6250d6;stroke:var(--s7)}.f-s8{fill:#e34948;fill:var(--s8)}.s-s8{stroke:#e34948;stroke:var(--s8)}.f-b250{fill:#86b6ef;fill:var(--b250)}.s-b250{stroke:#86b6ef;stroke:var(--b250)}.f-b100{fill:#cde2fb;fill:var(--b100)}.s-b100{stroke:#cde2fb;stroke:var(--b100)}.f-white{fill:#ffffff;fill:var(--white)}.s-white{stroke:#ffffff;stroke:var(--white)}.f-good{fill:#006300;fill:var(--good)}.s-good{stroke:#006300;stroke:var(--good)}</style>
+<rect class="f-surface" width="880" height="454"/>
+<text x="24" y="30" font-size="16" text-anchor="start" class="f-ink1" font-weight="700">GPU kernel time per request (ms), by category</text>
+<text x="24" y="50" font-size="12" text-anchor="start" class="f-ink2">Same workload (2000 requests, c=130, n=4). Kernel durations from nsys, node-level CUDA graph trace.</text>
+<path d="M26,71H32A2,2 0 0 1 34,73V79A2,2 0 0 1 32,81H26A2,2 0 0 1 24,79V73A2,2 0 0 1 26,71Z" class="f-s1"/>
+<text x="39" y="80" font-size="12" text-anchor="start" class="f-ink2">MoE routed experts</text>
+<path d="M178.39,71H184.39A2,2 0 0 1 186.39,73V79A2,2 0 0 1 184.39,81H178.39A2,2 0 0 1 176.39,79V73A2,2 0 0 1 178.39,71Z" class="f-s2"/>
+<text x="191.39" y="80" font-size="12" text-anchor="start" class="f-ink2">Dense linear (GEMM)</text>
+<path d="M339.78,71H345.78A2,2 0 0 1 347.78,73V79A2,2 0 0 1 345.78,81H339.78A2,2 0 0 1 337.78,79V73A2,2 0 0 1 339.78,71Z" class="f-s3"/>
+<text x="352.78" y="80" font-size="12" text-anchor="start" class="f-ink2">GDN decode state update</text>
+<path d="M530.36,71H536.36A2,2 0 0 1 538.36,73V79A2,2 0 0 1 536.36,81H530.36A2,2 0 0 1 528.36,79V73A2,2 0 0 1 530.36,71Z" class="f-s4"/>
+<text x="543.36" y="80" font-size="12" text-anchor="start" class="f-ink2">GDN prefill (varlen/chunked)</text>
+<path d="M736.46,71H742.46A2,2 0 0 1 744.46,73V79A2,2 0 0 1 742.46,81H736.46A2,2 0 0 1 734.46,79V73A2,2 0 0 1 736.46,71Z" class="f-s5"/>
+<text x="749.46" y="80" font-size="12" text-anchor="start" class="f-ink2">Full attention</text>
+<path d="M26,91H32A2,2 0 0 1 34,93V99A2,2 0 0 1 32,101H26A2,2 0 0 1 24,99V93A2,2 0 0 1 26,91Z" class="f-s6"/>
+<text x="39" y="100" font-size="12" text-anchor="start" class="f-ink2">MoE routing and shared expert</text>
+<path d="M246.79,91H252.79A2,2 0 0 1 254.79,93V99A2,2 0 0 1 252.79,101H246.79A2,2 0 0 1 244.79,99V93A2,2 0 0 1 246.79,91Z" class="f-s7"/>
+<text x="259.79" y="100" font-size="12" text-anchor="start" class="f-ink2">Norm, sampling, other</text>
+<text x="24" y="124" font-size="12" text-anchor="start" class="f-ink1" font-weight="700">A. HEAD against the final build (full scale)</text>
+<line x1="94.5" y1="134" x2="94.5" y2="226" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="94.5" y="241" font-size="11" text-anchor="middle" class="f-muted">0</text>
+<line x1="268.5" y1="134" x2="268.5" y2="226" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="268.5" y="241" font-size="11" text-anchor="middle" class="f-muted">100</text>
+<line x1="442.5" y1="134" x2="442.5" y2="226" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="442.5" y="241" font-size="11" text-anchor="middle" class="f-muted">200</text>
+<line x1="616.5" y1="134" x2="616.5" y2="226" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="616.5" y="241" font-size="11" text-anchor="middle" class="f-muted">300</text>
+<line x1="791.5" y1="134" x2="791.5" y2="226" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="791.5" y="241" font-size="11" text-anchor="middle" class="f-muted">400</text>
+<line x1="94.5" y1="134" x2="94.5" y2="226" class="s-axis" stroke-width="1" stroke-linecap="butt"/>
+<text x="84" y="162" font-size="12" text-anchor="end" class="f-ink1" font-weight="700">HEAD</text>
+<rect x="94" y="146" width="272.54" height="24" class="f-s1"><title>MoE routed experts: 156.38 ms per request</title></rect>
+<text x="230.27" y="162" font-size="11" text-anchor="middle" class="f-white">156</text>
+<rect x="368.54" y="146" width="167.45" height="24" class="f-s2"><title>Dense linear (GEMM): 97.23 ms per request</title></rect>
+<text x="452.27" y="162" font-size="11" text-anchor="middle" class="f-white">97</text>
+<rect x="537.99" y="146" width="3" height="24" class="f-s3"><title>GDN decode state update: 2.87 ms per request</title></rect>
+<rect x="542.99" y="146" width="40.59" height="24" class="f-s4"><title>GDN prefill (varlen/chunked): 24.43 ms per request</title></rect>
+<text x="563.29" y="162" font-size="11" text-anchor="middle" class="f-ink1">24</text>
+<rect x="585.58" y="146" width="54.46" height="24" class="f-s5"><title>Full attention: 32.39 ms per request</title></rect>
+<text x="612.81" y="162" font-size="11" text-anchor="middle" class="f-white">32</text>
+<rect x="642.04" y="146" width="86.84" height="24" class="f-s6"><title>MoE routing and shared expert: 50.97 ms per request</title></rect>
+<text x="685.46" y="162" font-size="11" text-anchor="middle" class="f-white">51</text>
+<path d="M730.87,146H742.27A4,4 0 0 1 746.27,150V166A4,4 0 0 1 742.27,170H730.87V146Z" class="f-s7"><title>Norm, sampling, other: 9.98 ms per request</title></path>
+<text x="754.27" y="162" font-size="12" text-anchor="start" class="f-ink1" font-weight="700">374 ms</text>
+<text x="84" y="206" font-size="12" text-anchor="end" class="f-ink1" font-weight="700">Final</text>
+<rect x="94" y="190" width="4.53" height="24" class="f-s1"><title>MoE routed experts: 2.60 ms per request</title></rect>
+<rect x="100.53" y="190" width="1.93" height="24" class="f-s2"><title>Dense linear (GEMM): 2.26 ms per request</title></rect>
+<rect x="104.47" y="190" width="0.97" height="24" class="f-s3"><title>GDN decode state update: 1.70 ms per request</title></rect>
+<rect x="107.43" y="190" width="0.54" height="24" class="f-s4"><title>GDN prefill (varlen/chunked): 1.46 ms per request</title></rect>
+<text x="118.81" y="206" font-size="12" text-anchor="start" class="f-ink1" font-weight="700">9.6 ms</text>
+<text x="24" y="264" font-size="12" text-anchor="start" class="f-ink1" font-weight="700">B. Zoom on the final build, original artifact against canonical artifact</text>
+<line x1="194.5" y1="274" x2="194.5" y2="366" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="194.5" y="381" font-size="11" text-anchor="middle" class="f-muted">0</text>
+<line x1="312.5" y1="274" x2="312.5" y2="366" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="312.5" y="381" font-size="11" text-anchor="middle" class="f-muted">2.5</text>
+<line x1="431.5" y1="274" x2="431.5" y2="366" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="431.5" y="381" font-size="11" text-anchor="middle" class="f-muted">5</text>
+<line x1="549.5" y1="274" x2="549.5" y2="366" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="549.5" y="381" font-size="11" text-anchor="middle" class="f-muted">7.5</text>
+<line x1="668.5" y1="274" x2="668.5" y2="366" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="668.5" y="381" font-size="11" text-anchor="middle" class="f-muted">10</text>
+<line x1="786.5" y1="274" x2="786.5" y2="366" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="786.5" y="381" font-size="11" text-anchor="middle" class="f-muted">12.5</text>
+<line x1="194.5" y1="274" x2="194.5" y2="366" class="s-axis" stroke-width="1" stroke-linecap="butt"/>
+<text x="184" y="302" font-size="12" text-anchor="end" class="f-ink1" font-weight="700">Final, original artifact</text>
+<rect x="194" y="286" width="130.43" height="24" class="f-s1"><title>MoE routed experts: 2.75 ms per request</title></rect>
+<text x="259.22" y="302" font-size="11" text-anchor="middle" class="f-white">2.8</text>
+<rect x="326.43" y="286" width="170.81" height="24" class="f-s2"><title>Dense linear (GEMM): 3.65 ms per request</title></rect>
+<text x="411.84" y="302" font-size="11" text-anchor="middle" class="f-white">3.6</text>
+<rect x="499.24" y="286" width="80.49" height="24" class="f-s3"><title>GDN decode state update: 1.74 ms per request</title></rect>
+<text x="539.48" y="302" font-size="11" text-anchor="middle" class="f-white">1.7</text>
+<rect x="581.73" y="286" width="73.17" height="24" class="f-s4"><title>GDN prefill (varlen/chunked): 1.59 ms per request</title></rect>
+<text x="618.31" y="302" font-size="11" text-anchor="middle" class="f-ink1">1.6</text>
+<rect x="656.89" y="286" width="35.99" height="24" class="f-s5"><title>Full attention: 0.80 ms per request</title></rect>
+<text x="674.89" y="302" font-size="11" text-anchor="middle" class="f-white">0.8</text>
+<rect x="694.88" y="286" width="21.97" height="24" class="f-s6"><title>MoE routing and shared expert: 0.51 ms per request</title></rect>
+<path d="M718.85,286H733.55A4,4 0 0 1 737.55,290V306A4,4 0 0 1 733.55,310H718.85V286Z" class="f-s7"><title>Norm, sampling, other: 0.44 ms per request</title></path>
+<text x="745.55" y="302" font-size="12" text-anchor="start" class="f-ink1" font-weight="700">11.5 ms</text>
+<text x="184" y="346" font-size="12" text-anchor="end" class="f-ink1" font-weight="700">Final, canonical artifact</text>
+<rect x="194" y="330" width="123.34" height="24" class="f-s1"><title>MoE routed experts: 2.60 ms per request</title></rect>
+<text x="255.67" y="346" font-size="11" text-anchor="middle" class="f-white">2.6</text>
+<rect x="319.34" y="330" width="104.95" height="24" class="f-s2"><title>Dense linear (GEMM): 2.26 ms per request</title></rect>
+<text x="371.82" y="346" font-size="11" text-anchor="middle" class="f-white">2.3</text>
+<rect x="426.29" y="330" width="78.7" height="24" class="f-s3"><title>GDN decode state update: 1.70 ms per request</title></rect>
+<text x="465.64" y="346" font-size="11" text-anchor="middle" class="f-white">1.7</text>
+<rect x="506.99" y="330" width="67.1" height="24" class="f-s4"><title>GDN prefill (varlen/chunked): 1.46 ms per request</title></rect>
+<text x="540.54" y="346" font-size="11" text-anchor="middle" class="f-ink1">1.5</text>
+<rect x="576.09" y="330" width="33.16" height="24" class="f-s5"><title>Full attention: 0.74 ms per request</title></rect>
+<text x="592.67" y="346" font-size="11" text-anchor="middle" class="f-white">0.7</text>
+<rect x="611.25" y="330" width="20.73" height="24" class="f-s6"><title>MoE routing and shared expert: 0.48 ms per request</title></rect>
+<path d="M633.98,330H647.2A4,4 0 0 1 651.2,334V350A4,4 0 0 1 647.2,354H633.98V330Z" class="f-s7"><title>Norm, sampling, other: 0.41 ms per request</title></path>
+<text x="659.2" y="346" font-size="12" text-anchor="start" class="f-ink1" font-weight="700">9.6 ms</text>
+<text x="24" y="398" font-size="10.5" text-anchor="start" class="f-muted">HEAD: only 4 requests finished inside its 10 s window, so its per-request values use the run&#x27;s measured 2.21 req/s and the window&#x27;s GPU-busy</text>
+<text x="24" y="412" font-size="10.5" text-anchor="start" class="f-muted">fraction (0.827); the final builds divide by requests finished in their 5 s windows (480 canonical, 411 original).</text>
+<text x="24" y="426" font-size="10.5" text-anchor="start" class="f-muted">Profiled runs are slower than unprofiled ones. Segment labels are ms per request and appear only where they fit.</text>
+</svg>

@@ -1,0 +1,93 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 434" width="880" height="434" role="img" aria-labelledby="t d" font-family="'DejaVu Sans', Verdana, system-ui, -apple-system, 'Segoe UI', sans-serif">
+<title id="t">Latency of the locked harness</title><desc id="d">Mean and p99 latency of sglang, the build after phase A and the final build</desc>
+<style>svg{--surface:#fcfcfb;--ink1:#0b0b0b;--ink2:#52514e;--muted:#898781;--grid:#e1e0d9;--axis:#c3c2b7;--s1:#2a78d6;--s2:#eb6834;--s3:#1baf7a;--s4:#eda100;--s5:#e87ba4;--s6:#008300;--s7:#6250d6;--s8:#e34948;--b250:#86b6ef;--b100:#cde2fb;--white:#ffffff;--good:#006300}@media (prefers-color-scheme:dark){svg{--surface:#1a1a19;--ink1:#f0efec;--ink2:#c3c2b7;--muted:#898781;--grid:#2c2c2a;--axis:#383835;--s1:#3987e5;--s2:#d95926;--s3:#199e70;--s4:#c98500;--s5:#d55181;--s6:#008300;--s7:#9085e9;--s8:#e66767;--b250:#3987e5;--b100:#184f95;--white:#ffffff;--good:#0ca30c}}.f-surface{fill:#fcfcfb;fill:var(--surface)}.s-surface{stroke:#fcfcfb;stroke:var(--surface)}.f-ink1{fill:#0b0b0b;fill:var(--ink1)}.s-ink1{stroke:#0b0b0b;stroke:var(--ink1)}.f-ink2{fill:#52514e;fill:var(--ink2)}.s-ink2{stroke:#52514e;stroke:var(--ink2)}.f-muted{fill:#898781;fill:var(--muted)}.s-muted{stroke:#898781;stroke:var(--muted)}.f-grid{fill:#e1e0d9;fill:var(--grid)}.s-grid{stroke:#e1e0d9;stroke:var(--grid)}.f-axis{fill:#c3c2b7;fill:var(--axis)}.s-axis{stroke:#c3c2b7;stroke:var(--axis)}.f-s1{fill:#2a78d6;fill:var(--s1)}.s-s1{stroke:#2a78d6;stroke:var(--s1)}.f-s2{fill:#eb6834;fill:var(--s2)}.s-s2{stroke:#eb6834;stroke:var(--s2)}.f-s3{fill:#1baf7a;fill:var(--s3)}.s-s3{stroke:#1baf7a;stroke:var(--s3)}.f-s4{fill:#eda100;fill:var(--s4)}.s-s4{stroke:#eda100;stroke:var(--s4)}.f-s5{fill:#e87ba4;fill:var(--s5)}.s-s5{stroke:#e87ba4;stroke:var(--s5)}.f-s6{fill:#008300;fill:var(--s6)}.s-s6{stroke:#008300;stroke:var(--s6)}.f-s7{fill:#6250d6;fill:var(--s7)}.s-s7{stroke:#6250d6;stroke:var(--s7)}.f-s8{fill:#e34948;fill:var(--s8)}.s-s8{stroke:#e34948;stroke:var(--s8)}.f-b250{fill:#86b6ef;fill:var(--b250)}.s-b250{stroke:#86b6ef;stroke:var(--b250)}.f-b100{fill:#cde2fb;fill:var(--b100)}.s-b100{stroke:#cde2fb;stroke:var(--b100)}.f-white{fill:#ffffff;fill:var(--white)}.s-white{stroke:#ffffff;stroke:var(--white)}.f-good{fill:#006300;fill:var(--good)}.s-good{stroke:#006300;stroke:var(--good)}</style>
+<rect class="f-surface" width="880" height="434"/>
+<text x="24" y="30" font-size="16" text-anchor="start" class="f-ink1" font-weight="700">Latency at concurrency 130 (n=4, max_tokens 15)</text>
+<text x="24" y="50" font-size="12" text-anchor="start" class="f-ink2">Lower is better. With a fixed client, throughput is about 130 divided by the mean end-to-end latency.</text>
+<path d="M26,71H32A2,2 0 0 1 34,73V79A2,2 0 0 1 32,81H26A2,2 0 0 1 24,79V73A2,2 0 0 1 26,71Z" class="f-s2"/>
+<text x="39" y="80" font-size="12" text-anchor="start" class="f-ink2">sglang</text>
+<path d="M100.78,71H106.78A2,2 0 0 1 108.78,73V79A2,2 0 0 1 106.78,81H100.78A2,2 0 0 1 98.78,79V73A2,2 0 0 1 100.78,71Z" class="f-b250"/>
+<text x="113.78" y="80" font-size="12" text-anchor="start" class="f-ink2">After phase A</text>
+<path d="M216.65,71H222.65A2,2 0 0 1 224.65,73V79A2,2 0 0 1 222.65,81H216.65A2,2 0 0 1 214.65,79V73A2,2 0 0 1 216.65,71Z" class="f-s1"/>
+<text x="229.65" y="80" font-size="12" text-anchor="start" class="f-ink2">Final</text>
+<text x="24" y="104" font-size="12" text-anchor="start" class="f-ink1" font-weight="700">Mean end-to-end latency (s)</text>
+<line x1="120.5" y1="116" x2="120.5" y2="206" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="120.5" y="221" font-size="11" text-anchor="middle" class="f-muted">0</text>
+<line x1="210.5" y1="116" x2="210.5" y2="206" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="210.5" y="221" font-size="11" text-anchor="middle" class="f-muted">1</text>
+<line x1="300.5" y1="116" x2="300.5" y2="206" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="300.5" y="221" font-size="11" text-anchor="middle" class="f-muted">2</text>
+<line x1="390.5" y1="116" x2="390.5" y2="206" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="390.5" y="221" font-size="11" text-anchor="middle" class="f-muted">3</text>
+<line x1="120.5" y1="116" x2="120.5" y2="206" class="s-axis" stroke-width="1" stroke-linecap="butt"/>
+<text x="110" y="137" font-size="12" text-anchor="end" class="f-ink2">sglang</text>
+<path d="M120,125H304.91A4,4 0 0 1 308.91,129V137A4,4 0 0 1 304.91,141H120V125Z" class="f-s2"><title>sglang: 2.10</title></path>
+<text x="316.91" y="137" font-size="12" text-anchor="start" class="f-ink1">2.10</text>
+<text x="110" y="165" font-size="12" text-anchor="end" class="f-ink2">After phase A</text>
+<path d="M120,153H311.21A4,4 0 0 1 315.21,157V165A4,4 0 0 1 311.21,169H120V153Z" class="f-b250"><title>After phase A: 2.17</title></path>
+<text x="323.21" y="165" font-size="12" text-anchor="start" class="f-ink1">2.17</text>
+<text x="110" y="193" font-size="12" text-anchor="end" class="f-ink1" font-weight="700">Final</text>
+<path d="M120,181H238.58A4,4 0 0 1 242.58,185V193A4,4 0 0 1 238.58,197H120V181Z" class="f-s1"><title>Final: 1.36</title></path>
+<text x="250.58" y="193" font-size="12" text-anchor="start" class="f-ink1" font-weight="700">1.36</text>
+<text x="464" y="104" font-size="12" text-anchor="start" class="f-ink1" font-weight="700">Mean time to first token (ms)</text>
+<line x1="560.5" y1="116" x2="560.5" y2="206" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="560.5" y="221" font-size="11" text-anchor="middle" class="f-muted">0</text>
+<line x1="625.5" y1="116" x2="625.5" y2="206" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="625.5" y="221" font-size="11" text-anchor="middle" class="f-muted">500</text>
+<line x1="691.5" y1="116" x2="691.5" y2="206" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="691.5" y="221" font-size="11" text-anchor="middle" class="f-muted">1,000</text>
+<line x1="756.5" y1="116" x2="756.5" y2="206" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="756.5" y="221" font-size="11" text-anchor="middle" class="f-muted">1,500</text>
+<line x1="822.5" y1="116" x2="822.5" y2="206" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="822.5" y="221" font-size="11" text-anchor="middle" class="f-muted">2,000</text>
+<line x1="560.5" y1="116" x2="560.5" y2="206" class="s-axis" stroke-width="1" stroke-linecap="butt"/>
+<text x="550" y="137" font-size="12" text-anchor="end" class="f-ink2">sglang</text>
+<path d="M560,125H789.08A4,4 0 0 1 793.08,129V137A4,4 0 0 1 789.08,141H560V125Z" class="f-s2"><title>sglang: 1,779</title></path>
+<text x="801.08" y="137" font-size="12" text-anchor="start" class="f-ink1">1,779</text>
+<text x="550" y="165" font-size="12" text-anchor="end" class="f-ink2">After phase A</text>
+<path d="M560,153H603.28A4,4 0 0 1 607.28,157V165A4,4 0 0 1 603.28,169H560V153Z" class="f-b250"><title>After phase A: 361</title></path>
+<text x="615.28" y="165" font-size="12" text-anchor="start" class="f-ink1">361</text>
+<text x="550" y="193" font-size="12" text-anchor="end" class="f-ink1" font-weight="700">Final</text>
+<path d="M560,181H582.57A4,4 0 0 1 586.57,185V193A4,4 0 0 1 582.57,197H560V181Z" class="f-s1"><title>Final: 203</title></path>
+<text x="594.57" y="193" font-size="12" text-anchor="start" class="f-ink1" font-weight="700">203</text>
+<text x="24" y="254" font-size="12" text-anchor="start" class="f-ink1" font-weight="700">p99 time to first token (ms)</text>
+<line x1="120.5" y1="266" x2="120.5" y2="356" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="120.5" y="371" font-size="11" text-anchor="middle" class="f-muted">0</text>
+<line x1="207.5" y1="266" x2="207.5" y2="356" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="207.5" y="371" font-size="11" text-anchor="middle" class="f-muted">1,000</text>
+<line x1="294.5" y1="266" x2="294.5" y2="356" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="294.5" y="371" font-size="11" text-anchor="middle" class="f-muted">2,000</text>
+<line x1="382.5" y1="266" x2="382.5" y2="356" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="382.5" y="371" font-size="11" text-anchor="middle" class="f-muted">3,000</text>
+<line x1="120.5" y1="266" x2="120.5" y2="356" class="s-axis" stroke-width="1" stroke-linecap="butt"/>
+<text x="110" y="287" font-size="12" text-anchor="end" class="f-ink2">sglang</text>
+<path d="M120,275H335.9A4,4 0 0 1 339.9,279V287A4,4 0 0 1 335.9,291H120V275Z" class="f-s2"><title>sglang: 2,518</title></path>
+<text x="347.9" y="287" font-size="12" text-anchor="start" class="f-ink1">2,518</text>
+<text x="110" y="315" font-size="12" text-anchor="end" class="f-ink2">After phase A</text>
+<path d="M120,303H272.52A4,4 0 0 1 276.52,307V315A4,4 0 0 1 272.52,319H120V303Z" class="f-b250"><title>After phase A: 1,792</title></path>
+<text x="284.52" y="315" font-size="12" text-anchor="start" class="f-ink1">1,792</text>
+<text x="110" y="343" font-size="12" text-anchor="end" class="f-ink1" font-weight="700">Final</text>
+<path d="M120,331H212.62A4,4 0 0 1 216.62,335V343A4,4 0 0 1 212.62,347H120V331Z" class="f-s1"><title>Final: 1,106</title></path>
+<text x="224.62" y="343" font-size="12" text-anchor="start" class="f-ink1" font-weight="700">1,106</text>
+<text x="464" y="254" font-size="12" text-anchor="start" class="f-ink1" font-weight="700">Mean time per output token (ms)</text>
+<line x1="560.5" y1="266" x2="560.5" y2="356" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="560.5" y="371" font-size="11" text-anchor="middle" class="f-muted">0</text>
+<line x1="650.5" y1="266" x2="650.5" y2="356" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="650.5" y="371" font-size="11" text-anchor="middle" class="f-muted">20</text>
+<line x1="740.5" y1="266" x2="740.5" y2="356" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="740.5" y="371" font-size="11" text-anchor="middle" class="f-muted">40</text>
+<line x1="830.5" y1="266" x2="830.5" y2="356" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="830.5" y="371" font-size="11" text-anchor="middle" class="f-muted">60</text>
+<line x1="560.5" y1="266" x2="560.5" y2="356" class="s-axis" stroke-width="1" stroke-linecap="butt"/>
+<text x="550" y="287" font-size="12" text-anchor="end" class="f-ink2">sglang</text>
+<path d="M560,275H594.22A4,4 0 0 1 598.22,279V287A4,4 0 0 1 594.22,291H560V275Z" class="f-s2"><title>sglang: 8.5</title></path>
+<text x="606.22" y="287" font-size="12" text-anchor="start" class="f-ink1">8.5</text>
+<text x="550" y="315" font-size="12" text-anchor="end" class="f-ink2">After phase A</text>
+<path d="M560,303H804.27A4,4 0 0 1 808.27,307V315A4,4 0 0 1 804.27,319H560V303Z" class="f-b250"><title>After phase A: 55.1</title></path>
+<text x="816.27" y="315" font-size="12" text-anchor="start" class="f-ink1">55.1</text>
+<text x="550" y="343" font-size="12" text-anchor="end" class="f-ink1" font-weight="700">Final</text>
+<path d="M560,331H718.23A4,4 0 0 1 722.23,335V343A4,4 0 0 1 718.23,347H560V331Z" class="f-s1"><title>Final: 36.0</title></path>
+<text x="730.23" y="343" font-size="12" text-anchor="start" class="f-ink1" font-weight="700">36.0</text>
+<text x="24" y="392" font-size="10.5" text-anchor="start" class="f-muted">HEAD, re-measured, is off scale: mean end-to-end 58.3 s, mean TTFT 1.76 s, p99 TTFT 19.7 s, mean TPOT 1.85 s.</text>
+<text x="24" y="406" font-size="10.5" text-anchor="start" class="f-muted">Final and after-phase-A bars are the mean of their runs; the sglang bars are the recorded baseline run.</text>
+</svg>

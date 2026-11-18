@@ -1,0 +1,109 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 616" width="880" height="616" role="img" aria-labelledby="t d" font-family="'DejaVu Sans', Verdana, system-ui, -apple-system, 'Segoe UI', sans-serif">
+<title id="t">MoE gate/up and combine before and after</title><desc id="d">Schematic of the routed-expert gate/up GEMM and of the combine step before and after phase B</desc>
+<style>svg{--surface:#fcfcfb;--ink1:#0b0b0b;--ink2:#52514e;--muted:#898781;--grid:#e1e0d9;--axis:#c3c2b7;--s1:#2a78d6;--s2:#eb6834;--s3:#1baf7a;--s4:#eda100;--s5:#e87ba4;--s6:#008300;--s7:#6250d6;--s8:#e34948;--b250:#86b6ef;--b100:#cde2fb;--white:#ffffff;--good:#006300}@media (prefers-color-scheme:dark){svg{--surface:#1a1a19;--ink1:#f0efec;--ink2:#c3c2b7;--muted:#898781;--grid:#2c2c2a;--axis:#383835;--s1:#3987e5;--s2:#d95926;--s3:#199e70;--s4:#c98500;--s5:#d55181;--s6:#008300;--s7:#9085e9;--s8:#e66767;--b250:#3987e5;--b100:#184f95;--white:#ffffff;--good:#0ca30c}}.f-surface{fill:#fcfcfb;fill:var(--surface)}.s-surface{stroke:#fcfcfb;stroke:var(--surface)}.f-ink1{fill:#0b0b0b;fill:var(--ink1)}.s-ink1{stroke:#0b0b0b;stroke:var(--ink1)}.f-ink2{fill:#52514e;fill:var(--ink2)}.s-ink2{stroke:#52514e;stroke:var(--ink2)}.f-muted{fill:#898781;fill:var(--muted)}.s-muted{stroke:#898781;stroke:var(--muted)}.f-grid{fill:#e1e0d9;fill:var(--grid)}.s-grid{stroke:#e1e0d9;stroke:var(--grid)}.f-axis{fill:#c3c2b7;fill:var(--axis)}.s-axis{stroke:#c3c2b7;stroke:var(--axis)}.f-s1{fill:#2a78d6;fill:var(--s1)}.s-s1{stroke:#2a78d6;stroke:var(--s1)}.f-s2{fill:#eb6834;fill:var(--s2)}.s-s2{stroke:#eb6834;stroke:var(--s2)}.f-s3{fill:#1baf7a;fill:var(--s3)}.s-s3{stroke:#1baf7a;stroke:var(--s3)}.f-s4{fill:#eda100;fill:var(--s4)}.s-s4{stroke:#eda100;stroke:var(--s4)}.f-s5{fill:#e87ba4;fill:var(--s5)}.s-s5{stroke:#e87ba4;stroke:var(--s5)}.f-s6{fill:#008300;fill:var(--s6)}.s-s6{stroke:#008300;stroke:var(--s6)}.f-s7{fill:#6250d6;fill:var(--s7)}.s-s7{stroke:#6250d6;stroke:var(--s7)}.f-s8{fill:#e34948;fill:var(--s8)}.s-s8{stroke:#e34948;stroke:var(--s8)}.f-b250{fill:#86b6ef;fill:var(--b250)}.s-b250{stroke:#86b6ef;stroke:var(--b250)}.f-b100{fill:#cde2fb;fill:var(--b100)}.s-b100{stroke:#cde2fb;stroke:var(--b100)}.f-white{fill:#ffffff;fill:var(--white)}.s-white{stroke:#ffffff;stroke:var(--white)}.f-good{fill:#006300;fill:var(--good)}.s-good{stroke:#006300;stroke:var(--good)}</style>
+<rect class="f-surface" width="880" height="616"/>
+<text x="24" y="30" font-size="16" text-anchor="start" class="f-ink1" font-weight="700">MoE: gate/up producer and combine, before and after</text>
+<text x="24" y="50" font-size="12" text-anchor="start" class="f-ink2">Schematic, not to scale. Orange boxes are replaced by the blue ones.</text>
+<text x="24" y="88" font-size="13" text-anchor="start" class="f-ink1" font-weight="700">1. Gate/up GEMM: remove the gather4 producer bottleneck</text>
+<text x="24" y="104" font-size="11" text-anchor="start" class="f-muted" font-weight="700">Before</text>
+<path d="M30,110H208A6,6 0 0 1 214,116V174A6,6 0 0 1 208,180H30A6,6 0 0 1 24,174V116A6,6 0 0 1 30,110Z" class="f-s2 s-s2" stroke-width="1.25" fill-opacity="0.16"><title>The producer spent about 83% of the kernel in issue, about 1870 cycles per stage</title></path>
+<text x="119" y="127.1" font-size="11" text-anchor="middle" class="f-ink1" font-weight="700">Producer warp</text>
+<text x="119" y="141.6" font-size="11" text-anchor="middle" class="f-ink1">16 TMA gather4 per</text>
+<text x="119" y="156.1" font-size="11" text-anchor="middle" class="f-ink1">stage, about 94</text>
+<text x="119" y="170.6" font-size="11" text-anchor="middle" class="f-ink1">cycles each</text>
+<path d="M244,110H422A6,6 0 0 1 428,116V174A6,6 0 0 1 422,180H244A6,6 0 0 1 238,174V116A6,6 0 0 1 244,110Z" class="f-s2 s-s2" stroke-width="1.25" fill-opacity="0.16"><title>Gate/up ran at about 453 us for 3700 tokens</title></path>
+<text x="333" y="134.35" font-size="11" text-anchor="middle" class="f-ink1" font-weight="700">MMA warp starved</text>
+<text x="333" y="148.85" font-size="11" text-anchor="middle" class="f-ink1">tensor cores wait</text>
+<text x="333" y="163.35" font-size="11" text-anchor="middle" class="f-ink1">for the next stage</text>
+<line x1="217" y1="145" x2="231" y2="145" class="s-ink2" stroke-width="1.5" stroke-linecap="butt"/>
+<polygon points="236,145 228,149 228,141" class="f-ink2"/>
+<path d="M458,110H636A6,6 0 0 1 642,116V174A6,6 0 0 1 636,180H458A6,6 0 0 1 452,174V116A6,6 0 0 1 458,110Z" class="f-surface s-axis" stroke-width="1"><title>SwiGLU and NVFP4 quantization</title></path>
+<text x="547" y="134.35" font-size="11" text-anchor="middle" class="f-ink1" font-weight="700">Epilogue</text>
+<text x="547" y="148.85" font-size="11" text-anchor="middle" class="f-ink1">IEEE expf and</text>
+<text x="547" y="163.35" font-size="11" text-anchor="middle" class="f-ink1">division chains</text>
+<line x1="431" y1="145" x2="445" y2="145" class="s-ink2" stroke-width="1.5" stroke-linecap="butt"/>
+<polygon points="450,145 442,149 442,141" class="f-ink2"/>
+<path d="M672,110H850A6,6 0 0 1 856,116V174A6,6 0 0 1 850,180H672A6,6 0 0 1 666,174V116A6,6 0 0 1 672,110Z" class="f-surface s-axis" stroke-width="1"><title>3700 tokens, skew 0.4, isolated op bench</title></path>
+<text x="761" y="141.6" font-size="11" text-anchor="middle" class="f-ink1" font-weight="700">Result</text>
+<text x="761" y="156.1" font-size="11" text-anchor="middle" class="f-ink1">gate/up 453 us</text>
+<line x1="645" y1="145" x2="659" y2="145" class="s-ink2" stroke-width="1.5" stroke-linecap="butt"/>
+<polygon points="664,145 656,149 656,141" class="f-ink2"/>
+<text x="24" y="198" font-size="11" text-anchor="start" class="f-muted" font-weight="700">After</text>
+<path d="M30,204H208A6,6 0 0 1 214,210V268A6,6 0 0 1 208,274H30A6,6 0 0 1 24,268V210A6,6 0 0 1 30,204Z" class="f-s1 s-s1" stroke-width="1.25" fill-opacity="0.16"><title>count, scan, index, then gather</title></path>
+<text x="119" y="228.35" font-size="11" text-anchor="middle" class="f-ink1" font-weight="700">gather_input kernel</text>
+<text x="119" y="242.85" font-size="11" text-anchor="middle" class="f-ink1">pre-gathers token</text>
+<text x="119" y="257.35" font-size="11" text-anchor="middle" class="f-ink1">rows in one pass</text>
+<path d="M244,204H422A6,6 0 0 1 428,210V268A6,6 0 0 1 422,274H244A6,6 0 0 1 238,268V210A6,6 0 0 1 244,204Z" class="f-s1 s-s1" stroke-width="1.25" fill-opacity="0.16"><title>No per-row gather4 instructions</title></path>
+<text x="333" y="228.35" font-size="11" text-anchor="middle" class="f-ink1" font-weight="700">Producer warp</text>
+<text x="333" y="242.85" font-size="11" text-anchor="middle" class="f-ink1">contiguous 2D TMA</text>
+<text x="333" y="257.35" font-size="11" text-anchor="middle" class="f-ink1">loads</text>
+<line x1="217" y1="239" x2="231" y2="239" class="s-ink2" stroke-width="1.5" stroke-linecap="butt"/>
+<polygon points="236,239 228,243 228,235" class="f-ink2"/>
+<path d="M458,204H636A6,6 0 0 1 642,210V268A6,6 0 0 1 636,274H458A6,6 0 0 1 452,268V210A6,6 0 0 1 458,204Z" class="f-surface s-axis" stroke-width="1"><title>silu_approx worst relative error 3.2e-7</title></path>
+<text x="547" y="221.1" font-size="11" text-anchor="middle" class="f-ink1" font-weight="700">Epilogue</text>
+<text x="547" y="235.6" font-size="11" text-anchor="middle" class="f-ink1">silu_approx and a</text>
+<text x="547" y="250.1" font-size="11" text-anchor="middle" class="f-ink1">shared-reciprocal</text>
+<text x="547" y="264.6" font-size="11" text-anchor="middle" class="f-ink1">quantizer</text>
+<line x1="431" y1="239" x2="445" y2="239" class="s-ink2" stroke-width="1.5" stroke-linecap="butt"/>
+<polygon points="450,239 442,243 442,235" class="f-ink2"/>
+<path d="M672,204H850A6,6 0 0 1 856,210V268A6,6 0 0 1 850,274H672A6,6 0 0 1 666,268V210A6,6 0 0 1 672,204Z" class="f-surface s-axis" stroke-width="1"><title>3700 tokens, skew 0.4, isolated op bench</title></path>
+<text x="761" y="235.6" font-size="11" text-anchor="middle" class="f-ink1" font-weight="700">Result</text>
+<text x="761" y="250.1" font-size="11" text-anchor="middle" class="f-ink1">gate/up 212 us</text>
+<line x1="645" y1="239" x2="659" y2="239" class="s-ink2" stroke-width="1.5" stroke-linecap="butt"/>
+<polygon points="664,239 656,243 656,235" class="f-ink2"/>
+<path d="M28,282H852A4,4 0 0 1 856,286V304A4,4 0 0 1 852,308H28A4,4 0 0 1 24,304V286A4,4 0 0 1 28,282Z" class="f-b100" fill-opacity="0.7"/>
+<text x="34" y="299" font-size="12" text-anchor="start" class="f-ink1" font-weight="700">Measured:</text>
+<text x="113.31" y="299" font-size="12" text-anchor="start" class="f-ink1">gate/up 453 to 212 us, routed op 765 to 481.5 us (op bench); end to end 59.45 to 65.59 req/s</text>
+<text x="24" y="334" font-size="13" text-anchor="start" class="f-ink1" font-weight="700">2. Combine: fixed-order sum instead of fp32 atomics</text>
+<text x="24" y="350" font-size="11" text-anchor="start" class="f-muted" font-weight="700">Before</text>
+<path d="M30,356H208A6,6 0 0 1 214,362V420A6,6 0 0 1 208,426H30A6,6 0 0 1 24,420V362A6,6 0 0 1 30,356Z" class="f-surface s-axis" stroke-width="1"><title>Each token has 8 routed slots</title></path>
+<text x="119" y="380.35" font-size="11" text-anchor="middle" class="f-ink1" font-weight="700">Down GEMM</text>
+<text x="119" y="394.85" font-size="11" text-anchor="middle" class="f-ink1">per-slot outputs</text>
+<text x="119" y="409.35" font-size="11" text-anchor="middle" class="f-ink1">fp32, per token</text>
+<path d="M244,356H422A6,6 0 0 1 428,362V420A6,6 0 0 1 422,426H244A6,6 0 0 1 238,420V362A6,6 0 0 1 244,356Z" class="f-s2 s-s2" stroke-width="1.25" fill-opacity="0.16"><title>fp32 atomic adds, v4 vectors</title></path>
+<text x="333" y="380.35" font-size="11" text-anchor="middle" class="f-ink1" font-weight="700">Epilogue</text>
+<text x="333" y="394.85" font-size="11" text-anchor="middle" class="f-ink1">red.global.add</text>
+<text x="333" y="409.35" font-size="11" text-anchor="middle" class="f-ink1">into the output</text>
+<line x1="217" y1="391" x2="231" y2="391" class="s-ink2" stroke-width="1.5" stroke-linecap="butt"/>
+<polygon points="236,391 228,395 228,387" class="f-ink2"/>
+<path d="M458,356H636A6,6 0 0 1 642,362V420A6,6 0 0 1 636,426H458A6,6 0 0 1 452,420V362A6,6 0 0 1 458,356Z" class="f-s2 s-s2" stroke-width="1.25" fill-opacity="0.16"><title>Repeated scores of one prompt differed at about 1530 of 1537 positions</title></path>
+<text x="547" y="380.35" font-size="11" text-anchor="middle" class="f-ink1" font-weight="700">L2 atomic bound</text>
+<text x="547" y="394.85" font-size="11" text-anchor="middle" class="f-ink1">order of additions</text>
+<text x="547" y="409.35" font-size="11" text-anchor="middle" class="f-ink1">varies between runs</text>
+<line x1="431" y1="391" x2="445" y2="391" class="s-ink2" stroke-width="1.5" stroke-linecap="butt"/>
+<polygon points="450,391 442,395 442,387" class="f-ink2"/>
+<path d="M672,356H850A6,6 0 0 1 856,362V420A6,6 0 0 1 850,426H672A6,6 0 0 1 666,420V362A6,6 0 0 1 672,356Z" class="f-surface s-axis" stroke-width="1"><title>3700 tokens, isolated op bench</title></path>
+<text x="761" y="380.35" font-size="11" text-anchor="middle" class="f-ink1" font-weight="700">Result</text>
+<text x="761" y="394.85" font-size="11" text-anchor="middle" class="f-ink1">routed op 480.5 us</text>
+<text x="761" y="409.35" font-size="11" text-anchor="middle" class="f-ink1">nondeterministic</text>
+<line x1="645" y1="391" x2="659" y2="391" class="s-ink2" stroke-width="1.5" stroke-linecap="butt"/>
+<polygon points="664,391 656,395 656,387" class="f-ink2"/>
+<text x="24" y="444" font-size="11" text-anchor="start" class="f-muted" font-weight="700">After</text>
+<path d="M30,450H208A6,6 0 0 1 214,456V514A6,6 0 0 1 208,520H30A6,6 0 0 1 24,514V456A6,6 0 0 1 30,450Z" class="f-surface s-axis" stroke-width="1"><title>Same GEMM</title></path>
+<text x="119" y="474.35" font-size="11" text-anchor="middle" class="f-ink1" font-weight="700">Down GEMM</text>
+<text x="119" y="488.85" font-size="11" text-anchor="middle" class="f-ink1">per-slot outputs</text>
+<text x="119" y="503.35" font-size="11" text-anchor="middle" class="f-ink1">fp32, per token</text>
+<path d="M244,450H422A6,6 0 0 1 428,456V514A6,6 0 0 1 422,520H244A6,6 0 0 1 238,514V456A6,6 0 0 1 244,450Z" class="f-s1 s-s1" stroke-width="1.25" fill-opacity="0.16"><title>No atomics</title></path>
+<text x="333" y="474.35" font-size="11" text-anchor="middle" class="f-ink1" font-weight="700">Epilogue</text>
+<text x="333" y="488.85" font-size="11" text-anchor="middle" class="f-ink1">writes contributions</text>
+<text x="333" y="503.35" font-size="11" text-anchor="middle" class="f-ink1">[slot][hidden], fp32</text>
+<line x1="217" y1="485" x2="231" y2="485" class="s-ink2" stroke-width="1.5" stroke-linecap="butt"/>
+<polygon points="236,485 228,489 228,481" class="f-ink2"/>
+<path d="M458,450H636A6,6 0 0 1 642,456V514A6,6 0 0 1 636,520H458A6,6 0 0 1 452,514V456A6,6 0 0 1 458,450Z" class="f-s1 s-s1" stroke-width="1.25" fill-opacity="0.16"><title>reduce for the routed op, stage_routed for the complete op</title></path>
+<text x="547" y="474.35" font-size="11" text-anchor="middle" class="f-ink1" font-weight="700">Gather kernel</text>
+<text x="547" y="488.85" font-size="11" text-anchor="middle" class="f-ink1">sums the slots in</text>
+<text x="547" y="503.35" font-size="11" text-anchor="middle" class="f-ink1">fixed order</text>
+<line x1="431" y1="485" x2="445" y2="485" class="s-ink2" stroke-width="1.5" stroke-linecap="butt"/>
+<polygon points="450,485 442,489 442,481" class="f-ink2"/>
+<path d="M672,450H850A6,6 0 0 1 856,456V514A6,6 0 0 1 850,520H672A6,6 0 0 1 666,514V456A6,6 0 0 1 672,450Z" class="f-surface s-axis" stroke-width="1"><title>3700 tokens, isolated op bench</title></path>
+<text x="761" y="474.35" font-size="11" text-anchor="middle" class="f-ink1" font-weight="700">Result</text>
+<text x="761" y="488.85" font-size="11" text-anchor="middle" class="f-ink1">routed op 437.7 us</text>
+<text x="761" y="503.35" font-size="11" text-anchor="middle" class="f-ink1">deterministic</text>
+<line x1="645" y1="485" x2="659" y2="485" class="s-ink2" stroke-width="1.5" stroke-linecap="butt"/>
+<polygon points="664,485 656,489 656,481" class="f-ink2"/>
+<path d="M28,528H852A4,4 0 0 1 856,532V550A4,4 0 0 1 852,554H28A4,4 0 0 1 24,550V532A4,4 0 0 1 28,528Z" class="f-b100" fill-opacity="0.7"/>
+<text x="34" y="545" font-size="12" text-anchor="start" class="f-ink1" font-weight="700">Measured:</text>
+<text x="113.31" y="545" font-size="12" text-anchor="start" class="f-ink1">routed op 480.5 to 437.7 us (op bench); end to end 65.59 to about 67.4 req/s, bundled with an ftz silu in conv</text>
+<text x="24" y="574" font-size="10.5" text-anchor="start" class="f-muted">Op times come from isolated benches on GPU 1 during development and are recorded in notes; the end-to-end figures are harness runs of the stage builds.</text>
+<text x="24" y="588" font-size="10.5" text-anchor="start" class="f-muted">The contributions buffer costs 768 MiB (805 MB) at the 8192-token slice limit (computed, not measured); other geometries still use the atomic form.</text>
+</svg>

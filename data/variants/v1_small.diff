@@ -1,0 +1,39 @@
+--- /home/users/humingqing/work/ninfer/src/ops/linear_attention/gated_delta_net/recurrence/chunked/recurrence.cu	2026-11-18 09:43:51.355679390 +0800
++++ /home/users/humingqing/work/ninfer/.agent-tmp/qwen122b-report/var_gdn_head/src/ops/linear_attention/gated_delta_net/recurrence/chunked/recurrence.cu	2026-11-18 14:08:00.760667060 +0800
+@@ -381,11 +381,7 @@
+                        const ControlChunk* control, int value_tile, cudaStream_t stream) {
+     switch (value_tile) {
+     case 64:
+-#if NINFER_TARGET_SPARK
+         return launch<64>(args, qk, control, stream);
+-#else
+-        return launch_register_state(args, qk, control, stream);
+-#endif
+     case 32:
+         return launch<32>(args, qk, control, stream);
+     case 16:
+--- /home/users/humingqing/work/ninfer/src/ops/linear_attention/gated_delta_net/recurrence/chunked/launch.h	2026-11-18 09:43:41.151689566 +0800
++++ /home/users/humingqing/work/ninfer/.agent-tmp/qwen122b-report/var_gdn_head/src/ops/linear_attention/gated_delta_net/recurrence/chunked/launch.h	2026-11-18 14:08:00.764667056 +0800
+@@ -8,7 +8,4 @@
+                     bool normalize_qk, cudaStream_t stream);
+ void launch_recurrence(const RecurrenceOperands& args, const QkChunk* qk,
+                        const ControlChunk* control, int value_tile, cudaStream_t stream);
+-// 64-value stripes with the state in registers; every target but dgx_spark compiles it.
+-void launch_register_state(const RecurrenceOperands& args, const QkChunk* qk,
+-                           const ControlChunk* control, cudaStream_t stream);
+ } // namespace ninfer::ops::detail::gated_delta_net::chunked
+--- /home/users/humingqing/work/ninfer/src/ops/linear_attention/gated_delta_net/sources.cmake	2026-11-18 09:43:55.507675249 +0800
++++ /home/users/humingqing/work/ninfer/.agent-tmp/qwen122b-report/var_gdn_head/src/ops/linear_attention/gated_delta_net/sources.cmake	2026-11-18 14:08:00.764667056 +0800
+@@ -13,11 +13,9 @@
+   "${CMAKE_CURRENT_LIST_DIR}/replay/${NINFER_TARGET}/record.cu"
+ )
+ 
+-# The varlen recurrence and the register-state stripe kernel are shared by the targets that carry
+-# the chunked kernels' MMA shapes.
++# The varlen recurrence is shared by the targets that carry the chunked kernels' MMA shapes.
+ if(NOT NINFER_TARGET STREQUAL "dgx_spark")
+   target_sources(ninfer_ops PRIVATE
+-    "${CMAKE_CURRENT_LIST_DIR}/recurrence/chunked/register_state.cu"
+     "${CMAKE_CURRENT_LIST_DIR}/recurrence/varlen/recurrence.cu"
+     "${CMAKE_CURRENT_LIST_DIR}/recurrence/varlen/varlen.cpp"
+   )

@@ -1,0 +1,118 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 726" width="880" height="726" role="img" aria-labelledby="t d" font-family="'DejaVu Sans', Verdana, system-ui, -apple-system, 'Segoe UI', sans-serif">
+<title id="t">Throughput after each stage of the optimization</title><desc id="d">Request throughput of the locked harness after each development stage, from HEAD to the official run</desc>
+<style>svg{--surface:#fcfcfb;--ink1:#0b0b0b;--ink2:#52514e;--muted:#898781;--grid:#e1e0d9;--axis:#c3c2b7;--s1:#2a78d6;--s2:#eb6834;--s3:#1baf7a;--s4:#eda100;--s5:#e87ba4;--s6:#008300;--s7:#6250d6;--s8:#e34948;--b250:#86b6ef;--b100:#cde2fb;--white:#ffffff;--good:#006300}@media (prefers-color-scheme:dark){svg{--surface:#1a1a19;--ink1:#f0efec;--ink2:#c3c2b7;--muted:#898781;--grid:#2c2c2a;--axis:#383835;--s1:#3987e5;--s2:#d95926;--s3:#199e70;--s4:#c98500;--s5:#d55181;--s6:#008300;--s7:#9085e9;--s8:#e66767;--b250:#3987e5;--b100:#184f95;--white:#ffffff;--good:#0ca30c}}.f-surface{fill:#fcfcfb;fill:var(--surface)}.s-surface{stroke:#fcfcfb;stroke:var(--surface)}.f-ink1{fill:#0b0b0b;fill:var(--ink1)}.s-ink1{stroke:#0b0b0b;stroke:var(--ink1)}.f-ink2{fill:#52514e;fill:var(--ink2)}.s-ink2{stroke:#52514e;stroke:var(--ink2)}.f-muted{fill:#898781;fill:var(--muted)}.s-muted{stroke:#898781;stroke:var(--muted)}.f-grid{fill:#e1e0d9;fill:var(--grid)}.s-grid{stroke:#e1e0d9;stroke:var(--grid)}.f-axis{fill:#c3c2b7;fill:var(--axis)}.s-axis{stroke:#c3c2b7;stroke:var(--axis)}.f-s1{fill:#2a78d6;fill:var(--s1)}.s-s1{stroke:#2a78d6;stroke:var(--s1)}.f-s2{fill:#eb6834;fill:var(--s2)}.s-s2{stroke:#eb6834;stroke:var(--s2)}.f-s3{fill:#1baf7a;fill:var(--s3)}.s-s3{stroke:#1baf7a;stroke:var(--s3)}.f-s4{fill:#eda100;fill:var(--s4)}.s-s4{stroke:#eda100;stroke:var(--s4)}.f-s5{fill:#e87ba4;fill:var(--s5)}.s-s5{stroke:#e87ba4;stroke:var(--s5)}.f-s6{fill:#008300;fill:var(--s6)}.s-s6{stroke:#008300;stroke:var(--s6)}.f-s7{fill:#6250d6;fill:var(--s7)}.s-s7{stroke:#6250d6;stroke:var(--s7)}.f-s8{fill:#e34948;fill:var(--s8)}.s-s8{stroke:#e34948;stroke:var(--s8)}.f-b250{fill:#86b6ef;fill:var(--b250)}.s-b250{stroke:#86b6ef;stroke:var(--b250)}.f-b100{fill:#cde2fb;fill:var(--b100)}.s-b100{stroke:#cde2fb;stroke:var(--b100)}.f-white{fill:#ffffff;fill:var(--white)}.s-white{stroke:#ffffff;stroke:var(--white)}.f-good{fill:#006300;fill:var(--good)}.s-good{stroke:#006300;stroke:var(--good)}</style>
+<rect class="f-surface" width="880" height="726"/>
+<text x="24" y="30" font-size="16" text-anchor="start" class="f-ink1" font-weight="700">Throughput after each development stage (locked harness, c=130, n=4)</text>
+<text x="24" y="50" font-size="12" text-anchor="start" class="f-ink2">req/s, higher is better. Stages are cumulative, in the order the changes were made.</text>
+<path d="M26,71H32A2,2 0 0 1 34,73V79A2,2 0 0 1 32,81H26A2,2 0 0 1 24,79V73A2,2 0 0 1 26,71Z" class="f-muted"/>
+<text x="39" y="80" font-size="12" text-anchor="start" class="f-ink2">HEAD</text>
+<path d="M95.06,71H101.06A2,2 0 0 1 103.06,73V79A2,2 0 0 1 101.06,81H95.06A2,2 0 0 1 93.06,79V73A2,2 0 0 1 95.06,71Z" class="f-b250"/>
+<text x="108.06" y="80" font-size="12" text-anchor="start" class="f-ink2">Phase A, engine and control plane</text>
+<path d="M335.38,71H341.38A2,2 0 0 1 343.38,73V79A2,2 0 0 1 341.38,81H335.38A2,2 0 0 1 333.38,79V73A2,2 0 0 1 335.38,71Z" class="f-s1"/>
+<text x="348.38" y="80" font-size="12" text-anchor="start" class="f-ink2">Phase B, kernels and artifact</text>
+<line x1="284.5" y1="112" x2="284.5" y2="622" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="284.5" y="637" font-size="11" text-anchor="middle" class="f-muted">0</text>
+<line x1="387.5" y1="112" x2="387.5" y2="622" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="387.5" y="637" font-size="11" text-anchor="middle" class="f-muted">20</text>
+<line x1="491.5" y1="112" x2="491.5" y2="622" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="491.5" y="637" font-size="11" text-anchor="middle" class="f-muted">40</text>
+<line x1="595.5" y1="112" x2="595.5" y2="622" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="595.5" y="637" font-size="11" text-anchor="middle" class="f-muted">60</text>
+<line x1="698.5" y1="112" x2="698.5" y2="622" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="698.5" y="637" font-size="11" text-anchor="middle" class="f-muted">80</text>
+<line x1="802.5" y1="112" x2="802.5" y2="622" class="s-grid" stroke-width="1" stroke-linecap="butt"/>
+<text x="802.5" y="637" font-size="11" text-anchor="middle" class="f-muted">100</text>
+<line x1="284.5" y1="112" x2="284.5" y2="622" class="s-axis" stroke-width="1" stroke-linecap="butt"/>
+<text x="274" y="131" font-size="12" text-anchor="end" class="f-ink2">HEAD 3e31d5a4</text>
+<path d="M284,119H291.46A4,4 0 0 1 295.46,123V131A4,4 0 0 1 291.46,135H284V119Z" class="f-muted"><title>HEAD 3e31d5a4: 2.21 req/s. re-measured, 1 run (pipeline recorded 2.14). Pipeline baseline</title></path>
+<text x="274" y="155" font-size="12" text-anchor="end" class="f-ink2">A1 Engine rework, no helper lane</text>
+<path d="M284,143H369.78A4,4 0 0 1 373.78,147V155A4,4 0 0 1 369.78,159H284V143Z" class="f-b250"><title>A1 Engine rework, no helper lane: ~17.3 req/s. run3 on 2000 requests, from notes. fork_batch, in-flight capture, no quiescent iterations; pool-full admission stalls remain</title></path>
+<text x="274" y="179" font-size="12" text-anchor="end" class="f-ink2">A2 Retained-point cap 176</text>
+<path d="M284,167H467.27A4,4 0 0 1 471.27,171V179A4,4 0 0 1 467.27,183H284V167Z" class="f-b250"><title>A2 Retained-point cap 176: ~36.1 req/s. cap sweep, from notes. Cap on retained checkpoints removes the admission stalls</title></path>
+<text x="274" y="203" font-size="12" text-anchor="end" class="f-ink2">A3 MoE down epilogue, sampler</text>
+<path d="M284,191H529.16A4,4 0 0 1 533.16,195V203A4,4 0 0 1 529.16,207H284V191Z" class="f-b250"><title>A3 MoE down epilogue, sampler: 48.07 req/s. run13, 1 run. red.global.add.v4 epilogue, sampler rewrite, slice cap 8192, dense control gate/up</title></path>
+<text x="274" y="227" font-size="12" text-anchor="end" class="f-ink2">A5 Attention split heuristic</text>
+<path d="M284,215H538.91A4,4 0 0 1 542.91,219V227A4,4 0 0 1 538.91,231H284V215Z" class="f-b250"><title>A5 Attention split heuristic: 49.95 req/s. run17, 1 run. kMinSplitTarget=3</title></path>
+<text x="274" y="251" font-size="12" text-anchor="end" class="f-ink2">A6 Conv varlen rewrite</text>
+<path d="M284,239H544.25A4,4 0 0 1 548.25,243V251A4,4 0 0 1 544.25,255H284V239Z" class="f-b250"><title>A6 Conv varlen rewrite: 50.98 req/s. run18, 1 run. causal conv varlen kernel</title></path>
+<text x="274" y="275" font-size="12" text-anchor="end" class="f-ink2">A3/A7 MoE gather, batched completions</text>
+<path d="M284,263H549.59A4,4 0 0 1 553.59,267V275A4,4 0 0 1 549.59,279H284V263Z" class="f-b250"><title>A3/A7 MoE gather, batched completions: 52.01 req/s. run21, 1 run. single-thread gather, 8-warp epilogue, completion batching, batched reserve</title></path>
+<text x="274" y="299" font-size="12" text-anchor="end" class="f-ink2">A5 fmha K/V loader, envelope</text>
+<path d="M284,287H570.22A4,4 0 0 1 574.22,291V299A4,4 0 0 1 570.22,303H284V287Z" class="f-b250"><title>A5 fmha K/V loader, envelope: 55.99 req/s. run22, 1 run. batched K/V loads, planner contract fix, per-segment envelope</title></path>
+<text x="274" y="323" font-size="12" text-anchor="end" class="f-ink2">A2/A7 Headroom controller, host path</text>
+<path d="M284,311H588.15A4,4 0 0 1 592.15,315V323A4,4 0 0 1 588.15,327H284V311Z" class="f-b250"><title>A2/A7 Headroom controller, host path: 59.45 req/s. 3 runs: 59.41, 59.66, 59.28. pool-headroom retention, lineage-first eviction, cheap exposure accounting</title></path>
+<text x="274" y="347" font-size="12" text-anchor="end" class="f-ink2">B1 MoE gate/up gather_input</text>
+<path d="M284,335H619.98A4,4 0 0 1 623.98,339V347A4,4 0 0 1 619.98,351H284V335Z" class="f-s1"><title>B1 MoE gate/up gather_input: 65.59 req/s. 1 run. contiguous TMA loads, silu_approx, shared-reciprocal quantizer</title></path>
+<text x="274" y="371" font-size="12" text-anchor="end" class="f-ink2">B2 MoE ordered combine</text>
+<path d="M284,359H629.36A4,4 0 0 1 633.36,363V371A4,4 0 0 1 629.36,375H284V359Z" class="f-s1"><title>B2 MoE ordered combine: 67.40 req/s. 4 runs: 67.19 to 67.60. fixed-order fp32 contributions, deterministic</title></path>
+<text x="274" y="395" font-size="12" text-anchor="end" class="f-ink2">B3 BF16 TileN=256, Add epilogue</text>
+<path d="M284,383H645.95A4,4 0 0 1 649.95,387V395A4,4 0 0 1 645.95,399H284V383Z" class="f-s1"><title>B3 BF16 TileN=256, Add epilogue: 70.60 req/s. 2 runs: 70.79, 70.40. 256-token tile, vectorized residual epilogue</title></path>
+<text x="274" y="419" font-size="12" text-anchor="end" class="f-ink2">B4 Conv, prepare, rmsnorm tuning</text>
+<path d="M284,407H654.81A4,4 0 0 1 658.81,411V419A4,4 0 0 1 654.81,423H284V407Z" class="f-s1"><title>B4 Conv, prepare, rmsnorm tuning: 72.31 req/s. 3 runs: 71.94 to 72.54. launch bounds, ftz silu, router columns</title></path>
+<text x="274" y="443" font-size="12" text-anchor="end" class="f-ink2">B5 Grouped ragged attention</text>
+<path d="M284,431H672.64A4,4 0 0 1 676.64,435V443A4,4 0 0 1 672.64,447H284V431Z" class="f-s1"><title>B5 Grouped ragged attention: 75.75 req/s. 3 runs: 75.49 to 76.17. one launch for all prefill segments</title></path>
+<text x="274" y="467" font-size="12" text-anchor="end" class="f-ink2">B5 Grouped FP8 KV write</text>
+<path d="M284,455H674.4A4,4 0 0 1 678.4,459V467A4,4 0 0 1 674.4,471H284V455Z" class="f-s1"><title>B5 Grouped FP8 KV write: 76.09 req/s. 3 runs: 76.03 to 76.12. one launch writes all KV segments</title></path>
+<text x="274" y="491" font-size="12" text-anchor="end" class="f-ink2">B6 FP8 GDN projections</text>
+<path d="M284,479H715.14A4,4 0 0 1 719.14,483V491A4,4 0 0 1 715.14,495H284V479Z" class="f-s1"><title>B6 FP8 GDN projections: 83.95 req/s. 3 runs: 83.66 to 84.24. tcgen05 E4M3 W8A8 for GDN in/out projections</title></path>
+<text x="274" y="515" font-size="12" text-anchor="end" class="f-ink2">B7 BF16 output head</text>
+<path d="M284,503H725.3A4,4 0 0 1 729.3,507V515A4,4 0 0 1 725.3,519H284V503Z" class="f-s1"><title>B7 BF16 output head: 85.91 req/s. 2 runs: 85.69, 86.13. lm_head Q8 to BF16 tcgen05</title></path>
+<text x="274" y="539" font-size="12" text-anchor="end" class="f-ink2">B8 In-flight checkpoint capture</text>
+<path d="M284,527H731.83A4,4 0 0 1 735.83,531V539A4,4 0 0 1 731.83,543H284V527Z" class="f-s1"><title>B8 In-flight checkpoint capture: ~87.2 req/s. runs 87.11 to 87.28. checkpoints ride the final prefill window, one unit per request</title></path>
+<text x="274" y="563" font-size="12" text-anchor="end" class="f-ink2">B9 Register-state GDN step</text>
+<path d="M284,551H750.18A4,4 0 0 1 754.18,555V563A4,4 0 0 1 750.18,567H284V551Z" class="f-s1"><title>B9 Register-state GDN step: 90.71 req/s. 1 run. state held in MMA accumulators, 1 sync per chunk</title></path>
+<text x="274" y="587" font-size="12" text-anchor="end" class="f-ink2">B10 Recurrent route, grouped prepare</text>
+<path d="M284,575H768.32A4,4 0 0 1 772.32,579V587A4,4 0 0 1 768.32,591H284V575Z" class="f-s1"><title>B10 Recurrent route, grouped prepare: 94.21 req/s. 3 runs: 93.77 to 94.49. warp-shared loads in recurrent rows, 4 value heads per prepare block</title></path>
+<text x="274" y="611" font-size="12" text-anchor="end" class="f-ink1" font-weight="700">Official run, final sources</text>
+<path d="M284,599H773.77A4,4 0 0 1 777.77,603V611A4,4 0 0 1 773.77,615H284V599Z" class="f-s1"><title>Official run, final sources: 95.26 req/s. ninfer_e2e.sh, 1 run. canonical artifact, diagnostics removed</title></path>
+<line x1="600.5" y1="106" x2="600.5" y2="622" class="s-ink2" stroke-width="1.5" stroke-linecap="butt"/>
+<text x="600.5" y="102" font-size="11" text-anchor="middle" class="f-ink2">sglang 61.0</text>
+<line x1="758.5" y1="106" x2="758.5" y2="622" class="s-ink2" stroke-width="1.5" stroke-linecap="butt"/>
+<text x="758.5" y="102" font-size="11" text-anchor="middle" class="f-ink2">target 91.5</text>
+<rect x="300.46" y="119" width="32.72" height="16" class="f-surface"/>
+<text x="303.46" y="131" font-size="12" text-anchor="start" class="f-ink1">2.21</text>
+<rect x="378.78" y="143" width="42.77" height="16" class="f-surface"/>
+<text x="381.78" y="155" font-size="12" text-anchor="start" class="f-ink1">~17.3</text>
+<rect x="476.27" y="167" width="42.77" height="16" class="f-surface"/>
+<text x="479.27" y="179" font-size="12" text-anchor="start" class="f-ink1">~36.1</text>
+<rect x="538.16" y="191" width="40.35" height="16" class="f-surface"/>
+<text x="541.16" y="203" font-size="12" text-anchor="start" class="f-ink1">48.07</text>
+<rect x="547.91" y="215" width="40.35" height="16" class="f-surface"/>
+<text x="550.91" y="227" font-size="12" text-anchor="start" class="f-ink1">49.95</text>
+<rect x="553.25" y="239" width="40.35" height="16" class="f-surface"/>
+<text x="556.25" y="251" font-size="12" text-anchor="start" class="f-ink1">50.98</text>
+<rect x="558.59" y="263" width="40.35" height="16" class="f-surface"/>
+<text x="561.59" y="275" font-size="12" text-anchor="start" class="f-ink1">52.01</text>
+<rect x="579.22" y="287" width="40.35" height="16" class="f-surface"/>
+<text x="582.22" y="299" font-size="12" text-anchor="start" class="f-ink1">55.99</text>
+<rect x="597.15" y="311" width="40.35" height="16" class="f-surface"/>
+<text x="600.15" y="323" font-size="12" text-anchor="start" class="f-ink1">59.45</text>
+<rect x="628.98" y="335" width="40.35" height="16" class="f-surface"/>
+<text x="631.98" y="347" font-size="12" text-anchor="start" class="f-ink1">65.59</text>
+<rect x="638.36" y="359" width="40.35" height="16" class="f-surface"/>
+<text x="641.36" y="371" font-size="12" text-anchor="start" class="f-ink1">67.40</text>
+<rect x="654.95" y="383" width="40.35" height="16" class="f-surface"/>
+<text x="657.95" y="395" font-size="12" text-anchor="start" class="f-ink1">70.60</text>
+<rect x="663.81" y="407" width="40.35" height="16" class="f-surface"/>
+<text x="666.81" y="419" font-size="12" text-anchor="start" class="f-ink1">72.31</text>
+<rect x="681.64" y="431" width="40.35" height="16" class="f-surface"/>
+<text x="684.64" y="443" font-size="12" text-anchor="start" class="f-ink1">75.75</text>
+<rect x="683.4" y="455" width="40.35" height="16" class="f-surface"/>
+<text x="686.4" y="467" font-size="12" text-anchor="start" class="f-ink1">76.09</text>
+<rect x="724.14" y="479" width="40.35" height="16" class="f-surface"/>
+<text x="727.14" y="491" font-size="12" text-anchor="start" class="f-ink1">83.95</text>
+<rect x="734.3" y="503" width="40.35" height="16" class="f-surface"/>
+<text x="737.3" y="515" font-size="12" text-anchor="start" class="f-ink1">85.91</text>
+<rect x="740.83" y="527" width="42.77" height="16" class="f-surface"/>
+<text x="743.83" y="539" font-size="12" text-anchor="start" class="f-ink1">~87.2</text>
+<rect x="759.18" y="551" width="40.35" height="16" class="f-surface"/>
+<text x="762.18" y="563" font-size="12" text-anchor="start" class="f-ink1">90.71</text>
+<rect x="777.32" y="575" width="40.35" height="16" class="f-surface"/>
+<text x="780.32" y="587" font-size="12" text-anchor="start" class="f-ink1">94.21</text>
+<rect x="782.77" y="599" width="43.96" height="16" class="f-surface"/>
+<text x="785.77" y="611" font-size="12" text-anchor="start" class="f-ink1" font-weight="700">95.26</text>
+<text x="543.17" y="654" font-size="11" text-anchor="middle" class="f-muted">req/s</text>
+<text x="24" y="670" font-size="10.5" text-anchor="start" class="f-muted">Values are the mean of the stage&#x27;s harness runs; ~ marks values recovered from development notes, not from a retained benchmark file.</text>
+<text x="24" y="684" font-size="10.5" text-anchor="start" class="f-muted">Several stages bundle more than one change, so a step is not the isolated gain of its label. Phase A runs use the original artifact (BF16 GDN, Q8 head);</text>
+<text x="24" y="698" font-size="10.5" text-anchor="start" class="f-muted">B6 switches GDN projections to FP8, B7 the output head to BF16. The 12 diagnostic NVTX ranges were removed only before the official run.</text>
+</svg>
