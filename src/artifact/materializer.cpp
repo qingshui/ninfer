@@ -35,8 +35,8 @@ void populate_host_pages(MemorySpan storage) {
 
     struct Pages {
         std::byte* data = nullptr;
-        std::size_t count;
-        std::uint32_t workers;
+        std::size_t count = 0;
+        std::uint32_t workers = 0;
     } pages{static_cast<std::byte*>(storage.data),
             (storage.bytes + kPayloadAlignment - 1) / kPayloadAlignment, workers};
 
