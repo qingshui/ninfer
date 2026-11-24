@@ -28,9 +28,10 @@ public:
     using PreparedPrompt = typename ModelContract::PreparedPrompt;
 
     explicit CausalScoreCore(Instance& instance) : instance_(instance) {
-        for (const auto& pool : instance_.session->kv_pools())
+        for (const auto& pool : instance_.session->kv_pools()) {
             published_snapshot_.runtime.kv_pools.push_back(
                 {pool.id.index, std::string(pool.label), 0});
+        }
         published_snapshot_.runtime.context_transfers.kv.resize(
             instance_.session->kv_pools().size());
         published_snapshot_.ranks.assign(instance_.executor->observations().begin(),
@@ -143,8 +144,9 @@ private:
         published_snapshot_.runtime.context_metadata  = usage.metadata;
         published_snapshot_.runtime.state_objects     = usage.state_objects;
         published_snapshot_.runtime.history_objects   = usage.history_objects;
-        for (auto& pool : published_snapshot_.runtime.kv_pools)
+        for (auto& pool : published_snapshot_.runtime.kv_pools) {
             pool.occupied_page_groups = usage.kv_page_groups.at(pool.id);
+        }
         const auto ranks = instance_.executor->observations();
         published_snapshot_.ranks.assign(ranks.begin(), ranks.end());
     }

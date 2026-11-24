@@ -20,9 +20,10 @@ __global__ void scatter_columns_kernel(const Word* source, const int* columns,
     const int row = blockIdx.y, column = columns[row];
     if (column < 0) return;
     const std::int64_t destination_base = offsets[row] / sizeof(Word);
-    for (int d = blockIdx.x * blockDim.x + threadIdx.x; d < features; d += blockDim.x * gridDim.x)
+    for (int d = blockIdx.x * blockDim.x + threadIdx.x; d < features; d += blockDim.x * gridDim.x) {
         destination[destination_base + d] =
             source[(std::int64_t(row) * tokens + column) * features + d];
+    }
 }
 
 __global__ void gather_bf16_batch_columns_kernel(const __nv_bfloat16* source,

@@ -30,17 +30,19 @@ void RankProgramImpl::prepare_control_window() {
             row.states.at(parameters.profile->local.rank).destination;
         row.ple_raw_tail = {begin > 1 ? original.ids[begin - 2] : original.ple_raw_tail[1],
                             original.ids[begin - 1]};
-        for (int axis = 0; axis < 3; ++axis)
+        for (int axis = 0; axis < 3; ++axis) {
             row.previous_rope[axis] =
                 original.rope_positions.empty()
                     ? static_cast<std::int32_t>(row.main_frontier - 1) + row.rope_delta
                     : original.rope_positions[axis * original.ids.size() + begin - 1];
+        }
     }
     if (!original.rope_positions.empty()) {
         row.rope_positions.resize(3 * count);
-        for (int axis = 0; axis < 3; ++axis)
+        for (int axis = 0; axis < 3; ++axis) {
             std::copy_n(original.rope_positions.begin() + axis * original.ids.size() + begin, count,
                         row.rope_positions.begin() + axis * count);
+        }
     }
     f.rows     = {&row, 1};
     f.sequence = true;

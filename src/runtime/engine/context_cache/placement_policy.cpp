@@ -50,7 +50,9 @@ std::vector<std::size_t> order_placements(std::span<const PlacementLoad> loads,
         std::min_element(choices.begin(), choices.end(), [](const auto& a, const auto& b) {
             return a.peak < b.peak;
         })->peak;
-    for (auto& choice : choices) choice.balanced = 2 * choice.peak <= 3 * minimum;
+    for (auto& choice : choices) {
+        choice.balanced = 2 * choice.peak <= 3 * minimum;
+    }
     std::stable_sort(choices.begin(), choices.end(), [&](const Choice& a, const Choice& b) {
         if (a.balanced != b.balanced) return a.balanced;
         if (!a.balanced && a.peak != b.peak) return a.peak < b.peak;
@@ -66,7 +68,9 @@ std::vector<std::size_t> order_placements(std::span<const PlacementLoad> loads,
 
     std::vector<std::size_t> result;
     result.reserve(choices.size());
-    for (const auto& choice : choices) result.push_back(choice.candidate);
+    for (const auto& choice : choices) {
+        result.push_back(choice.candidate);
+    }
     return result;
 }
 

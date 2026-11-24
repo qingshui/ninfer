@@ -16,8 +16,12 @@ using Events   = models::frontend::PublishedOutput;
 bool whitespace(char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; }
 
 std::string_view trim(std::string_view text) {
-    while (!text.empty() && whitespace(text.front())) text.remove_prefix(1);
-    while (!text.empty() && whitespace(text.back())) text.remove_suffix(1);
+    while (!text.empty() && whitespace(text.front())) {
+        text.remove_prefix(1);
+    }
+    while (!text.empty() && whitespace(text.back())) {
+        text.remove_suffix(1);
+    }
     return text;
 }
 
@@ -33,8 +37,9 @@ std::size_t safe_bytes(std::string_view text) {
 }
 
 std::size_t suffix(std::string_view text, std::string_view marker) {
-    for (auto n = std::min(text.size(), marker.size() - 1); n; --n)
+    for (auto n = std::min(text.size(), marker.size() - 1); n; --n) {
         if (text.ends_with(marker.substr(0, n))) return n;
+    }
     return 0;
 }
 
@@ -243,7 +248,9 @@ public:
         case State::Between:
         case State::Parameters: {
             std::size_t skip = 0;
-            while (skip < input.size() && whitespace(input[skip])) ++skip;
+            while (skip < input.size() && whitespace(input[skip])) {
+                ++skip;
+            }
             if (skip) {
                 cursor += skip;
                 return true;
@@ -286,7 +293,9 @@ public:
         }
         case State::ValueStart: {
             std::size_t skip = 0;
-            while (skip < input.size() && whitespace(input[skip])) ++skip;
+            while (skip < input.size() && whitespace(input[skip])) {
+                ++skip;
+            }
             if (skip) {
                 cursor += skip;
                 return true;
@@ -427,8 +436,9 @@ void ToolCallOutputDecoder::initialize_continuation(std::string_view prefix) {
                     [](const auto& call) { return call.status == ToolCallStatus::Complete; }))
         throw RequestError(RequestErrorKind::InvalidToolConstraint,
                            "GLM tool continuation must contain no completed or malformed calls");
-    for (const auto& event : events)
+    for (const auto& event : events) {
         if (!std::holds_alternative<OutputDelta>(event)) impl_->seed.push_back(event);
+    }
     if (impl_->calls.empty()) impl_->prefix_bytes = impl_->pending.size();
 }
 } // namespace ninfer::models::glm5next

@@ -1776,9 +1776,10 @@ bool EngineCore<Instance>::begin_iteration(HostPhaseMeasurement& boundary) {
         scheduler_.advance_service(!paused_.empty(), recovering)) {
         // An unused permit belongs to the previous turn. Retained recovery capacity is
         // released only by Native after actual progress, never by this handoff.
-        for (const auto& request : slots_)
+        for (const auto& request : slots_) {
             if (request && request->sequence)
                 instance_.session->release_units({&*request->sequence, 1});
+        }
         admission_decision_.reset();
         request_admission_check();
     }
@@ -1811,7 +1812,9 @@ template <class Instance>
     const auto table  = build_lane_table(runnable_lanes());
     const auto budget = iteration_budget();
     std::size_t rows  = 0;
-    for (const auto& entry : table.lanes) rows += entry.decode_ready ? 1U : 0U;
+    for (const auto& entry : table.lanes) {
+        rows += entry.decode_ready ? 1U : 0U;
+    }
     return scheduler_.batching_holds(table, budget,
                                      std::min<std::size_t>(rows, budget.decode_rows_limit));
 }

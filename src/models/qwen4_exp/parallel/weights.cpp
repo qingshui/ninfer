@@ -14,7 +14,9 @@ WeightSelection select_weights(const artifact::Reader& reader, const ModelDefini
                                   {weights.gate, weights.up, weights.down},
                                   rank.experts.at(index)});
         };
-        for (const auto& layer : definition.weights().text.layers) append(layer.moe);
+        for (const auto& layer : definition.weights().text.layers) {
+            append(layer.moe);
+        }
         if (definition.weights().mtp) append(definition.weights().mtp->layer.moe);
     }
     WeightSelection out;

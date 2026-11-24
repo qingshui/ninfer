@@ -13,8 +13,9 @@ inline void encode_fp8_latent(const std::vector<std::uint16_t>& values,
     scales.resize(values.size() / 128);
     for (std::size_t group = 0; group < scales.size(); ++group) {
         float maximum = 0;
-        for (int d = 0; d < 128; ++d)
+        for (int d = 0; d < 128; ++d) {
             maximum = std::max(maximum, std::abs(decode(values[group * 128 + d])));
+        }
         int exponent = 0;
         if (maximum) {
             int e;
@@ -22,9 +23,10 @@ inline void encode_fp8_latent(const std::vector<std::uint16_t>& values,
             exponent              = std::max(-127, e - (fraction == .5));
         }
         scales[group] = exponent + 127;
-        for (int d = 0; d < 128; ++d)
+        for (int d = 0; d < 128; ++d) {
             codes[group * 128 + d] = __nv_cvt_float_to_fp8(
                 std::ldexp(decode(values[group * 128 + d]), -exponent), __NV_SATFINITE, __NV_E4M3);
+        }
     }
 }
 } // namespace ninfer::tool::kpool

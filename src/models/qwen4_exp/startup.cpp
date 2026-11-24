@@ -117,17 +117,22 @@ std::string prefill_signature(const ModelDefinition& model, const moe::Plan* moe
                            vision->temporal_patch_size,
                            vision->spatial_merge_size,
                            vision->num_position_embeddings};
-    for (const auto& layer : c.layers) layers.push_back(static_cast<int>(layer.mixer));
+    for (const auto& layer : c.layers) {
+        layers.push_back(static_cast<int>(layer.mixer));
+    }
     auto& weights = facts["weights"] = Json::array();
     for (const auto& w : model.weight_data()) {
         Json item{{"role", w.name},
                   {"shape", w.view.shape},
                   {"parts", Json::array()},
                   {"uses", Json::array()}};
-        for (const auto& part : w.view.parts)
+        for (const auto& part : w.view.parts) {
             item["parts"].push_back(
                 {part.parent->geometry.format, part.parent->geometry.layout, part.begin, part.end});
-        for (const auto& use : w.uses) item["uses"].push_back({use.input, use.policy});
+        }
+        for (const auto& use : w.uses) {
+            item["uses"].push_back({use.input, use.policy});
+        }
         weights.push_back(std::move(item));
     }
     if (moe)

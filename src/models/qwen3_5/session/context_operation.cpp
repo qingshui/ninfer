@@ -160,10 +160,11 @@ void SessionImpl::retire_context(runtime::DeviceRetired retired) {
                          operation.result->transfers.end());
     out.operations.pressure_spill_pages   = transaction.spill_page_groups();
     out.operations.partial_tail_cow_pages = transaction.tail_copy_page_groups();
-    for (const auto& transfer : out.transfers)
+    for (const auto& transfer : out.transfers) {
         if (transfer.resource.is_state() &&
             transfer.direction == runtime::ContextTransferDirection::HostToDevice)
             out.operations.state_restores += transfer.image_count;
+    }
     if (auto* pause = std::get_if<PauseOperation>(&operation.action)) {
         out.request_speculative = pause->paused.impl_->control.speculative_stats;
     }

@@ -44,9 +44,10 @@ xgrammar::Grammar strict_arguments(const Contract::Tool& tool) {
 int32_t basic_arguments(xgrammar::GrammarBuilder& builder, const Contract::Tool& tool,
                         xgrammar::StringDispatch& names, int32_t json) {
     std::vector<std::pair<std::string, int32_t>> cases;
-    for (const auto& item : tool.parameters)
+    for (const auto& item : tool.parameters) {
         if (valid_parameter_name(item.name) && item.encoding == Contract::Encoding::JsonValue)
             cases.emplace_back(item.name, json);
+    }
     const auto parameter = builder.AddSequence(
         {builder.AddByteString(std::string(kKeyOpen)), builder.AddRuleRef(names.Add(cases))});
     return builder.AddRuleWithHint("parameters",
@@ -108,7 +109,9 @@ xgrammar::Grammar build(const Contract& contract, const std::optional<OutputCons
 bool match(std::string_view marker, std::size_t& matched, char byte) {
     while (matched && marker[matched] != byte) {
         auto n = matched - 1;
-        while (n && marker.substr(0, n) != marker.substr(matched - n, n)) --n;
+        while (n && marker.substr(0, n) != marker.substr(matched - n, n)) {
+            --n;
+        }
         matched = n;
     }
     if (marker[matched] == byte) ++matched;
@@ -192,11 +195,12 @@ public:
 
     void confirm() noexcept override {
         inserted_.clear();
-        for (auto it = names_.begin(); it != names_.end();)
+        for (auto it = names_.begin(); it != names_.end();) {
             if (it->first != cursor_.call)
                 it = names_.erase(it);
             else
                 ++it;
+        }
         if (cursor_.phase == Phase::Name || cursor_.phase == Phase::Function)
             buffer_.erase(0, cursor_.begin);
         else
@@ -345,9 +349,10 @@ compile_tool_grammar(text::GrammarCompiler& compiler, std::shared_ptr<const Cont
             entry["source_index"] = tool.declaration_index;
         } else {
             entry["encodings"] = Json::array();
-            for (const auto& item : tool.parameters)
+            for (const auto& item : tool.parameters) {
                 if (valid_parameter_name(item.name))
                     entry["encodings"].push_back({item.name, static_cast<int>(item.encoding)});
+            }
         }
         identity["glm_tools"].push_back(std::move(entry));
     }

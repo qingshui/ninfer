@@ -107,7 +107,9 @@ std::vector<int> sample(const media::decode::VideoSource& source, const Processo
     if (count <= 0) return {0};
     std::vector<int> out;
     if (total < count) {
-        for (int i = 0; i < count; ++i) out.push_back(int(std::floor(double(i) * total / count)));
+        for (int i = 0; i < count; ++i) {
+            out.push_back(int(std::floor(double(i) * total / count)));
+        }
     } else {
         double next                = 0;
         const double interval      = 1 / (c.video.temporal_patch_size * c.video_fps);
@@ -125,7 +127,9 @@ std::vector<int> sample(const media::decode::VideoSource& source, const Processo
         out.clear();
         // Match NumPy linspace's step-first arithmetic before flooring source frame indices.
         const double step = count > 1 ? double(last - first) / (count - 1) : 0;
-        for (int i = 0; i < count; ++i) out.push_back(int(std::floor(first + i * step)));
+        for (int i = 0; i < count; ++i) {
+            out.push_back(int(std::floor(first + i * step)));
+        }
         if (count > 1) out.back() = last;
     }
     out.erase(std::unique(out.begin(), out.end()), out.end());
@@ -153,8 +157,9 @@ Plan inspect_one(const OwnedMedia& source, const ProcessorConfig& config,
         const auto video       = media::decode::inspect_video(source.bytes, policy, plan.selection);
         plan.selection.indices = video.indices;
         geometry(plan, video.sampled_frames, video.height, video.width, config.video);
-        for (std::size_t i = 0; i < video.indices.size(); i += config.video.temporal_patch_size)
+        for (std::size_t i = 0; i < video.indices.size(); i += config.video.temporal_patch_size) {
             plan.item.timestamps.push_back(std::floor(video.indices[i] / video.fps));
+        }
     } else
         throw std::invalid_argument("invalid GLM media kind");
     return plan;
@@ -183,26 +188,28 @@ common::PreparedMedia materialize(const OwnedMedia& source, const Plan& plan,
     std::array<std::array<std::uint16_t, 256>, 3> lut;
     for (int channel = 0; channel < 3; ++channel) {
         const float mean = c.mean[channel] * 255.F, std = c.std[channel] * 255.F;
-        for (int pixel = 0; pixel < 256; ++pixel)
+        for (int pixel = 0; pixel < 256; ++pixel) {
             lut[channel][pixel] = bf16((float(pixel) - mean) / std);
+        }
     }
     auto* dst        = payload->patches.get();
     const auto& grid = plan.item.grid;
     for (int t = 0; t < grid.temporal; ++t) {
         const auto start = std::size_t(t) * c.temporal_patch_size;
         const auto end   = std::min(start + c.temporal_patch_size, frames.size());
-        for (auto i = start; i < end; ++i)
+        for (auto i = start; i < end; ++i) {
             common::resize_bicubic_uint8(frames[i], plan.content.height, plan.content.width,
                                          control);
+        }
         for (int by = 0; by < grid.height; by += c.merge_size) {
             common::check_preparation_control(control);
-            for (int bx = 0; bx < grid.width; bx += c.merge_size)
-                for (std::uint32_t dy = 0; dy < c.merge_size; ++dy)
-                    for (std::uint32_t dx = 0; dx < c.merge_size; ++dx)
-                        for (int channel = 0; channel < 3; ++channel)
+            for (int bx = 0; bx < grid.width; bx += c.merge_size) {
+                for (std::uint32_t dy = 0; dy < c.merge_size; ++dy) {
+                    for (std::uint32_t dx = 0; dx < c.merge_size; ++dx) {
+                        for (int channel = 0; channel < 3; ++channel) {
                             for (std::uint32_t dt = 0; dt < c.temporal_patch_size; ++dt) {
                                 const auto& frame = frames[std::min(start + dt, frames.size() - 1)];
-                                for (std::uint32_t py = 0; py < c.patch_size; ++py)
+                                for (std::uint32_t py = 0; py < c.patch_size; ++py) {
                                     for (std::uint32_t px = 0; px < c.patch_size; ++px) {
                                         const auto y = (by + dy) * c.patch_size + py;
                                         const auto x = (bx + dx) * c.patch_size + px;
@@ -214,9 +221,16 @@ common::PreparedMedia materialize(const OwnedMedia& source, const Plan& plan,
                                                 : 0;
                                         *dst++ = lut[channel][pixel];
                                     }
+                                }
                             }
+                        }
+                    }
+                }
+            }
         }
-        for (auto i = start; i < end; ++i) std::vector<std::uint8_t>().swap(frames[i].rgb);
+        for (auto i = start; i < end; ++i) {
+            std::vector<std::uint8_t>().swap(frames[i].rgb);
+        }
     }
     return {plan.item, std::move(payload)};
 }
@@ -382,7 +396,9 @@ std::vector<std::vector<text::ByteSpan>> expand_media(RenderedChat& chat,
     const auto image   = [&](std::size_t index, std::size_t tokens) {
         expanded += "<|begin_of_image|>";
         const auto begin = expanded.size();
-        for (std::size_t i = 0; i < tokens; ++i) expanded += "<|image|>";
+        for (std::size_t i = 0; i < tokens; ++i) {
+            expanded += "<|image|>";
+        }
         spans[index].push_back({begin, expanded.size()});
         expanded += "<|end_of_image|>";
     };
@@ -417,19 +433,32 @@ std::vector<std::vector<text::ByteSpan>> expand_media(RenderedChat& chat,
         }
         return new_end + (position - old_end);
     };
-    for (auto& span : chat.output.literal_spans) span = {map(span.begin), map(span.end)};
+    for (auto& span : chat.output.literal_spans) {
+        span = {map(span.begin), map(span.end)};
+    }
     for (auto& region : chat.output.regions) {
         region.begin = map(region.begin);
         region.end   = map(region.end);
     }
-    for (auto& boundary : chat.output.boundary_mappings) boundary.offset = map(boundary.offset);
-    for (auto& v : boundaries.semantic) v = map(v);
-    for (auto& v : boundaries.structural) v = map(v);
-    for (auto& v : boundaries.execution) v = map(v);
-    for (auto& v : boundaries.markers)
+    for (auto& boundary : chat.output.boundary_mappings) {
+        boundary.offset = map(boundary.offset);
+    }
+    for (auto& v : boundaries.semantic) {
+        v = map(v);
+    }
+    for (auto& v : boundaries.structural) {
+        v = map(v);
+    }
+    for (auto& v : boundaries.execution) {
+        v = map(v);
+    }
+    for (auto& v : boundaries.markers) {
         if (v) *v = map(*v);
+    }
     if (boundaries.rewrite) boundaries.rewrite->frontier = map(boundaries.rewrite->frontier);
-    for (std::size_t i = 0; i < edits.size(); ++i) chat.media[i].bytes = edits[i].after;
+    for (std::size_t i = 0; i < edits.size(); ++i) {
+        chat.media[i].bytes = edits[i].after;
+    }
     chat.output.text = std::move(expanded);
     return spans;
 }

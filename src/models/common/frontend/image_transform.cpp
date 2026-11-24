@@ -60,8 +60,9 @@ Coefficients<int> fixed_coefficients(int input, int output) {
     auto floating = coefficients<double>(input, output);
     Coefficients<int> out{std::move(floating.starts), std::move(floating.offsets), {}};
     const auto maximum = *std::max_element(floating.weights.begin(), floating.weights.end());
-    while (out.precision < 22 && int(0.5 + maximum * (1 << (out.precision + 1))) < (1 << 15))
+    while (out.precision < 22 && int(0.5 + maximum * (1 << (out.precision + 1))) < (1 << 15)) {
         ++out.precision;
+    }
     for (const auto weight : floating.weights) {
         const auto scaled = weight * (1 << out.precision);
         out.weights.push_back(int(scaled + (scaled < 0 ? -0.5 : 0.5)));

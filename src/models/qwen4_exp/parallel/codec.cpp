@@ -47,7 +47,9 @@ GroupExecutionPlan plan_group_execution(const ParallelPlan& parallel,
     plan.session.context.ranks.clear();
     plan.session.context.state.layouts.front().parts.clear();
     plan.session.context.metadata_budget_bytes = 0;
-    for (auto& pool : plan.session.context.pools) pool.parts.clear();
+    for (auto& pool : plan.session.context.pools) {
+        pool.parts.clear();
+    }
     for (const auto& rank : ranks) {
         const auto& session = rank.session;
         if (session.shape != plan.session.shape ||
@@ -81,9 +83,10 @@ GroupExecutionPlan plan_group_execution(const ParallelPlan& parallel,
         plan.capacity.context_frames =
             std::min(plan.capacity.context_frames, rank.capacity.context_frames);
     }
-    for (auto& pool : plan.session.context.pools)
+    for (auto& pool : plan.session.context.pools) {
         pool.histories = context::HistoryDirectory::capacity_for_metadata(
             plan.session.context.metadata_budget_bytes);
+    }
     return plan;
 }
 
@@ -100,7 +103,9 @@ ExecutionCodec::ExecutionCodec(const ModelDefinition& definition,
     ranks_              = topology.ranks.size();
     max_features_       = rank.session.vision_max_features;
     scope_.result_owner = topology.output_rank;
-    for (const auto& r : topology.ranks) scope_.owners.push_back(r.rank);
+    for (const auto& r : topology.ranks) {
+        scope_.owners.push_back(r.rank);
+    }
     scope_.validate(topology);
     auto described = rank;
     described.observation.communication.clear();
@@ -132,8 +137,9 @@ runtime::protocol::Scope ExecutionCodec::scope(const Work& work,
     const auto* context = std::get_if<ContextWork>(&work.operation);
     if (!context || !context->bindings.empty() || !context->releases.empty()) return scope_;
     runtime::protocol::Scope scope;
-    for (const auto& [rank, actions] : work.actions)
+    for (const auto& [rank, actions] : work.actions) {
         if (!actions.empty()) scope.owners.push_back(rank);
+    }
     if (scope.owners.empty()) return scope_;
     scope.result_owner = scope.owners.front();
     return scope;

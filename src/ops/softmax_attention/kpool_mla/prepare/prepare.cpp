@@ -59,7 +59,7 @@ void execute(const Tensor& x, const KpoolMlaPrepareParameters& p, const KpoolMla
     index_cache(cache.index, 128, device);
     operand::same_paged_records(cache.latent.data, cache.index.keys, kOperation, "cache planes");
     const auto table_blocks = operand::blocks(cache.latent.data.records.page_offsets, kOperation);
-    for (const auto* latent : {&cache.latent.data, &cache.latent.scales})
+    for (const auto* latent : {&cache.latent.data, &cache.latent.scales}) {
         for (const auto* index : {&cache.index.keys, &cache.index.scales}) {
             if (!latent->records.storage.data || !index->records.storage.data) continue;
             const auto& cr = latent->plane.tensor.region;
@@ -67,9 +67,11 @@ void execute(const Tensor& x, const KpoolMlaPrepareParameters& p, const KpoolMla
             require(cr.offset + cr.bytes <= ir.offset || ir.offset + ir.bytes <= cr.offset,
                     "cache planes overlap");
         }
+    }
     const auto input_weight = [&](const SingleProjectionWeight& weight) {
-        for (const auto plane : weight_operands(weight.weight, weight.weight.n, 4096, device))
+        for (const auto plane : weight_operands(weight.weight, weight.weight.n, 4096, device)) {
             if (plane.begin != plane.end) inputs[input_count++] = plane;
+        }
     };
     const auto& first = std::visit(
         [](const auto& w) -> const SingleProjectionWeight& {
@@ -87,8 +89,12 @@ void execute(const Tensor& x, const KpoolMlaPrepareParameters& p, const KpoolMla
     const auto output = [&](const Tensor& t, DType type, std::initializer_list<int> dims) {
         operand::tensor(t, type, dims, 16, kOperation, "query output", device);
         const auto range = operand::range(t, kOperation);
-        for (int i = 0; i < input_count; ++i) operand::disjoint(range, inputs[i], kOperation);
-        for (int i = 0; i < output_count; ++i) operand::disjoint(range, outputs[i], kOperation);
+        for (int i = 0; i < input_count; ++i) {
+            operand::disjoint(range, inputs[i], kOperation);
+        }
+        for (int i = 0; i < output_count; ++i) {
+            operand::disjoint(range, outputs[i], kOperation);
+        }
         outputs[output_count++] = range;
     };
     if (geometry.query_rank) output(out.q_r, DType::BF16, {1536, T, B});
@@ -107,18 +113,26 @@ void execute(const Tensor& x, const KpoolMlaPrepareParameters& p, const KpoolMla
         strided(records.raw_keys, DType::BF16, {128, width, B, 1}, device, "raw keys");
         strided(records.raw_gates, DType::BF16, {128, width, B, 1}, device, "raw gates");
     }
-    for (int i = 0; i < output_count; ++i)
+    for (int i = 0; i < output_count; ++i) {
         require(!operand::overlaps(table_blocks, outputs[i]), "query output overlaps page table");
-    for (int i = 0; i < output_count; ++i)
-        for (int j = 0; j < input_count; ++j) operand::disjoint(outputs[i], inputs[j], kOperation);
+    }
+    for (int i = 0; i < output_count; ++i) {
+        for (int j = 0; j < input_count; ++j) {
+            operand::disjoint(outputs[i], inputs[j], kOperation);
+        }
+    }
     operand::device(arena.device(), device, kOperation, "workspace");
     const auto layout        = prepare_workspace(geometry, update, T, B);
     auto scope               = arena.scope();
     const auto scratch       = arena.alloc_bytes(layout.bytes, 256);
     const auto scratch_range = operand::range(scratch.data, scratch.bytes, kOperation);
     require(!operand::overlaps(table_blocks, scratch_range), "workspace overlaps page table");
-    for (int i = 0; i < input_count; ++i) operand::disjoint(scratch_range, inputs[i], kOperation);
-    for (int i = 0; i < output_count; ++i) operand::disjoint(scratch_range, outputs[i], kOperation);
+    for (int i = 0; i < input_count; ++i) {
+        operand::disjoint(scratch_range, inputs[i], kOperation);
+    }
+    for (int i = 0; i < output_count; ++i) {
+        operand::disjoint(scratch_range, outputs[i], kOperation);
+    }
     PrepareArguments a{};
     a.x                    = static_cast<const __nv_bfloat16*>(x.data);
     const auto bind_weight = [](const SingleProjectionWeight& w) {

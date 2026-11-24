@@ -53,14 +53,23 @@ struct Weights {
           cn(device, DType::BF16, {512}), qn(device, DType::BF16, {1536}),
           kn(device, DType::BF16, {128}), kb(device, DType::BF16, {128}),
           ape(device, DType::BF16, {128, 4}), format(f) {
-        for (std::size_t i = 0; i < weight.host.size(); ++i)
+        for (std::size_t i = 0; i < weight.host.size(); ++i) {
             weight.host[i] = sample(i + 171, 1.F / 16384);
-        for (auto* v : {&cn, &qn, &kn})
-            for (std::size_t i = 0; i < v->host.size(); ++i)
+        }
+        for (auto* v : {&cn, &qn, &kn}) {
+            for (std::size_t i = 0; i < v->host.size(); ++i) {
                 v->host[i] = encode(1 + decode(sample(i + 42, 1.F / 2048)));
-        for (std::size_t i = 0; i < kb.host.size(); ++i) kb.host[i] = sample(i + 111, 1.F / 2048);
-        for (std::size_t i = 0; i < ape.host.size(); ++i) ape.host[i] = sample(i + 811, 1.F / 256);
-        for (auto* v : {&weight, &cn, &qn, &kn, &kb, &ape}) v->upload();
+            }
+        }
+        for (std::size_t i = 0; i < kb.host.size(); ++i) {
+            kb.host[i] = sample(i + 111, 1.F / 2048);
+        }
+        for (std::size_t i = 0; i < ape.host.size(); ++i) {
+            ape.host[i] = sample(i + 811, 1.F / 256);
+        }
+        for (auto* v : {&weight, &cn, &qn, &kn, &kb, &ape}) {
+            v->upload();
+        }
         params = {p,
                   ops::SingleProjectionWeight{dense_weight(weight.view, rows, 4096)},
                   bf16_prepare_profile(p).rows,
@@ -80,17 +89,21 @@ struct Weights {
                 return first ? (r < 512 ? r : r + 256) : (r < 256 ? 512 + r : 2304 + r - 256);
             };
             std::vector<float> source(std::size_t(first_rows) * 4096);
-            for (int r = 0; r < first_rows; ++r)
-                for (int k = 0; k < 4096; ++k)
+            for (int r = 0; r < first_rows; ++r) {
+                for (int k = 0; k < 4096; ++k) {
                     source[std::size_t(r) * 4096 + k] = decode(weight.at(k, logical_row(true, r)));
+                }
+            }
             encoded = std::make_unique<EncodedWeight>(
                 device, mx ? QType::MXFP8 : QType::FP8_E4M3FN_BLOCK128X128_FP32, first_rows, 4096,
                 source);
             auxiliary = std::make_unique<Buffer<std::uint16_t>>(
                 device, DType::BF16, std::initializer_list<int>{4096, second_rows});
-            for (int r = 0; r < second_rows; ++r)
-                for (int k = 0; k < 4096; ++k)
+            for (int r = 0; r < second_rows; ++r) {
+                for (int k = 0; k < 4096; ++k) {
                     auxiliary->at(k, r) = weight.at(k, logical_row(false, r));
+                }
+            }
             auxiliary->upload();
             params.weights = ops::PairedProjectionWeights{
                 {encoded->weight, mx ? ops::LinearPolicy::AllowA8 : ops::LinearPolicy::A16Only},
@@ -169,7 +182,9 @@ struct Fixture {
                    images.field(fields.raw_gates, after_offsets.view, layer)};
         cache   = cache_layout.layer(PagedRecordView{packed.storage(), tables.view, 64}, layer);
         records = {keys.view, gates.view, offsets.view};
-        for (std::size_t i = 0; i < x.host.size(); ++i) x.host[i] = sample(i + 331, 1.F / 256);
+        for (std::size_t i = 0; i < x.host.size(); ++i) {
+            x.host[i] = sample(i + 331, 1.F / 256);
+        }
         for (int b = 0; b < B; ++b) {
             bases[b]             = 60 + (phase + b) % 4;
             valid.at(b)          = ragged ? (b == B - 1 && B > 1 ? 0 : std::max(1, T - b)) : T;
@@ -177,22 +192,34 @@ struct Fixture {
             offsets.at(b)        = valid.at(b) ? 3 + b % 3 : -1;
             before_offsets.at(b) = valid.at(b) ? 256 + b * stride : -1;
             after_offsets.at(b)  = valid.at(b) ? 256 + (alias ? b : b + B) * stride : -1;
-            for (int t = 0; t < T; ++t) positions.at(t, b) = t < valid.at(b) ? bases[b] + t : -1;
-            for (int p = 0; p < P; ++p)
+            for (int t = 0; t < T; ++t) {
+                positions.at(t, b) = t < valid.at(b) ? bases[b] + t : -1;
+            }
+            for (int p = 0; p < P; ++p) {
                 tables.at(p, B - 1 - b) = packed.physical_offset(P * B - 1 - (b * P + p));
+            }
             if (valid.at(b))
-                for (int kind = 0; kind < 2; ++kind)
-                    for (int r = 0; r < 3; ++r)
-                        for (int d = 0; d < 128; ++d)
+                for (int kind = 0; kind < 2; ++kind) {
+                    for (int r = 0; r < 3; ++r) {
+                        for (int d = 0; d < 128; ++d) {
                             state_host[state_index(false, kind, b, r, d)] =
                                 r < bases[b] % 4
                                     ? sample(d + 128 * r + 777 * b + 99 * kind, 1.F / 512)
                                     : 0;
+                        }
+                    }
+                }
         }
-        for (auto* v : {&x, &q, &keys, &gates}) v->upload();
+        for (auto* v : {&x, &q, &keys, &gates}) {
+            v->upload();
+        }
         coeff.upload();
-        for (auto* v : {&positions, &valid, &selectors, &offsets}) v->upload();
-        for (auto* v : {&tables, &before_offsets, &after_offsets}) v->upload();
+        for (auto* v : {&positions, &valid, &selectors, &offsets}) {
+            v->upload();
+        }
+        for (auto* v : {&tables, &before_offsets, &after_offsets}) {
+            v->upload();
+        }
         state.copy_from_host(state_host.data(), state_host.size() * 2);
         auto capacity    = update ? ops::kpool_mla_prepare_update_workspace_capacity_bytes
                                   : ops::kpool_mla_prepare_record_workspace_capacity_bytes;

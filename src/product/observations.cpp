@@ -86,19 +86,25 @@ constexpr std::array kStages{"submitted", "decision", "result_ready", "retiring"
 
 template <class T, class Fields>
 void subtract_fields(T& value, const T& before, const Fields& fields) {
-    for (const auto& [name, field] : fields) value.*field -= before.*field;
+    for (const auto& [name, field] : fields) {
+        value.*field -= before.*field;
+    }
 }
 
 template <class T, class Fields>
 Json fields_json(const T& value, const Fields& fields) {
     Json out = Json::object();
-    for (const auto& [name, field] : fields) out[name] = value.*field;
+    for (const auto& [name, field] : fields) {
+        out[name] = value.*field;
+    }
     return out;
 }
 
 template <class T>
 void subtract_series(T& value, const T& before) {
-    for (std::size_t i = 0; i < value.size(); ++i) value[i] -= i < before.size() ? before[i] : 0;
+    for (std::size_t i = 0; i < value.size(); ++i) {
+        value[i] -= i < before.size() ? before[i] : 0;
+    }
 }
 
 void subtract_duration(DurationCounter& value, const DurationCounter& before) {
@@ -112,8 +118,9 @@ void subtract_execution(ExecutionCounters& value, const ExecutionCounters& befor
     value.input_tokens -= before.input_tokens;
     value.scheduled_positions -= before.scheduled_positions;
     for (auto field : {&ExecutionExposure::result, &ExecutionExposure::resolution,
-                       &ExecutionExposure::retirement, &ExecutionExposure::total})
+                       &ExecutionExposure::retirement, &ExecutionExposure::total}) {
         subtract_duration(value.exposure.*field, before.exposure.*field);
+    }
     subtract_series(value.latency.bins, before.latency.bins);
 }
 
@@ -152,8 +159,9 @@ Json communication(const CommunicationWork& value) {
     constexpr std::array names{"all_reduce",     "broadcast", "all_gather",
                                "reduce_scatter", "send",      "receive"};
     Json out;
-    for (std::size_t i = 0; i < names.size(); ++i)
+    for (std::size_t i = 0; i < names.size(); ++i) {
         out[names[i]] = {{"calls", value.calls[i]}, {"payload_bytes", value.payload_bytes[i]}};
+    }
     return out;
 }
 
@@ -165,12 +173,13 @@ Json optional(const std::optional<T>& value) {
 Json transfer(const ContextTransferSeries& value) {
     constexpr std::array names{"d2h", "h2d", "d2d", "h2h", "peer_d2d"};
     Json out;
-    for (std::size_t i = 0; i < names.size(); ++i)
+    for (std::size_t i = 0; i < names.size(); ++i) {
         out[names[i]] = {{"bytes", value[i].bytes},
                          {"seconds", value[i].seconds},
                          {"images", value[i].images},
                          {"page_groups", value[i].page_groups},
                          {"copy_operations", value[i].copy_operations}};
+    }
     return out;
 }
 } // namespace
@@ -190,9 +199,10 @@ EngineSnapshot observation_delta(EngineSnapshot current, const EngineSnapshot& b
                     before.speculative_accepted_per_position);
     value.actual_context_transfer_seconds -= before.actual_context_transfer_seconds;
     subtract_transfer(value.context_transfers.state, before.context_transfers.state);
-    for (std::size_t i = 0; i < value.context_transfers.kv.size(); ++i)
+    for (std::size_t i = 0; i < value.context_transfers.kv.size(); ++i) {
         if (i < before.context_transfers.kv.size())
             subtract_transfer(value.context_transfers.kv[i], before.context_transfers.kv[i]);
+    }
     for (const auto& [name, field] : kPrefixKinds) {
         auto& counter     = value.prefix_cache.*field;
         const auto& prior = before.prefix_cache.*field;
@@ -202,21 +212,25 @@ EngineSnapshot observation_delta(EngineSnapshot current, const EngineSnapshot& b
         counter.adopted -= prior.adopted;
         counter.reused_tokens -= prior.reused_tokens;
     }
-    for (std::size_t i = 0; i < current.executions.size(); ++i)
+    for (std::size_t i = 0; i < current.executions.size(); ++i) {
         subtract_execution(current.executions[i], baseline.executions[i]);
-    for (std::size_t i = 0; i < current.decode_by_batch.size(); ++i)
+    }
+    for (std::size_t i = 0; i < current.decode_by_batch.size(); ++i) {
         if (i < baseline.decode_by_batch.size())
             subtract_execution(current.decode_by_batch[i], baseline.decode_by_batch[i]);
+    }
     for (auto& rank : current.ranks) {
         const auto prior = std::find_if(baseline.ranks.begin(), baseline.ranks.end(),
                                         [&](const auto& r) { return r.rank == rank.rank; });
         if (prior == baseline.ranks.end()) continue;
         for (auto field : {&RankHostStatistics::submit_ns, &RankHostStatistics::progress_ns,
                            &RankHostStatistics::supply_ns, &RankHostStatistics::commit_ns,
-                           &RankHostStatistics::discard_ns})
+                           &RankHostStatistics::discard_ns}) {
             rank.host.*field -= prior->host.*field;
-        for (std::size_t i = 0; i < kGpuIntervalCount; ++i)
+        }
+        for (std::size_t i = 0; i < kGpuIntervalCount; ++i) {
             subtract_duration(rank.gpu_intervals[i], prior->gpu_intervals[i]);
+        }
         subtract_series(rank.compute_paths, prior->compute_paths);
         rank.prefill_plan.hits -= prior->prefill_plan.hits;
         rank.prefill_plan.misses -= prior->prefill_plan.misses;
@@ -244,13 +258,15 @@ EngineSnapshot observation_delta(EngineSnapshot current, const EngineSnapshot& b
             for (auto field :
                  {&PleReadStats::rows, &PleReadStats::cache_hits, &PleReadStats::shared_rows,
                   &PleReadStats::shared_pages, &PleReadStats::reads, &PleReadStats::read_bytes,
-                  &PleReadStats::uploaded_bytes})
+                  &PleReadStats::uploaded_bytes}) {
                 (*rank.memory.ple).*field -= (*prior->memory.ple).*field;
+            }
     }
     for (auto field : {&MediaCacheSummary::hits, &MediaCacheSummary::misses,
                        &MediaCacheSummary::singleflight_waits, &MediaCacheSummary::evictions,
-                       &MediaCacheSummary::oversize_bypasses})
+                       &MediaCacheSummary::oversize_bypasses}) {
         current.media.*field -= baseline.media.*field;
+    }
     current.scoring.completed_jobs -= baseline.scoring.completed_jobs;
     current.scoring.failed_jobs -= baseline.scoring.failed_jobs;
     current.scoring.scored_tokens -= baseline.scoring.scored_tokens;
@@ -285,16 +301,17 @@ Json observation_json(const EngineSnapshot& snapshot, std::uint64_t now) {
     }
     runtime["context_transfers"]["state"] = transfer(r.context_transfers.state);
     runtime["context_transfers"]["kv"]    = Json::array();
-    for (const auto& pool : r.kv_pools)
+    for (const auto& pool : r.kv_pools) {
         runtime["context_transfers"]["kv"].push_back(
             {{"pool_id", pool.id},
              {"label", pool.label},
              {"directions", transfer(r.context_transfers.kv.at(pool.id))}});
+    }
     runtime["context_transfer_seconds"] = r.actual_context_transfer_seconds;
     // The most recent iteration flights; a bounded recent window, not a cumulative counter, so
     // an observation delta keeps the current window.
     runtime["recent_flights"] = Json::array();
-    for (const auto& flight : r.recent_flights)
+    for (const auto& flight : r.recent_flights) {
         runtime["recent_flights"].push_back(
             {{"index", flight.index},
              {"prefill_tokens", flight.prefill_tokens},
@@ -302,6 +319,7 @@ Json observation_json(const EngineSnapshot& snapshot, std::uint64_t now) {
              {"decode_rows", flight.decode_rows},
              {"host_submit_ns", flight.host_submit_ns},
              {"gpu_ns", flight.gpu_ns}});
+    }
     constexpr std::array statuses{"ready", "stopping", "failed"};
     Json out{
         {"sequence", snapshot.stamp.sequence},
@@ -313,7 +331,7 @@ Json observation_json(const EngineSnapshot& snapshot, std::uint64_t now) {
         {"context", context_usage_json(r)},
         {"execution_latency_bounds_ns", kExecutionLatencyBoundsNs}};
     out["context"]["resources"] = Json::array();
-    for (const auto& resource : r.context_resources)
+    for (const auto& resource : r.context_resources) {
         out["context"]["resources"].push_back(
             {{"rank", resource.rank},
              {"domain", context_domain_name(resource.domain)},
@@ -324,8 +342,9 @@ Json observation_json(const EngineSnapshot& snapshot, std::uint64_t now) {
              {"cached_bytes", resource.cached_bytes},
              {"pending_retirement_records", resource.pending_retirement_records},
              {"pending_retirement_bytes", resource.pending_retirement_bytes}});
+    }
     out["placements"] = Json::array();
-    for (const auto& p : r.placements)
+    for (const auto& p : r.placements) {
         out["placements"].push_back({{"id", p.id},
                                      {"resident", p.resident},
                                      {"prefilling", p.prefilling},
@@ -333,8 +352,10 @@ Json observation_json(const EngineSnapshot& snapshot, std::uint64_t now) {
                                      {"replaying", p.replaying},
                                      {"paused", p.paused},
                                      {"context_tokens", p.context_tokens}});
-    for (std::size_t i = 0; i < snapshot.executions.size(); ++i)
+    }
+    for (std::size_t i = 0; i < snapshot.executions.size(); ++i) {
         out["executions"][kKinds[i]] = execution(snapshot.executions[i]);
+    }
     out["decode_by_batch"] = Json::array();
     for (std::size_t i = 0; i < snapshot.decode_by_batch.size(); ++i) {
         auto row     = execution(snapshot.decode_by_batch[i]);
@@ -342,7 +363,7 @@ Json observation_json(const EngineSnapshot& snapshot, std::uint64_t now) {
         out["decode_by_batch"].push_back(std::move(row));
     }
     out["in_flight"] = Json::array();
-    for (const auto& unit : snapshot.in_flight)
+    for (const auto& unit : snapshot.in_flight) {
         out["in_flight"].push_back({{"id", unit.id},
                                     {"started_ns", unit.started_ns},
                                     {"kind", kKinds[static_cast<std::size_t>(unit.work.kind)]},
@@ -350,6 +371,7 @@ Json observation_json(const EngineSnapshot& snapshot, std::uint64_t now) {
                                     {"rows", unit.work.rows},
                                     {"input_tokens", unit.work.input_tokens},
                                     {"scheduled_positions", unit.work.scheduled_positions}});
+    }
     out["ranks"] = Json::array();
     for (const auto& rank : snapshot.ranks) {
         auto value                      = resource_json(rank);
@@ -362,8 +384,9 @@ Json observation_json(const EngineSnapshot& snapshot, std::uint64_t now) {
                                            {"supply_ns", rank.host.supply_ns},
                                            {"commit_ns", rank.host.commit_ns},
                                            {"discard_ns", rank.host.discard_ns}};
-        for (std::size_t i = 0; i < kGpuIntervalCount; ++i)
+        for (std::size_t i = 0; i < kGpuIntervalCount; ++i) {
             value["gpu_intervals"][kGpuIntervalNames[i]] = duration(rank.gpu_intervals[i]);
+        }
         for (std::size_t i = 0; i < rank.attention.size(); ++i) {
             const auto& a                      = rank.attention[i];
             value["attention_work"][kKinds[i]] = {{"forwards", a.forwards},
@@ -407,7 +430,7 @@ Json observation_json(const EngineSnapshot& snapshot, std::uint64_t now) {
                          {"wall", duration(snapshot.scoring.wall)}};
     if (snapshot.requests) {
         out["requests"] = Json::array();
-        for (const auto& q : *snapshot.requests)
+        for (const auto& q : *snapshot.requests) {
             out["requests"].push_back(
                 {{"id", q.id},
                  {"phase", request_phase_name(q.phase)},
@@ -436,6 +459,7 @@ Json observation_json(const EngineSnapshot& snapshot, std::uint64_t now) {
                  {"resident", q.resident},
                  {"execution_in_flight", q.execution_in_flight},
                  {"capture_pending", q.capture_pending}});
+        }
     }
     return out;
 }

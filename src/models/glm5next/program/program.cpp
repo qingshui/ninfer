@@ -69,9 +69,10 @@ void RankProgramImpl::validate_work(const Work& work, runtime::FrameKind kind) c
             if (!bindings[r.lane.value] || bindings[r.lane.value]->residency != r)
                 throw std::logic_error("GLM5Next stale residency release");
             if (compute)
-                for (const auto& row : work_rows(compute->request.work))
+                for (const auto& row : work_rows(compute->request.work)) {
                     if (row.member.residency == r)
                         throw std::logic_error("GLM5Next residency has live compute");
+                }
             released[r.lane.value] = true;
         }
         for (const auto& b : c->bindings) {
@@ -79,9 +80,10 @@ void RankProgramImpl::validate_work(const Work& work, runtime::FrameKind kind) c
             if (bindings[lane] &&
                 (!released[lane] || bindings[lane]->residency == b.member.residency))
                 throw std::logic_error("GLM5Next residency already installed");
-            for (std::size_t i = 0; i < bindings.size(); ++i)
+            for (std::size_t i = 0; i < bindings.size(); ++i) {
                 if (bindings[i] && !released[i] && bindings[i]->sequence == b.member.sequence)
                     throw std::logic_error("GLM5Next sequence already bound");
+            }
         }
     }
     const auto& migration =
@@ -163,7 +165,9 @@ void RankProgramImpl::drain() {
     events.clear();
     if (resources.vision)
         if (const auto* active = resources.vision->current()) resources.vision->release(active->id);
-    for (auto& b : bindings) b.reset();
+    for (auto& b : bindings) {
+        b.reset();
+    }
     drained = true;
     if (error) std::rethrow_exception(error);
 }

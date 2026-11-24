@@ -36,9 +36,10 @@ SessionPlan plan_session(const ExecutionPlan& execution) {
     });
     plan.context.metadata_budget_bytes = execution.capacity.metadata_budget_bytes;
     if (plan.context.metadata_budget_bytes)
-        for (auto& pool : plan.context.pools)
+        for (auto& pool : plan.context.pools) {
             pool.histories = context::HistoryDirectory::capacity_for_metadata(
                 plan.context.metadata_budget_bytes);
+        }
     return plan;
 }
 
@@ -51,9 +52,10 @@ runtime::ContextMetadataPlan session_metadata_plan(const ExecutionPlan& executio
     const auto recovery_cost =
         context::RecoveryIndex<>::metadata_bytes(1) - context::RecoveryIndex<>::metadata_bytes(0);
     std::size_t history_cost = 0;
-    for (const auto& pool : schema.pools)
+    for (const auto& pool : schema.pools) {
         history_cost += context::HistoryDirectory::metadata_bytes(1, 0, pool.page_capacity, 1) -
                         context::HistoryDirectory::metadata_bytes(0, 0, pool.page_capacity, 1);
+    }
     metadata.fixed_bytes +=
         TokenCountBuilder::capacity_bytes(execution.shape.purpose == EnginePurpose::Generation
                                               ? execution.profile->public_tokens

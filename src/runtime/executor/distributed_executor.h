@@ -282,10 +282,12 @@ public:
             closed_ = true;
             return;
         }
-        for (auto* flights : {&compute_, &context_})
-            for (const auto& flight : *flights)
+        for (auto* flights : {&compute_, &context_}) {
+            for (const auto& flight : *flights) {
                 if (flight.phase != Phase::Empty && flight.ticket.frame.kind == FrameKind::Compute)
                     discard(flight.ticket);
+            }
+        }
         const auto until = std::chrono::steady_clock::now() + group_->shutdown_timeout();
         while (pool_.in_flight() && !failed_) {
             if (std::chrono::steady_clock::now() >= until) {
@@ -315,7 +317,7 @@ public:
     [[nodiscard]] bool has_pending_work() const noexcept override { return pool_.busy(); }
 
     void observe_in_flight(std::vector<ExecutionProgress>& out) const override {
-        for (const auto* flights : {&compute_, &context_})
+        for (const auto* flights : {&compute_, &context_}) {
             for (const auto& flight : *flights) {
                 if (flight.phase == Phase::Empty) continue;
                 const auto stage = flight.phase == Phase::Decision     ? ExecutionStage::Decision
@@ -325,6 +327,7 @@ public:
                                                                        : ExecutionStage::Submitted;
                 out.push_back(flight.clock.progress(flight.ticket.id, stage));
             }
+        }
     }
 
     void measure(MeasurementCommand command) override {
@@ -381,7 +384,7 @@ private:
 
     void progress_inputs() {
         inputs_.progress(*group_, epoch().value);
-        for (auto* flights : {&compute_, &context_})
+        for (auto* flights : {&compute_, &context_}) {
             for (auto& flight : *flights) {
                 if (flight.phase != Phase::Inputs || !inputs_.ready(flight.inputs)) continue;
                 protocol::Envelope envelope{
@@ -396,6 +399,7 @@ private:
                 ++next_command_;
                 if (flight.cancel_requested) discard(flight.ticket);
             }
+        }
     }
 
     void retire_inputs(const Work& work) {
@@ -407,8 +411,9 @@ private:
                     distributed::wire::Message{distributed::wire::Kind::InputRelease, epoch().value,
                                                std::move(out).take()});
                 std::vector<distributed::OutgoingMessage> requests;
-                for (const auto& rank : group_->topology().ranks)
+                for (const auto& rank : group_->topology().ranks) {
                     requests.push_back({rank.rank, message});
+                }
                 send(requests, true);
                 inputs_.release(release.id);
             }
@@ -432,7 +437,9 @@ private:
         auto message = std::make_shared<distributed::wire::Message>(distributed::wire::Message{
             distributed::wire::Kind::Measurement, epoch().value, std::move(out).take()});
         std::vector<distributed::OutgoingMessage> messages;
-        for (const auto& rank : group_->topology().ranks) messages.push_back({rank.rank, message});
+        for (const auto& rank : group_->topology().ranks) {
+            messages.push_back({rank.rank, message});
+        }
         send(messages, true);
         std::deque<Event> deferred;
         const auto until = std::chrono::steady_clock::now() + group_->shutdown_timeout();
@@ -441,11 +448,12 @@ private:
             if (std::chrono::steady_clock::now() >= until) {
                 std::string message = "rank measurement boundary timed out at command " +
                                       std::to_string(next_command_);
-                for (std::size_t rank = 0; rank < progress_.size(); ++rank)
+                for (std::size_t rank = 0; rank < progress_.size(); ++rank) {
                     if (!measurement_reports_[rank])
                         message += "; rank " + std::to_string(rank) +
                                    " applied=" + std::to_string(progress_[rank].applied) +
                                    " retired=" + std::to_string(progress_[rank].retired);
+                }
                 fail(message);
                 throw std::runtime_error(message);
             }
@@ -458,10 +466,11 @@ private:
         }
         events_.insert(events_.begin(), std::make_move_iterator(deferred.begin()),
                        std::make_move_iterator(deferred.end()));
-        for (std::size_t rank = 0; rank < measurement_errors_.size(); ++rank)
+        for (std::size_t rank = 0; rank < measurement_errors_.size(); ++rank) {
             if (!measurement_errors_[rank].empty())
                 throw std::runtime_error("rank " + std::to_string(rank) + ": " +
                                          measurement_errors_[rank]);
+        }
     }
 
     template <class Encode>
@@ -531,7 +540,7 @@ private:
                         if (std::all_of(f.scope.owners.begin(), f.scope.owners.end(),
                                         [&](auto r) { return f.consumed[r].has_value(); })) {
                             DecisionConsumed combined{f.ticket, f.decision->stage, {}};
-                            for (auto r : f.scope.owners)
+                            for (auto r : f.scope.owners) {
                                 for (const auto& row : f.consumed[r]->rows) {
                                     auto found = std::find_if(
                                         combined.rows.begin(), combined.rows.end(),
@@ -541,6 +550,7 @@ private:
                                     else
                                         found->bytes += row.bytes;
                                 }
+                            }
                             f.consumed_published = true;
                             if (f.phase != Phase::Discarding)
                                 events_.emplace_back(std::move(combined));

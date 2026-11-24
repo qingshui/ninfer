@@ -177,7 +177,9 @@ std::vector<ContextActions> take_action_batches(std::span<const ContextActionBat
         result[i].operations.emplace_back(peer_piece(action, next[i], count));
         result[j].operations.emplace_back(peer_piece(*other, next[j], count));
     }
-    for (std::size_t i = 0; i < ranks.size(); ++i) *ranks[i].cursor = next[i];
+    for (std::size_t i = 0; i < ranks.size(); ++i) {
+        *ranks[i].cursor = next[i];
+    }
     return result;
 }
 

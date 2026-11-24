@@ -77,7 +77,9 @@ Tensor Resources::tensor(const TensorRegion& region) { return region.bind(persis
 
 Tensor Resources::packed(const TensorRegion& region, std::initializer_list<std::int32_t> shape) {
     std::uint64_t elements = 1;
-    for (const auto n : shape) elements *= dimension(n);
+    for (const auto n : shape) {
+        elements *= dimension(n);
+    }
     auto value = tensor(region);
     return value.view({dimension(value.numel())}).slice(0, 0, dimension(elements)).view(shape);
 }

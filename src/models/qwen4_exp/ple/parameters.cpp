@@ -46,7 +46,9 @@ LookupParameters load_lookup_parameters(const artifact::Reader& reader,
         return std::bit_cast<std::int64_t>(read_u64_le(controls.data() + 8 * i));
     };
     auto& hash = result.hash;
-    for (std::size_t i = 0; i < 3; ++i) hash.multipliers[i] = word(i);
+    for (std::size_t i = 0; i < 3; ++i) {
+        hash.multipliers[i] = word(i);
+    }
     for (std::size_t i = 0; i < kHeads; ++i) {
         hash.vocab_sizes[i] = word(3 + i);
         hash.offsets[i]     = word(19 + i);

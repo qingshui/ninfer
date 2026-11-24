@@ -37,8 +37,9 @@ __device__ void publish_density(Groups g, int count, int columns, int* maxima, i
     const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
     int maximum = count;
 #pragma unroll
-    for (int delta = 16; delta; delta /= 2)
+    for (int delta = 16; delta; delta /= 2) {
         maximum = max(maximum, __shfl_down_sync(0xffffffff, maximum, delta));
+    }
     const int active = __popc(__ballot_sync(0xffffffff, count > 0));
     if (!lane) {
         maxima[warp]  = maximum;
@@ -212,14 +213,17 @@ __global__ void order_jobs(Groups g, int columns) {
     if constexpr (PreserveBalanced) {
         int maximum = jobs;
 #pragma unroll
-        for (int d = 16; d; d /= 2)
+        for (int d = 16; d; d /= 2) {
             maximum = max(maximum, __shfl_down_sync(0xffffffff, maximum, d));
+        }
         if (!lane) warp_before[warp] = maximum;
         __syncthreads();
         if (!warp) {
             int total = lane < 9 ? warp_before[lane] : 0;
 #pragma unroll
-            for (int d = 16; d; d /= 2) total = max(total, __shfl_down_sync(0xffffffff, total, d));
+            for (int d = 16; d; d /= 2) {
+                total = max(total, __shfl_down_sync(0xffffffff, total, d));
+            }
             if (!lane) base = total;
         }
         __syncthreads();

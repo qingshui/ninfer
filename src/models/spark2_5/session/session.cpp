@@ -32,8 +32,9 @@ bool SessionImpl::valid(SequenceHandle handle) const noexcept {
 }
 
 Sequence& SessionImpl::sequence(SequenceHandle handle) const {
-    for (const auto& s : sequences)
+    for (const auto& s : sequences) {
         if (s && s->id == handle.value && s->epoch == handle.generation) return *s;
+    }
     throw std::logic_error("stale Spark2_5 sequence");
 }
 
@@ -45,20 +46,22 @@ runtime::ExecutionMember SessionImpl::member(const Sequence& s) const {
 
 StateBindings SessionImpl::selectors(const Sequence& s) const {
     StateBindings bindings;
-    for (const auto rank : directory.states().ranks(s.continuation.metadata.placement.value))
+    for (const auto rank : directory.states().ranks(s.continuation.metadata.placement.value)) {
         bindings.emplace(rank, directory.states().selectors(s.continuation.image,
                                                             s.write_destination.valid()
                                                                 ? s.write_destination
                                                                 : s.continuation.image,
                                                             rank));
+    }
     return bindings;
 }
 
 ContextActions SessionImpl::actions(const context::ContextTransaction& transaction) const {
     ContextActions actions;
-    for (const auto& rank : plan.context.ranks)
+    for (const auto& rank : plan.context.ranks) {
         if (!transaction.actions(rank.rank).empty())
             actions.emplace(rank.rank, transaction.actions(rank.rank));
+    }
     return actions;
 }
 
@@ -106,7 +109,9 @@ void SessionImpl::clear(Sequence& s) noexcept {
     try {
         release_residency(member(s).residency);
         s.capture.reset();
-        for (auto& history : s.histories) history.reset();
+        for (auto& history : s.histories) {
+            history.reset();
+        }
         auto& states = directory.states();
         if (s.write_destination.valid()) {
             states.abort_write(s.continuation.image, s.write_destination);

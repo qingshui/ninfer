@@ -18,7 +18,9 @@ ExecutionWork ExecutionTypes::describe_work(const Work& work) {
                               : op.kind == ForwardKind::Control ? ExecutionKind::Control
                                                                 : ExecutionKind::Decode;
                 result.rows = op.rows.size();
-                for (const auto& row : op.rows) result.input_tokens += row.ids.size();
+                for (const auto& row : op.rows) {
+                    result.input_tokens += row.ids.size();
+                }
                 result.scheduled_positions = result.input_tokens;
             } else if constexpr (std::is_same_v<T, ScoreWork>) {
                 result.kind         = ExecutionKind::Score;
@@ -42,9 +44,10 @@ void member(const runtime::ExecutionMember& value, std::uint32_t lanes) {
 }
 
 void tokens(std::span<const TokenId> values, std::uint32_t vocabulary) {
-    for (auto value : values)
+    for (auto value : values) {
         if (value < 0 || static_cast<std::uint32_t>(value) >= vocabulary)
             throw std::invalid_argument("Spark2_5 token is outside its vocabulary");
+    }
 }
 } // namespace
 
@@ -141,9 +144,10 @@ void WorkContract::validate(const Work& work, runtime::FrameKind kind) const {
                 const auto count = rows.front().ids.size();
                 if (operation.kind != ForwardKind::Control && count > shape.prefill_chunk)
                     throw std::invalid_argument("Spark2_5 forward window exceeds its frame");
-                for (const auto& row : rows)
+                for (const auto& row : rows) {
                     if (row.ids.size() != count)
                         throw std::invalid_argument("Spark2_5 forward rows have different lengths");
+                }
                 const bool sampling = operation.sample != SampleKind::None;
                 switch (operation.kind) {
                 case ForwardKind::Prefill:
@@ -222,9 +226,10 @@ void validate_decision_rows(const runtime::DecisionInput& input, std::uint32_t s
                 "Spark2_5 decision mask shape or membership is inconsistent");
         seen[row.member] = true;
     }
-    for (std::size_t i = 0; i < positions.size(); ++i)
+    for (std::size_t i = 0; i < positions.size(); ++i) {
         if (bool(positions[i]) != seen[i])
             throw std::invalid_argument("Spark2_5 decision omitted a member");
+    }
 }
 
 void WorkContract::validate(const Work& work, const runtime::DecisionRequest& request,
@@ -239,9 +244,10 @@ void WorkContract::validate(const Work& work, const runtime::DecisionRequest& re
             throw std::invalid_argument("Spark2_5 decision request has an unexpected member");
         positions[row.member] = 1;
     }
-    for (std::size_t i = 0; i < rows.size(); ++i)
+    for (std::size_t i = 0; i < rows.size(); ++i) {
         if (rows[i].constrained != bool(positions[i]))
             throw std::invalid_argument("incomplete Spark2_5 decision request");
+    }
     validate_decision_rows(input, request.stage, public_tokens, {positions.data(), rows.size()});
 }
 
@@ -289,11 +295,13 @@ void WorkContract::validate_commit(const Work& work, std::span<const RowResult> 
                 (row.cancelled ? (!row.terminal || row.accepted != 0) : row.accepted != processed))
                 throw std::invalid_argument("invalid Spark2_5 processed-input commit");
         }
-        for (const auto& [rank, offsets] : row.states)
-            for (std::size_t i = 0; i < rows.size(); ++i)
+        for (const auto& [rank, offsets] : row.states) {
+            for (std::size_t i = 0; i < rows.size(); ++i) {
                 if (i != b && (offsets.destination == commit.rows[i].states.at(rank).destination ||
                                offsets.destination == rows[i].states.at(rank).source))
                     throw std::invalid_argument("Spark2_5 commit rows have overlapping writes");
+            }
+        }
     }
 }
 

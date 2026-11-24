@@ -31,8 +31,9 @@ void TextRun::stem(std::optional<models::vision::EmbeddingView> visual) {
     ops::embedding(batch_.ids.view({batch_.tokens * batch_.batch}), p.embedding, roots_.input,
                    cuda_);
     if (visual)
-        for (const auto& slice : visual->slices)
+        for (const auto& slice : visual->slices) {
             ops::scatter(slice.features, slice.columns, roots_.input, cuda_);
+        }
     ops::hc_expand_norm(roots_.input, p.layers.front().attention_hc.norm,
                         parameters_.profile->config.text.norm_epsilon, roots_.residual,
                         roots_.normalized, cuda_);

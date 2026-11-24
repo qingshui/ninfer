@@ -220,17 +220,19 @@ std::size_t VisionContext::encode(const VisionEncoderBatch& input, Tensor& outpu
         input.position_indices.size() != 4ULL * patches ||
         input.position_weights.size() != 4ULL * patches)
         throw std::invalid_argument("Vision encoder positions do not cover its patches");
-    for (std::size_t i = 1; i < input.cu_seqlens.size(); ++i)
+    for (std::size_t i = 1; i < input.cu_seqlens.size(); ++i) {
         if (input.cu_seqlens[i] <= input.cu_seqlens[i - 1])
             throw std::invalid_argument("Vision encoder segments are not strictly ordered");
+    }
     if (output.dtype != DType::BF16 || output.ne[0] != parameters_.merger_fc2.weight.n ||
         output.ne[1] != tokens || output.ne[2] != 1 || output.ne[3] != 1 ||
         !output.is_contiguous() || !output.data || output.device != execution_.device())
         throw std::invalid_argument("Vision output must be contiguous device BF16 [H,F]");
     const auto segment_length = input.cu_seqlens[1];
     bool equal_segments       = true;
-    for (std::size_t i = 2; i < input.cu_seqlens.size(); ++i)
+    for (std::size_t i = 2; i < input.cu_seqlens.size(); ++i) {
         equal_segments &= input.cu_seqlens[i] - input.cu_seqlens[i - 1] == segment_length;
+    }
     const auto output_begin  = reinterpret_cast<std::uintptr_t>(output.data);
     const auto backing_begin = reinterpret_cast<std::uintptr_t>(backing.data);
     if (output_begin < backing_begin + backing.bytes &&

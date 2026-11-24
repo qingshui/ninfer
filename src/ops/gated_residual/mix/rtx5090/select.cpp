@@ -69,8 +69,9 @@ std::span<const Route> routes(Kind kind) {
 
 Plan select_plan(Kind kind, std::int32_t columns) {
     validate_interval(columns, columns);
-    for (const auto& route : routes(kind))
+    for (const auto& route : routes(kind)) {
         if (columns >= route.first && columns <= route.last) return route.plan;
+    }
     throw std::logic_error("hc_mix: missing production route");
 }
 

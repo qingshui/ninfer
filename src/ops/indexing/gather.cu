@@ -10,9 +10,10 @@ __global__ void gather_rows_kernel(const Word* source, const int* rows, Word* ou
                                    std::int64_t elements) {
     const int b = blockIdx.y, row = rows[b];
     for (std::int64_t i = blockIdx.x * blockDim.x + threadIdx.x; i < elements;
-         i += gridDim.x * blockDim.x)
+         i += gridDim.x * blockDim.x) {
         out[std::int64_t(b) * elements + i] =
             row < 0 ? Word{} : source[std::int64_t(row) * elements + i];
+    }
 }
 
 __global__ void gather_field_kernel(const std::uint16_t* source, const std::int64_t* offsets,
@@ -21,8 +22,9 @@ __global__ void gather_field_kernel(const std::uint16_t* source, const std::int6
     const bool live   = active[b] > 0;
     const auto offset = live ? offsets[b] / sizeof(std::uint16_t) : 0;
     for (std::int64_t d = blockIdx.x * blockDim.x + threadIdx.x; d < features;
-         d += gridDim.x * blockDim.x)
+         d += gridDim.x * blockDim.x) {
         out[std::int64_t(b) * features + d] = live ? source[offset + d] : 0;
+    }
 }
 } // namespace
 

@@ -29,7 +29,9 @@ std::int64_t elements(const Tensor& tensor, bool positive, const char* op) {
 }
 
 void same_shape(const Tensor& x, const Tensor& other, const char* op) {
-    for (int d = 0; d < 4; ++d) require(x.ne[d] == other.ne[d], op, "tensor shapes must match");
+    for (int d = 0; d < 4; ++d) {
+        require(x.ne[d] == other.ne[d], op, "tensor shapes must match");
+    }
 }
 } // namespace
 

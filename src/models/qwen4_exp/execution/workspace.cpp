@@ -84,7 +84,9 @@ std::size_t body(const ModelProfile& p, const EngineOptions& options, int first,
     if (mtp)
         layer(p.mtp->layer);
     else
-        for (const auto& block : p.text.layers) layer(block);
+        for (const auto& block : p.text.layers) {
+            layer(block);
+        }
     scratch(ops::hc_mix_workspace_capacity_bytes(mtp ? p.mtp->final_hc : p.text.final_hc, minimum,
                                                  columns));
     if (!mtp && !prefill && options.purpose == EnginePurpose::Generation)

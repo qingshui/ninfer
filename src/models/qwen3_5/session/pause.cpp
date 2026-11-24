@@ -121,9 +121,10 @@ std::vector<PauseOption> SessionImpl::pause_options(SequenceHandle handle) const
 
     // The State images reserved for checkpoints of a window no flight carries yet are optional
     // storage a pause can return.
-    for (const auto& flight : control.reserved_checkpoints)
+    for (const auto& flight : control.reserved_checkpoints) {
         if (flight.image.valid() && state_store->can_release(flight.image))
             optional_storage.merge(directory.state_release(flight.image));
+    }
 
     std::vector<PauseOption> result;
     if (can_snapshot) {
@@ -166,8 +167,9 @@ std::vector<PauseOption> SessionImpl::pause_options(SequenceHandle handle) const
         replay.released.merge(directory.state_release(image));
     const auto collect = [&](const context::HistoryDirectory& histories,
                              context::HistoryId history) {
-        for (const auto page : histories.released_pages(history))
+        for (const auto page : histories.released_pages(history)) {
             replay.released.merge(directory.page_release(page));
+        }
         const auto released = histories.released_histories(history);
         replay.released.histories.insert(replay.released.histories.end(), released.begin(),
                                          released.end());

@@ -18,8 +18,9 @@ void EngineCore<Instance>::commit_pending(PendingBatch&& pending, ComputeFlight 
                                                             : flight.batch_rows.size();
     const bool decode_flight = flight.kind == FlightKind::Decode;
     const std::size_t row_count = batch_rows;
-    for (const auto& request : flight.requests)
+    for (const auto& request : flight.requests) {
         request->pending_execution = pending.execution_sample();
+    }
     if (row_count == 0 || row_count != pending.row_count() || pending.row_stride() == 0 ||
         (!pending.row_counts().empty() && pending.row_counts().size() != row_count) ||
         pending.tokens().size() < static_cast<std::size_t>(pending.row_stride()) * row_count) {
@@ -503,7 +504,9 @@ template <class Instance>
         flight.prefill_members = 1;
     }
     admit_compute(std::move(flight));
-    for (const auto lane : lanes) reserved_units_[lane].reset();
+    for (const auto lane : lanes) {
+        reserved_units_[lane].reset();
+    }
     return true;
 }
 
@@ -542,7 +545,9 @@ template <class Instance>
     call.finish();
     if (!ticket) return false;
     flight.ticket = *ticket;
-    for (const auto lane : flight.lanes) reserved_units_[lane].reset();
+    for (const auto lane : flight.lanes) {
+        reserved_units_[lane].reset();
+    }
     admit_compute(std::move(flight));
     return true;
 }
@@ -632,7 +637,9 @@ EngineCore<Instance>::start_mixed(std::span<const std::uint32_t> prefill_lanes,
         fill_produces(segments);
         flight.ticket = started->ticket;
         admit_compute(std::move(flight));
-        for (const auto lane : lanes) reserved_units_[lane].reset();
+        for (const auto lane : lanes) {
+            reserved_units_[lane].reset();
+        }
         return 0U;
     }
     // The membership is the admitted prefill prefix followed by the admitted decode prefix. The
@@ -663,7 +670,9 @@ EngineCore<Instance>::start_mixed(std::span<const std::uint32_t> prefill_lanes,
                                flight.lanes.end());
     flight.ticket = started->ticket;
     admit_compute(std::move(flight));
-    for (const auto lane : lanes) reserved_units_[lane].reset();
+    for (const auto lane : lanes) {
+        reserved_units_[lane].reset();
+    }
     return rows;
 }
 
@@ -1015,9 +1024,10 @@ template <class Instance>
 const typename EngineCore<Instance>::ComputeFlight*
 EngineCore<Instance>::oldest_compute() const noexcept {
     const ComputeFlight* oldest = nullptr;
-    for (const auto& flight : compute_)
+    for (const auto& flight : compute_) {
         if (flight && (oldest == nullptr || flight->ticket.id < oldest->ticket.id))
             oldest = &*flight;
+    }
     return oldest;
 }
 
@@ -1042,8 +1052,9 @@ template <class Instance>
 void EngineCore<Instance>::record_service(ComputeFlight& flight) noexcept {
     if (!flight.retired_ns || flight.service_accounted) return;
     if (flight.kind == FlightKind::Replay) {
-        for (const auto& request : flight.requests)
+        for (const auto& request : flight.requests) {
             scheduler_.recovery_work(request->id, *flight.retired_ns);
+        }
         flight.service_accounted = true;
         return;
     }
@@ -1110,7 +1121,9 @@ void EngineCore<Instance>::fail_all(std::exception_ptr error) noexcept {
         if (flight && flight->kind == FlightKind::Control) discard_control_preview(*flight);
         flight.reset();
     }
-    for (auto& flight : retiring_) flight.reset();
+    for (auto& flight : retiring_) {
+        flight.reset();
+    }
     {
         std::lock_guard lock(queue_mutex_);
         groups_.clear();

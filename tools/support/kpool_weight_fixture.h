@@ -31,12 +31,14 @@ struct EncodedWeight {
             throw std::invalid_argument("Kpool encoded weight fixture size");
         const bool mx        = format == QType::MXFP8;
         const int group_rows = mx ? 1 : 128, group_columns = mx ? 32 : 128;
-        for (int r = 0; r < rows; r += group_rows)
+        for (int r = 0; r < rows; r += group_rows) {
             for (int k = 0; k < columns; k += group_columns) {
                 float maximum = 0;
-                for (int dr = 0; dr < group_rows; ++dr)
-                    for (int dk = 0; dk < group_columns; ++dk)
+                for (int dr = 0; dr < group_rows; ++dr) {
+                    for (int dk = 0; dk < group_columns; ++dk) {
                         maximum = std::max(maximum, std::abs(values[(r + dr) * columns + k + dk]));
+                    }
+                }
                 float multiplier  = maximum ? maximum / 448.F : 1.F;
                 const auto offset = weight_scale_offset(geometry, r, k / group_columns);
                 if (mx) {
@@ -50,13 +52,15 @@ struct EncodedWeight {
                     multiplier   = std::ldexp(1.F, exponent);
                 } else
                     std::memcpy(host.data() + offset, &multiplier, sizeof(multiplier));
-                for (int dr = 0; dr < group_rows; ++dr)
+                for (int dr = 0; dr < group_rows; ++dr) {
                     for (int dk = 0; dk < group_columns; ++dk) {
                         const auto index = std::size_t(r + dr) * columns + k + dk;
                         host[index] = std::byte(__nv_cvt_float_to_fp8(values[index] / multiplier,
                                                                       __NV_SATFINITE, __NV_E4M3));
                     }
+                }
             }
+        }
         storage.copy_from_host(host.data(), host.size());
         const WeightParent parent{
             geometry, device, static_cast<const std::byte*>(storage.data()), {}};

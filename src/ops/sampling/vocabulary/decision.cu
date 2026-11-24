@@ -80,8 +80,9 @@ __global__ void accept_kernel(const unsigned long long* keys, int cap, int draft
                 if (col == extent || draft != s.ids[0]) terminal = s.ids[0];
             } else if (col < extent) {
                 float probability = 0;
-                for (int j = 0; j < s.size; ++j)
+                for (int j = 0; j < s.size; ++j) {
                     if (s.ids[j] == draft) probability = s.probabilities[j];
+                }
                 const float u = sampling_uniform(cfg.seed, old_length + col + 1,
                                                  kSamplePurposeSpeculativeAccept, 0);
                 if (!(u < probability))
@@ -118,11 +119,13 @@ void check_outputs(std::initializer_list<Tensor*> outputs,
                    int batch, const char* op) {
     for (auto current = outputs.begin(); current != outputs.end(); ++current) {
         const auto range = operand::range(**current, op);
-        for (const auto* input : inputs)
+        for (const auto* input : inputs) {
             operand::disjoint(range, operand::strided_range(*input, op), op);
+        }
         operand::disjoint(range, operand::range(configs, sizeof(SamplingConfig) * batch, op), op);
-        for (auto earlier = outputs.begin(); earlier != current; ++earlier)
+        for (auto earlier = outputs.begin(); earlier != current; ++earlier) {
             operand::disjoint(range, operand::range(**earlier, op), op);
+        }
     }
 }
 } // namespace

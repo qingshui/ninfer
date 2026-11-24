@@ -132,8 +132,9 @@ WorkerBootstrap read_worker_bootstrap() {
         if (::prctl(PR_SET_PDEATHSIG, SIGKILL)) check(errno, "bind worker to launcher lifetime");
         if (launcher <= 1 || ::getppid() != launcher) ::raise(SIGKILL);
     }
-    for (const auto& [key, value] : out.environment)
+    for (const auto& [key, value] : out.environment) {
         if (::setenv(key.c_str(), value.c_str(), 1)) check(errno, "set worker environment");
+    }
     const auto short_name = "ninfer-rank" + std::to_string(out.identity.rank);
     if (::prctl(PR_SET_NAME, short_name.c_str(), 0, 0, 0)) check(errno, "worker thread name");
     return out;
@@ -170,7 +171,9 @@ WorkerProcess::WorkerProcess(const DeploymentNode& node, WorkerBootstrap bootstr
              name == "NINFER_CUDA_SYNC"))
             bootstrap.environment.emplace(name, assignment.substr(equal + 1));
     }
-    for (const auto& [key, value] : node.environment) bootstrap.environment[key] = value;
+    for (const auto& [key, value] : node.environment) {
+        bootstrap.environment[key] = value;
+    }
     int input[2], output[2];
     if (::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, input))
         check(errno, "bootstrap socketpair");
@@ -191,7 +194,9 @@ WorkerProcess::WorkerProcess(const DeploymentNode& node, WorkerBootstrap bootstr
     } else {
         executable          = "ssh";
         std::string command = "exec -a " + quote(title) + " " + quote(node.worker.string());
-        for (const auto& argument : extra) command += " " + quote(argument);
+        for (const auto& argument : extra) {
+            command += " " + quote(argument);
+        }
         arguments = {"ssh",
                      "-T",
                      "-o",
@@ -204,7 +209,9 @@ WorkerProcess::WorkerProcess(const DeploymentNode& node, WorkerBootstrap bootstr
                      "/bin/bash -c " + quote(command)};
     }
     std::vector<char*> argv;
-    for (auto& argument : arguments) argv.push_back(argument.data());
+    for (auto& argument : arguments) {
+        argv.push_back(argument.data());
+    }
     argv.push_back(nullptr);
     SpawnActions actions;
     check(posix_spawn_file_actions_adddup2(&actions.value, child_input.fd(), STDIN_FILENO),

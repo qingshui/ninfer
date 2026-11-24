@@ -38,11 +38,12 @@ void RankProgramImpl::request_decision(ComputeOperation& operation) {
         member.member = row;
         if (operation.speculative) {
             const auto count = resources.frame().host_ingress->extents[row];
-            for (int step = 0; step < count; ++step)
+            for (int step = 0; step < count; ++step) {
                 member.drafts.push_back(
                     drafts[backend == SpeculativeBackend::Mtp
                                ? step * resources.frame().spec.batch_capacity + row
                                : row * draft_window + step]);
+            }
         }
         request.rows.push_back(std::move(member));
     }
@@ -306,8 +307,9 @@ void RankProgramImpl::publish_result(ComputeOperation& operation) {
         if (operation.mixed) {
             // Every segment completed in the one traversal; none samples.
             ForwardResult prefill;
-            for (const auto& segment : operation.segments)
+            for (const auto& segment : operation.segments) {
                 prefill.processed_tokens.push_back(segment.tokens);
+            }
             result.output = MixedResult{std::move(prefill), std::move(value)};
         } else if (forward) {
             auto info      = std::get<ForwardResult>(std::move(operation.result->output));

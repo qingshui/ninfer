@@ -45,7 +45,9 @@ __device__ double error(double x, double s, unsigned mask) {
     const double delta = x - code_value<NF4>(code) * s;
     double sum         = delta * delta;
 #pragma unroll
-    for (int offset = 8; offset; offset /= 2) sum += __shfl_xor_sync(mask, sum, offset, 16);
+    for (int offset = 8; offset; offset /= 2) {
+        sum += __shfl_xor_sync(mask, sum, offset, 16);
+    }
     return __shfl_sync(mask, sum, 0, 16);
 }
 
@@ -73,8 +75,9 @@ __device__ float error_lower_bound(float x_low, float x_high, float scale, unsig
     }
     float sum = __fmul_rd(distance, distance);
 #pragma unroll
-    for (int offset = 8; offset; offset /= 2)
+    for (int offset = 8; offset; offset /= 2) {
         sum = __fadd_rd(sum, __shfl_xor_sync(mask, sum, offset, 16));
+    }
     return __shfl_sync(mask, sum, 0, 16);
 }
 
@@ -98,8 +101,9 @@ __global__ void encode(const float* values, unsigned char* codes, unsigned char*
     const double x      = double(values[index]) * divisor;
     double maximum      = fabs(x);
 #pragma unroll
-    for (int offset = 8; offset; offset /= 2)
+    for (int offset = 8; offset; offset /= 2) {
         maximum = fmax(maximum, __shfl_xor_sync(mask, maximum, offset, 16));
+    }
     int best_word = 0, code = NF4 ? 7 : 0;
     if (maximum != 0.) {
         const double limit  = NF4 ? 1. : 6.;

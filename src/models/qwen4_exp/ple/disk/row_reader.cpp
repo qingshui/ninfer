@@ -36,14 +36,17 @@ public:
 
     template <class Match>
     std::uint32_t find(std::uint64_t hash, Match match) const {
-        for (auto p = hash & mask(); slots_[p] != none; p = (p + 1) & mask())
+        for (auto p = hash & mask(); slots_[p] != none; p = (p + 1) & mask()) {
             if (match(slots_[p])) return slots_[p];
+        }
         return none;
     }
 
     void insert(std::uint64_t hash, std::uint32_t value) {
         auto p = hash & mask();
-        while (slots_[p] != none) p = (p + 1) & mask();
+        while (slots_[p] != none) {
+            p = (p + 1) & mask();
+        }
         slots_[p] = value;
     }
 
@@ -186,15 +189,18 @@ struct RowReader::Impl {
           inflight(layout.depth, none), ready_rows(layout.rows), row_index(layout.rows),
           page_index(layout.fragments), cache(layout.cache_sets), segments(layout.segments),
           completions(layout.depth) {
-        for (auto& owner : owners) owner.targets.reserve(owner_rows);
+        for (auto& owner : owners) {
+            owner.targets.reserve(owner_rows);
+        }
         free_rows.resize(rows.size());
         free_pages.resize(pages.size());
         std::iota(free_rows.rbegin(), free_rows.rend(), 0);
         std::iota(free_pages.rbegin(), free_pages.rend(), 0);
         slab = HostBuffer(std::size_t(layout.depth) * read_bytes, layout.alignment);
         buffers.reserve(layout.depth);
-        for (std::uint32_t i = 0; i < layout.depth; ++i)
+        for (std::uint32_t i = 0; i < layout.depth; ++i) {
             buffers.push_back(slab.span().subspan(std::size_t(i) * read_bytes, read_bytes));
+        }
         queue = std::make_unique<io::DirectReadQueue>(table.files(), buffers, layout.depth);
     }
 
@@ -246,23 +252,26 @@ struct RowReader::Impl {
     }
 
     bool wanted(std::uint32_t page) const {
-        for (auto f = pages[page].head; f != none; f = fragments[f].next)
+        for (auto f = pages[page].head; f != none; f = fragments[f].next) {
             if (rows[fragments[f].row].active) return true;
+        }
         return false;
     }
 
     const CacheEntry* cached(std::uint32_t row) const {
         if (cache.empty()) return nullptr;
-        for (const auto& entry : cache[mix(row) % cache.size()].ways)
+        for (const auto& entry : cache[mix(row) % cache.size()].ways) {
             if (entry.row == row) return &entry;
+        }
         return nullptr;
     }
 
     void cache_row(const Row& row) {
         if (cache.empty()) return;
         auto& set = cache[mix(row.id) % cache.size()];
-        for (auto& entry : set.ways)
+        for (auto& entry : set.ways) {
             if (entry.row == row.id) return;
+        }
         auto& entry = set.ways[set.next++ % set.ways.size()];
         entry.row   = row.id;
         entry.bytes = row.bytes;
@@ -366,8 +375,9 @@ struct RowReader::Impl {
             if (skipped == 256) break;
         }
         queue->submit();
-        for (std::size_t budget = 0; ready_begin != ready_end && budget < 128; ++budget)
+        for (std::size_t budget = 0; ready_begin != ready_end && budget < 128; ++budget) {
             decode(ready_rows[ready_begin++ % ready_rows.size()]);
+        }
     }
 };
 

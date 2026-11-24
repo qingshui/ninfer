@@ -11,11 +11,13 @@ namespace {
 
 std::vector<ExpertBankCacheSpec> bank_specs(const ModelDefinition& source) {
     std::vector<ExpertBankCacheSpec> out;
-    for (const auto& bank : source.expert_banks())
+    for (const auto& bank : source.expert_banks()) {
         out.push_back({bank.gate_up.layout, bank.down.layout, true});
-    for (const auto& layer : source.weights().text.layers)
+    }
+    for (const auto& layer : source.weights().text.layers) {
         if (const auto* parameters = std::get_if<MoeWeights>(&layer.ffn))
             out[parameters->bank.index].resident = false;
+    }
     return out;
 }
 

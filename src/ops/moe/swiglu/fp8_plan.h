@@ -139,8 +139,9 @@ inline std::span<const ScaledFp8Plan> scaled_fp8_plans(const SwiGLUProfile& prof
 
 inline ScaledFp8Plan select_scaled_fp8(const SwiGLUProfile& profile, int tokens,
                                        bool routed_join = false) {
-    for (const auto& plan : scaled_fp8_plans(profile, routed_join))
+    for (const auto& plan : scaled_fp8_plans(profile, routed_join)) {
         if (tokens <= plan.last_token) return plan;
+    }
     throw std::invalid_argument("scaled FP8 FFN token count exceeds int range");
 }
 
@@ -200,10 +201,12 @@ inline std::size_t scaled_fp8_workspace_capacity_bytes(const SwiGLUProfile& prof
                                                        int last) {
     auto result = std::max(scaled_fp8_workspace_bytes(profile, first),
                            scaled_fp8_workspace_bytes(profile, last));
-    for (bool joined : {false, true})
-        for (const auto& plan : scaled_fp8_plans(profile, joined))
+    for (bool joined : {false, true}) {
+        for (const auto& plan : scaled_fp8_plans(profile, joined)) {
             if (first <= plan.last_token && last >= plan.last_token)
                 result = std::max(result, scaled_fp8_workspace_bytes(profile, plan.last_token));
+        }
+    }
     return result;
 }
 

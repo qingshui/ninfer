@@ -125,8 +125,9 @@ void RankProgramImpl::progress_compute(std::uint32_t frame) {
                 // Every segment completed in the one traversal; the producing segments sample one
                 // decision row each, the rest only report.
                 auto& result = std::get<ForwardResult>(operation.result->output);
-                for (const auto& segment : operation.segments)
+                for (const auto& segment : operation.segments) {
                     result.processed_tokens.push_back(segment.tokens);
+                }
                 operation.forward_row    = static_cast<std::uint32_t>(operation.rows.size());
                 operation.forward_offset = 0;
                 const auto* forward = std::get_if<ForwardWork>(&operation.request.work.operation);
@@ -218,8 +219,9 @@ void RankProgramImpl::publish_continuation_hidden(ComputeOperation& operation) {
                                    cudaMemcpyDeviceToDevice, device.stream()));
     };
     if (operation.packed || operation.mixed) {
-        for (const auto& segment : operation.segments)
+        for (const auto& segment : operation.segments) {
             publish(segment.token_offset + segment.tokens - 1, segment.destination_offset);
+        }
     } else {
         publish(operation.width - 1,
                 operation.rows[operation.forward_row].state_offsets.destination);

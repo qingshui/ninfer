@@ -51,21 +51,25 @@ struct PhysicalReclaim {
         : inventory(std::make_shared<ReleaseInventory<ContextReleaseSet>>(checkpoints.size())) {
         const auto& states = directory.states();
         std::vector<bool> eligible(checkpoints.size());
-        for (const auto h : allowed)
+        for (const auto h : allowed) {
             if (checkpoints.erasable(h)) eligible[h.index] = true;
-        for (const auto h : excluded)
+        }
+        for (const auto h : excluded) {
             if (checkpoints.valid(h)) eligible[h.index] = false;
-        for (std::uint32_t i = 0; i < checkpoints.size(); ++i)
+        }
+        for (std::uint32_t i = 0; i < checkpoints.size(); ++i) {
             if (checkpoints.valid(checkpoints.handle(i))) inventory->include(checkpoints.handle(i));
+        }
 
         std::map<std::vector<std::uint32_t>, Group> cohorts;
         const auto permitted = [&](const auto& holders) {
             return std::all_of(holders.begin(), holders.end(), [&](auto i) { return eligible[i]; });
         };
-        for (std::uint32_t i = 0; i < eligible.size(); ++i)
+        for (std::uint32_t i = 0; i < eligible.size(); ++i) {
             if (eligible[i])
                 cohorts[std::vector{i}].released.catalog.push_back(
                     checkpoints.retirement(checkpoints.handle(i)));
+        }
 
         {
             struct Image {
@@ -146,19 +150,21 @@ struct PhysicalReclaim {
             for (const auto& history : histories_by_id) {
                 if (history.holders.empty()) continue;
                 std::vector<std::uint32_t> boundaries{0};
-                for (const auto i : history.holders)
+                for (const auto i : history.holders) {
                     boundaries.push_back(kv_pages_for_frontier(
                         checkpoints[i].value->snapshot.prefix(pool).frontier()));
+                }
                 std::sort(boundaries.begin(), boundaries.end());
                 boundaries.erase(std::unique(boundaries.begin(), boundaries.end()),
                                  boundaries.end());
                 for (std::size_t interval = 1; interval < boundaries.size(); ++interval) {
                     const auto begin = boundaries[interval - 1], end = boundaries[interval];
                     std::vector<std::uint32_t> holders;
-                    for (const auto i : history.holders)
+                    for (const auto i : history.holders) {
                         if (kv_pages_for_frontier(
                                 checkpoints[i].value->snapshot.prefix(pool).frontier()) > begin)
                             holders.push_back(i);
+                    }
                     const auto last_owner = holders.back();
                     const auto set        = static_cast<std::uint32_t>(holder_sets.size());
                     holder_sets.push_back(std::move(holders));
@@ -207,10 +213,13 @@ struct PhysicalReclaim {
         }
         for (auto& [indices, group] : cohorts) {
             group.released.normalize();
-            for (const auto i : indices) group.sources.push_back(checkpoints.handle(i));
-            for (auto& pages : group.pages)
+            for (const auto i : indices) {
+                group.sources.push_back(checkpoints.handle(i));
+            }
+            for (auto& pages : group.pages) {
                 std::sort(pages.begin(), pages.end(),
                           [](const auto& a, const auto& b) { return a.position > b.position; });
+            }
             if (group.pages.size() < pools.size()) group.pages.resize(pools.size());
             inventory->add(group.sources, group.released);
             groups.push_back(std::move(group));

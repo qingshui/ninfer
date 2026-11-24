@@ -10,7 +10,9 @@ using Json = nlohmann::ordered_json;
 
 std::string escape(std::string_view key) {
     std::string result;
-    for (char c : key) result += c == '~' ? "~0" : c == '/' ? "~1" : std::string(1, c);
+    for (char c : key) {
+        result += c == '~' ? "~0" : c == '/' ? "~1" : std::string(1, c);
+    }
     return result;
 }
 
@@ -99,8 +101,9 @@ private:
 
     std::string pointer() const {
         std::string path;
-        for (const auto& frame : stack_)
+        for (const auto& frame : stack_) {
             path += '/' + (frame.array ? std::to_string(frame.index) : escape(frame.key));
+        }
         return path;
     }
 
@@ -135,29 +138,33 @@ std::optional<std::string> find(const Json& node, const std::string& path,
     }
     if (literal) {
         if (node.is_structured())
-            for (const auto& [key, value] : node.items())
+            for (const auto& [key, value] : node.items()) {
                 if (auto found = find(value, path + '/' + escape(key), inexact, true)) return found;
+            }
         return {};
     }
     if (!node.is_object()) return {};
     for (const char* key :
-         {"minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "const", "enum"})
+         {"minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "const", "enum"}) {
         if (node.contains(key))
             if (auto found = find(node[key], path + '/' + key, inexact, true)) return found;
+    }
     for (const char* key :
          {"properties", "$defs", "definitions", "anyOf", "oneOf", "allOf", "prefixItems"}) {
         if (!node.contains(key) || !node[key].is_structured()) continue;
-        for (const auto& [index, child] : node[key].items())
+        for (const auto& [index, child] : node[key].items()) {
             if (auto found = find(child, path + '/' + key + '/' + escape(index), inexact))
                 return found;
+        }
     }
     for (const char* key : {"items", "additionalItems", "additionalProperties"}) {
         if (!node.contains(key)) continue;
         if (node[key].is_array()) {
-            for (std::size_t i = 0; i < node[key].size(); ++i)
+            for (std::size_t i = 0; i < node[key].size(); ++i) {
                 if (auto found =
                         find(node[key][i], path + '/' + key + '/' + std::to_string(i), inexact))
                     return found;
+            }
         } else if (auto found = find(node[key], path + '/' + key, inexact))
             return found;
     }

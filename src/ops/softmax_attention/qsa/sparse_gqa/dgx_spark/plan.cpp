@@ -35,7 +35,9 @@ SparseGqaPlan select_sparse_gqa_plan(KvCacheStorage storage, int tokens, int bat
     const auto target         = std::max<std::int64_t>(
         1, (std::int64_t(sms) * 3 / (2 * partition_heads) + queries - 1) / queries);
     int splits = 1;
-    while (splits < target && splits < (partition_heads == 1 ? 64 : 32)) splits *= 2;
+    while (splits < target && splits < (partition_heads == 1 ? 64 : 32)) {
+        splits *= 2;
+    }
     const bool simt = (visible <= 8 && queries <= 16) || (visible <= 64 && queries == 1);
     if (simt) splits = std::max(1, splits / 12);
     // A 16-key output tile admits four CTAs per SM. Fill those slots when a large
@@ -80,7 +82,9 @@ SparseGqaLaunchPlan select_sparse_gqa_launch(const ConstPagedKVBatchLayerView& c
         const int partition_heads =
             partition_head_groups(cache.storage, cache.num_kv_heads, queries);
         const int target = std::max(1, 2 * sms / (partition_heads * queries));
-        while (splits * 2 <= target && splits < (partition_heads == 1 ? 64 : 32)) splits *= 2;
+        while (splits * 2 <= target && splits < (partition_heads == 1 ? 64 : 32)) {
+            splits *= 2;
+        }
         return {staged, true, std::min(splits, plan.splits), SparseGqaKernel::Columns32Wide};
     }
     const auto blocks = std::int64_t(queries) * cache.num_kv_heads * plan.splits;

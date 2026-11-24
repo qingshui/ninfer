@@ -61,8 +61,9 @@ FrameLayout plan_frame(LayoutBuilder& b, const execution::ModelProfile& p,
                                   256};
     if (p.mtp) {
         auto& m = out.mtp.emplace();
-        for (std::uint32_t i = 0; i < s.draft_tokens; ++i)
+        for (std::uint32_t i = 0; i < s.draft_tokens; ++i) {
             m.draft_steps.push_back(metadata(batch, false));
+        }
         m.extents    = rows();
         m.skip_first = rows();
     }
@@ -71,7 +72,9 @@ FrameLayout plan_frame(LayoutBuilder& b, const execution::ModelProfile& p,
     };
     local_batch(out.decode, width * batch, local.main_tables);
     if (out.mtp)
-        for (auto& step : out.mtp->draft_steps) local_batch(step, batch, local.mtp_tables);
+        for (auto& step : out.mtp->draft_steps) {
+            local_batch(step, batch, local.mtp_tables);
+        }
     if (s.purpose == EnginePurpose::Generation)
         out.sampling =
             tensor(DType::I32, {sizeof(ops::SamplingConfig) / sizeof(std::int32_t), batch},
@@ -120,8 +123,9 @@ FrameLayout plan_frame(LayoutBuilder& b, const execution::ModelProfile& p,
             m.target_tokens = tensor(DType::I32, {width, batch}, "target tokens");
         }
         m.selection    = ops::plan_kpool_block_selection(b, batch);
-        for (auto& offsets : m.tail_offsets)
+        for (auto& offsets : m.tail_offsets) {
             offsets = tensor(DType::I64, {batch}, "frame tail offsets");
+        }
         const int tail = ops::kKpoolPoolSize - 1, slots = dimension(m.tail_offsets.size());
         m.tail_keys  = tensor(DType::BF16, {index, tail, batch, slots}, "MTP raw key tails");
         m.tail_gates = tensor(DType::BF16, {index, tail, batch, slots}, "MTP raw gate tails");

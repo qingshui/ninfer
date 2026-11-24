@@ -68,8 +68,9 @@ public:
             if ((!values.empty() || !std::is_same_v<Value, Resources>) &&
                 values.size() != inventory.objects_.size())
                 throw std::logic_error("release measures do not match their inventory");
-            for (std::size_t i = 0; i < remaining_.size(); ++i)
+            for (std::size_t i = 0; i < remaining_.size(); ++i) {
                 remaining_[i] = inventory.objects_[i].holders.size();
+            }
         }
 
         class Probe {
@@ -78,7 +79,9 @@ public:
                 : selection_(&selection), size_(selection.handles_.size()),
                   freed_(selection.freed_.size()) {
                 ++selection.inventory_->work_.probes;
-                for (const auto handle : additions) selection.add(handle);
+                for (const auto handle : additions) {
+                    selection.add(handle);
+                }
             }
 
             Probe(const Probe&)            = delete;

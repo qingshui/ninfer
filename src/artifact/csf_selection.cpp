@@ -291,9 +291,10 @@ EncodedTensor select_csf_tensor(const Reader& reader, std::span<const std::uint6
                 count_blocks(matrix, csf32_block_index(g, local, first_column),
                              csf32_block_index(g, end - 32, last_column) + 1);
             } else {
-                for (auto column = first_column; column <= last_column; column += 2)
+                for (auto column = first_column; column <= last_column; column += 2) {
                     count_blocks(matrix, csf32_block_index(g, local, column),
                                  csf32_block_index(g, end - 32, column) + 1);
+                }
             }
             row += end - local;
         }

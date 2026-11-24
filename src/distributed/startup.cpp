@@ -86,10 +86,13 @@ struct StartupReporter::State {
     wire::Bytes encode_snapshot() const {
         wire::Encoder out;
         std::uint32_t count = 0;
-        for (const auto& phase : phases) count += phase.has_value();
+        for (const auto& phase : phases) {
+            count += phase.has_value();
+        }
         out.u32(count);
-        for (const auto& phase : phases)
+        for (const auto& phase : phases) {
             if (phase) encode(out, *phase);
+        }
         return std::move(out).take();
     }
 
@@ -159,10 +162,11 @@ std::optional<StartupEvent> StartupReporter::failure_context() const noexcept {
     std::lock_guard lock(state_->mutex);
     if (state_->failure) return state_->failure;
     std::optional<StartupEvent> result;
-    for (const auto& phase : state_->phases)
+    for (const auto& phase : state_->phases) {
         if (phase && !terminal(phase->status) &&
             (!result || phase->invocation > result->invocation))
             result = phase;
+    }
     return result;
 }
 

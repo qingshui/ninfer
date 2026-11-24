@@ -6,12 +6,16 @@ namespace wire = distributed::wire;
 
 void integers(wire::Encoder& out, std::span<const std::int32_t> values) {
     out.u64(values.size());
-    for (auto value : values) out.i32(value);
+    for (auto value : values) {
+        out.i32(value);
+    }
 }
 
 std::vector<std::int32_t> integers(wire::Decoder& in) {
     std::vector<std::int32_t> values(in.count(4));
-    for (auto& value : values) value = in.i32();
+    for (auto& value : values) {
+        value = in.i32();
+    }
     return values;
 }
 } // namespace
@@ -99,9 +103,10 @@ std::optional<std::uint64_t> ExecutionCodec::receive_input(wire::Kind kind,
     if (kind != wire::Kind::InputEnd) throw std::invalid_argument("unknown Vision input action");
     in.finish();
     auto& input = *receiving_->input;
-    for (auto part : receiver_.finish(id))
+    for (auto part : receiver_.finish(id)) {
         input.batches.at(rank_).patches.emplace_back(static_cast<const std::uint16_t*>(part.data),
                                                      part.bytes / sizeof(std::uint16_t));
+    }
     inputs_.install({std::move(receiving_->window), std::move(receiving_->input)});
     receiving_.reset();
     return id;

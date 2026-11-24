@@ -116,13 +116,15 @@ struct PrefixExecutionTracker {
             bool content_end = false;
             if (!format->content_open.empty()) {
                 const auto& open = format->content_open;
-                while (content_matched && byte != open[content_matched])
+                while (content_matched && byte != open[content_matched]) {
                     content_matched = format->content_failure[content_matched - 1];
+                }
                 if (byte == open[content_matched]) ++content_matched;
                 content_end = content_matched == open.size();
             }
-            while (matched && byte != boundary[matched])
+            while (matched && byte != boundary[matched]) {
                 matched = format->boundary_failure[matched - 1];
+            }
             if (byte == boundary[matched]) ++matched;
             if (matched != boundary.size() && !content_end) continue;
             tracking = false;
@@ -426,7 +428,9 @@ ReasoningFormat::ReasoningFormat(std::string close_, std::string execution_bound
       strip_content_leading(strip_content_leading_) {
     const auto build_failure = [](std::string_view marker, std::vector<std::size_t>& failure) {
         for (std::size_t i = 1, matched = 0; i < marker.size(); ++i) {
-            while (matched && marker[i] != marker[matched]) matched = failure[matched - 1];
+            while (matched && marker[i] != marker[matched]) {
+                matched = failure[matched - 1];
+            }
             if (marker[i] == marker[matched]) ++matched;
             failure[i] = matched;
         }

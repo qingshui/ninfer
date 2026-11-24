@@ -49,8 +49,9 @@ struct Nvfp4A16Dispatch {
         int
         column_tile(int load) const {
         if (load <= vector_limit) return vector_limit;
-        for (int i = 0; i < 5; ++i)
+        for (int i = 0; i < 5; ++i) {
             if (columns[i] && load <= maximum_load[i]) return columns[i];
+        }
         return 0;
     }
 #if defined(__CUDACC__)

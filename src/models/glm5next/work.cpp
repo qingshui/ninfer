@@ -24,8 +24,9 @@ void member(const runtime::ExecutionMember& m, std::uint32_t lanes) {
 }
 
 void tokens(std::span<const TokenId> values, std::uint32_t vocabulary) {
-    for (const auto token : values)
+    for (const auto token : values) {
         require(token >= 0 && std::uint32_t(token) < vocabulary, "token outside vocabulary");
+    }
 }
 } // namespace
 
@@ -41,8 +42,9 @@ BatchPlan plan_batch(std::span<const WorkRow> rows, std::uint32_t ranks) {
     BatchPlan result;
     for (std::uint32_t rank = 0; rank < ranks; ++rank) {
         const auto begin = static_cast<std::uint32_t>(result.members.size());
-        for (std::uint32_t row = 0; row < rows.size(); ++row)
+        for (std::uint32_t row = 0; row < rows.size(); ++row) {
             if (rows[row].attention_rank == rank) result.members.push_back(row);
+        }
         result.owners.push_back({begin, static_cast<std::uint32_t>(result.members.size()) - begin});
     }
     require(result.members.size() == rows.size(), "attention owner outside rank group");
@@ -66,11 +68,15 @@ ExecutionWork ExecutionTypes::describe_work(const Work& work) {
         out.kind = ExecutionKind::Score;
     const auto rows = work_rows(work);
     out.rows        = rows.size();
-    for (const auto& row : rows) out.input_tokens += row.ids.size();
+    for (const auto& row : rows) {
+        out.input_tokens += row.ids.size();
+    }
     out.scheduled_positions = out.input_tokens;
     if (const auto* m = std::get_if<MtpWork>(&work.operation)) {
         out.kind = ExecutionKind::Decode;
-        for (auto n : m->draft_extents) out.scheduled_positions += n;
+        for (auto n : m->draft_extents) {
+            out.scheduled_positions += n;
+        }
     }
     return out;
 }
@@ -196,7 +202,9 @@ void WorkContract::validate(const Work& work, runtime::FrameKind kind) const {
                         use.plan->consume_end <= shape.max_context,
                     "Vision window exceeds prepared capacity");
         }
-        for (const auto& r : rows) require(r.ids.size() == n, "unequal forward widths");
+        for (const auto& r : rows) {
+            require(r.ids.size() == n, "unequal forward widths");
+        }
         require(f->kind == ForwardKind::Control || n <= shape.prefill_chunk,
                 "window exceeds frame");
         switch (f->kind) {
@@ -271,9 +279,10 @@ void WorkContract::validate(const Work& work, const runtime::DecisionRequest& re
                 "decision mask extent");
         seen[r.member] = true;
     }
-    for (std::size_t i = 0; i < rows.size(); ++i)
+    for (std::size_t i = 0; i < rows.size(); ++i) {
         require(rows[i].constrained == requested[i] && requested[i] == seen[i],
                 "missing decision member");
+    }
 }
 
 void WorkContract::validate(const Work& work, const Result& result, const Commit& commit) const {

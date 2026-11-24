@@ -98,10 +98,11 @@ ExecutionRow SessionImpl::execution_row(const SequenceState& state) const {
     if (row.main_frontier) {
         const auto p       = row.main_frontier - 1;
         const auto& prompt = *requests[state.lane].base->prompt;
-        for (int axis = 0; axis < 3; ++axis)
+        for (int axis = 0; axis < 3; ++axis) {
             row.tail_rope_position[axis] = p < prompt.token_ids.size()
                                                ? prompt.position_axis(axis)[p]
                                                : static_cast<std::int32_t>(p) + row.rope_delta;
+        }
     }
     return row;
 }
@@ -115,15 +116,18 @@ InputWindow SessionImpl::input_window(const SequenceState& state, std::uint32_t 
     out.rope_positions.resize(3ULL * (end - begin));
     const auto& request = requests[state.lane];
     const auto& prompt  = *request.base->prompt;
-    for (int axis = 0; axis < 3; ++axis)
-        for (auto p = begin; p < end; ++p)
+    for (int axis = 0; axis < 3; ++axis) {
+        for (auto p = begin; p < end; ++p) {
             out.rope_positions[axis * (end - begin) + p - begin] =
                 p < prompt.token_ids.size()
                     ? prompt.position_axis(axis)[p]
                     : static_cast<std::int32_t>(p) + state.continuation.metadata.rope_delta;
+        }
+    }
     out.prompt_begin = begin;
-    for (const auto split : window_splits(state, begin, end))
+    for (const auto split : window_splits(state, begin, end)) {
         out.execution_splits.push_back(split - begin);
+    }
     return out;
 }
 
@@ -249,8 +253,9 @@ std::vector<ForkGroupResult> SessionImpl::fork_batch(std::span<const ForkGroupRe
         }
     }
     std::vector<ForkGroupResult> results(groups.size());
-    for (std::size_t g = 0; g < groups.size(); ++g)
+    for (std::size_t g = 0; g < groups.size(); ++g) {
         results[g] = fork_group(groups[g], parent_lanes[g]);
+    }
     return results;
 }
 
@@ -273,9 +278,10 @@ ForkGroupResult SessionImpl::fork_group(const ForkGroupRequest& group, std::uint
         return result;
     }
     // A child cannot install its residency while a release of its lane is still on its way.
-    for (const auto child : children)
+    for (const auto child : children) {
         if (lane_releasing_[child.value])
             return {.assessment = {.status = context::ContextAvailability::Waiting}};
+    }
 
     // A branch decodes one token past the frontier on its own tail; later growth reserves its
     // pages when the engine admits the decode unit.
@@ -434,7 +440,9 @@ void SessionImpl::submit_releases() {
     context.releases = releases;
     release_result   = false;
     releasing_ticket_lanes_.clear();
-    for (const auto& residency : releases) releasing_ticket_lanes_.push_back(residency.lane.value);
+    for (const auto& residency : releases) {
+        releasing_ticket_lanes_.push_back(residency.lane.value);
+    }
     release_ticket =
         executor().submit(std::move(*reservation), Work{.operation = std::move(context)});
     releases.clear();

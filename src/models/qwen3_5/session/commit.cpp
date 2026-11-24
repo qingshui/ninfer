@@ -20,8 +20,9 @@ PendingBatch SessionImpl::generated_pending(const Execution& current,
     PendingBatch out;
     out.ticket_ = current.ticket;
     out.members_.reserve(batch);
-    for (const auto member : current.pending_members)
+    for (const auto member : current.pending_members) {
         out.members_.push_back(current.members[member]);
+    }
     out.tokens_    = generated.tokens;
     out.stride_    = generated.row_stride;
     out.execution_ = current.observed_result;
@@ -44,8 +45,9 @@ const SessionImpl::Execution*
 SessionImpl::matching_execution(const PendingBatch& pending) const noexcept {
     const auto* current = find_execution(pending.ticket_);
     if (!current || current->pending_members.size() != pending.members_.size()) return nullptr;
-    for (std::size_t b = 0; b < pending.members_.size(); ++b)
+    for (std::size_t b = 0; b < pending.members_.size(); ++b) {
         if (current->members[current->pending_members[b]] != pending.members_[b]) return nullptr;
+    }
     return current;
 }
 
@@ -103,7 +105,9 @@ void SessionImpl::receive_result(runtime::ResultReady<ExecutionTypes>&& event) {
             throw std::logic_error("decode result has the wrong execution kind");
         current.generated.emplace(std::move(*generated));
         current.pending_members.resize(current.members.size());
-        for (std::size_t b = 0; b < current.members.size(); ++b) current.pending_members[b] = b;
+        for (std::size_t b = 0; b < current.members.size(); ++b) {
+            current.pending_members[b] = b;
+        }
         auto pending = generated_pending(current, *current.generated);
         events.push_back({current.ticket, current.members, std::move(pending)});
         return;
@@ -132,10 +136,12 @@ void SessionImpl::receive_result(runtime::ResultReady<ExecutionTypes>&& event) {
         current.generated.emplace(std::move(mixed->decode));
         // The batch carries the decode rows first, then the final segments in segment order.
         current.pending_members.clear();
-        for (std::size_t b = first; b < current.members.size(); ++b)
+        for (std::size_t b = first; b < current.members.size(); ++b) {
             current.pending_members.push_back(static_cast<std::uint32_t>(b));
-        for (std::size_t b = 0; b < first; ++b)
+        }
+        for (std::size_t b = 0; b < first; ++b) {
             if (current.producing[b]) current.pending_members.push_back(static_cast<std::uint32_t>(b));
+        }
         progress.decode = generated_pending(current, *current.generated);
         events.push_back({current.ticket, current.members, std::move(progress)});
         return;
@@ -144,10 +150,11 @@ void SessionImpl::receive_result(runtime::ResultReady<ExecutionTypes>&& event) {
 
         if (forward->processed_tokens != current.columns)
             throw std::logic_error("forward result changed its reserved input window");
-        for (std::size_t b = 0; b < current.members.size(); ++b)
+        for (std::size_t b = 0; b < current.members.size(); ++b) {
             current.completed.push_back(forward_metadata(current.bases[b].metadata,
                                                          current.columns[b], speculative_backend,
                                                          has_backend_pool()));
+        }
         if (current.kind == OperationKind::Prefill) {
             PrefillProgress progress;
             progress.rows.reserve(current.members.size());
@@ -400,9 +407,13 @@ CommitResult SessionImpl::commit(PendingBatch&& pending,
             else
                 ++stats.fallback_steps;
             stats.drafted_tokens += drafted;
-            for (std::uint32_t i = 0; i < drafted; ++i) ++stats.attempted_per_position[i];
+            for (std::uint32_t i = 0; i < drafted; ++i) {
+                ++stats.attempted_per_position[i];
+            }
             stats.accepted_tokens += accepted;
-            for (std::uint32_t j = 0; j < accepted; ++j) ++stats.accepted_per_position[j];
+            for (std::uint32_t j = 0; j < accepted; ++j) {
+                ++stats.accepted_per_position[j];
+            }
         }
         auto& row               = result.rows[b];
         row.disposition         = d.cancelled  ? runtime::CommitDisposition::CancelledReleased
@@ -474,11 +485,12 @@ void SessionImpl::retire(runtime::DeviceRetired event) {
         release_result = false;
         // A lane whose release left may install a new residency, unless another release of it is
         // already queued.
-        for (const auto released : releasing_ticket_lanes_)
+        for (const auto released : releasing_ticket_lanes_) {
             if (std::none_of(releases.begin(), releases.end(), [&](const auto& pending) {
                     return pending.lane.value == released;
                 }))
                 lane_releasing_[released] = 0;
+        }
         releasing_ticket_lanes_.clear();
         if (after_releases && releases.empty()) {
             events.push_back(std::move(*after_releases));
@@ -509,7 +521,9 @@ void SessionImpl::retire(runtime::DeviceRetired event) {
     }
     auto current = std::move(*owner);
     execution_slot(event.ticket.frame).reset();
-    for (const auto l : current.lanes) --lane_busy_[l];
+    for (const auto l : current.lanes) {
+        --lane_busy_[l];
+    }
     current.preparation->mark_completed();
     current.preparation->publish();
     if (current.settlement) {
@@ -539,11 +553,12 @@ void SessionImpl::retire(runtime::DeviceRetired event) {
     // The flight wrote its checkpoints' State images and its commit advanced the KV they retain;
     // a lane that this very retirement clears publishes nothing.
     std::vector<std::uint8_t> clearing(current.members.size(), 0);
-    for (std::size_t row = 0; row < current.pending_members.size(); ++row)
+    for (std::size_t row = 0; row < current.pending_members.size(); ++row) {
         if (current.discarded ||
             (!current.decisions.empty() &&
              (current.decisions[row].cancelled || current.decisions[row].failed)))
             clearing[current.pending_members[row]] = 1;
+    }
     publish_flight_checkpoints(current, clearing);
     if (current.kind != OperationKind::Normalize && current.kind != OperationKind::Score)
         events.push_back({current.ticket, current.members,

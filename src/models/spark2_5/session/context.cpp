@@ -59,8 +59,9 @@ ContextProgress detail::SessionImpl::complete_context() {
                     .target_frontier = tx->target,
                 };
             }
-            for (std::uint16_t pool = 0; pool < p.directory.pool_count(); ++pool)
+            for (std::uint16_t pool = 0; pool < p.directory.pool_count(); ++pool) {
                 s.histories[pool] = migration.binding(pool)->commit();
+            }
             using StateAction = detail::StateBindingAction;
             if (tx->state_action == StateAction::Move) {
                 const auto source    = *tx->source;

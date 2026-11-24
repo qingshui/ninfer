@@ -68,8 +68,9 @@ std::string format_configuration(const StartupConfigurationView& view) {
         out << "  file         " << format_pretty_text(view.config_path.string()) << '\n';
     std::string previous;
     std::size_t label_width = 28;
-    for (const auto& item : view.items)
+    for (const auto& item : view.items) {
         label_width = std::max(label_width, item.key.size() - item.key.find('.') + 1);
+    }
     for (const auto& item : view.items) {
         const auto dot   = item.key.find('.');
         const auto group = item.key.substr(0, dot);
@@ -84,8 +85,9 @@ std::string format_configuration(const StartupConfigurationView& view) {
         out << '\n';
         previous = group;
     }
-    for (const auto& [name, value] : view.environment)
+    for (const auto& [name, value] : view.environment) {
         out << "environment    " << name << " = " << format_pretty_text(value) << '\n';
+    }
     return out.str();
 }
 
@@ -115,11 +117,12 @@ std::string format_context_capacity(const EngineDescription& description) {
 
 void log_context_capacity(spdlog::logger& logger, const EngineDescription& description) {
     logger.info("{}", format_context_capacity(description));
-    for (const auto& pool : description.context_pools)
+    for (const auto& pool : description.context_pools) {
         logger.debug("context rank {} | {} {} | block {}", pool.rank,
                      pool.domain == ContextMemoryDomain::Device ? "device" : "host",
                      format_pretty_bytes(pool.capacity_bytes),
                      format_pretty_bytes(pool.block_bytes));
+    }
 }
 
 void log_resolved_configuration(spdlog::logger& logger, const EngineDescription& description) {

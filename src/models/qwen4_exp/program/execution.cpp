@@ -69,11 +69,12 @@ void RankProgramImpl::prepare_main_inputs(std::span<const WorkRow> rows, std::ui
             const auto offset = std::min<std::size_t>(j, valid - 1);
             if (frame.sequence) host(io.ids)[j + tokens * b] = row.ids[j];
             host(io.positions)[j + tokens * b] = row.main_frontier + offset;
-            for (int axis = 0; axis < 3; ++axis)
+            for (int axis = 0; axis < 3; ++axis) {
                 host(io.rope_positions)[j + tokens * (axis + 3 * b)] =
                     offset < row.ids.size() && !row.rope_positions.empty()
                         ? row.rope_positions[axis * row.ids.size() + offset]
                         : static_cast<std::int32_t>(row.main_frontier + offset) + row.rope_delta;
+            }
         }
         frame.visible =
             std::max(frame.visible, row.main_frontier + static_cast<std::uint32_t>(valid));
@@ -186,9 +187,13 @@ void RankProgramImpl::prepare_main() {
     f.attention.rows += batch;
     f.attention.scheduled_positions += std::uint64_t(f.tokens) * batch;
     if (f.verify)
-        for (auto extent : f.verify->extents) f.attention.valid_positions += extent + 1;
+        for (auto extent : f.verify->extents) {
+            f.attention.valid_positions += extent + 1;
+        }
     else
-        for (const auto& row : f.rows) f.attention.valid_positions += row.ids.size();
+        for (const auto& row : f.rows) {
+            f.attention.valid_positions += row.ids.size();
+        }
     if (device_graphs && !f.sequence) {
         const auto* forward    = std::get_if<ForwardWork>(&f.request.work.operation);
         const bool control     = forward && forward->sample == SampleKind::None;

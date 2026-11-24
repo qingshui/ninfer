@@ -9,7 +9,9 @@ public:
 
     LinearParameters linear(std::initializer_list<WeightId> ids) const {
         std::vector<ops::WeightInput> inputs;
-        for (const auto id : ids) inputs.push_back(model_.input(id));
+        for (const auto id : ids) {
+            inputs.push_back(model_.input(id));
+        }
         return ops::prepare_linear_weight(inputs);
     }
 
@@ -22,7 +24,9 @@ public:
 
     ops::ProjectionWeights projection(std::initializer_list<WeightId> ids) const {
         std::vector<ops::WeightInput> inputs;
-        for (const auto id : ids) inputs.push_back(model_.input(id));
+        for (const auto id : ids) {
+            inputs.push_back(model_.input(id));
+        }
         return ops::prepare_projection_weights(inputs);
     }
 
@@ -103,8 +107,9 @@ Parameters::Parameters(const ModelShard& model, std::shared_ptr<const ModelProfi
     text.embedding = native_weight(model.weight(w.text.embedding).view);
     text.head      = p.linear({w.text.head});
     text.final_hc  = p.final_hc(w.text.final_hc);
-    for (std::size_t i = 0; i < w.text.layers.size(); ++i)
+    for (std::size_t i = 0; i < w.text.layers.size(); ++i) {
         text.layers.push_back(p.block(w.text.layers[i], this->profile->text.layers.at(i), false));
+    }
     const auto& ple = w.text.ple;
     text.ple        = {p.linear({ple.key, ple.value}),
                        {p.hc_norm(ple.norm_key), p.hc_norm(ple.norm_query), p.hc_norm(ple.norm_conv),

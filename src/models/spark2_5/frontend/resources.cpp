@@ -34,9 +34,10 @@ void parse_resources(FrontendResources& resources, std::uint32_t embedding_rows)
         throw artifact::ArtifactError(std::string("invalid generation defaults: ") + error.what());
     }
     for (const float value : {sampling.temperature, sampling.top_p, sampling.min_p,
-                              sampling.presence_penalty, sampling.frequency_penalty})
+                              sampling.presence_penalty, sampling.frequency_penalty}) {
         if (!std::isfinite(value))
             throw artifact::ArtifactError("generation defaults must fit finite float values");
+    }
     resources.sampling = sampling;
 }
 

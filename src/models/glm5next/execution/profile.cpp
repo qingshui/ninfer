@@ -65,13 +65,17 @@ public:
 
     ops::LinearProfile linear(std::initializer_list<WeightId> ids) const {
         std::vector<ops::WeightInput> inputs;
-        for (const auto id : ids) inputs.push_back(weight_input(weights_, id));
+        for (const auto id : ids) {
+            inputs.push_back(weight_input(weights_, id));
+        }
         return ops::describe_linear_weight(inputs);
     }
 
     ops::ProjectionProfile projection(std::initializer_list<WeightId> ids) const {
         std::vector<ops::WeightInput> inputs;
-        for (const auto id : ids) inputs.push_back(weight_input(weights_, id));
+        for (const auto id : ids) {
+            inputs.push_back(weight_input(weights_, id));
+        }
         return ops::describe_projection_weights(inputs);
     }
 
@@ -157,10 +161,11 @@ public:
         VisionProfile out{linear({w.patch_embedding}),   linear({w.downsample}),
                           linear({w.merger_projection}), linear({w.merger.gate, w.merger.up}),
                           linear({w.merger.down}),       {}};
-        for (const auto& layer : w.layers)
+        for (const auto& layer : w.layers) {
             out.layers.push_back({linear({layer.query, layer.key, layer.value}),
                                   linear({layer.output}), linear({layer.mlp.gate, layer.mlp.up}),
                                   linear({layer.mlp.down})});
+        }
         return out;
     }
 private:
@@ -195,7 +200,9 @@ std::shared_ptr<const ModelProfile> describe_model(const ModelDefinition& defini
                                 c.mhc.epsilon,  c.mhc.epsilon,
                                 2.0F,           dimension(c.mhc.sinkhorn_iterations)};
     out->text.head           = d.linear({w.text.head});
-    for (const auto& layer : w.text.layers) out->text.layers.push_back(d.block(layer));
+    for (const auto& layer : w.text.layers) {
+        out->text.layers.push_back(d.block(layer));
+    }
     if (w.mtp) {
         const auto& m = *w.mtp;
         out->mtp      = {d.linear({m.fc}), d.linear({m.head}), d.mla(m.attention), d.moe(m.moe)};

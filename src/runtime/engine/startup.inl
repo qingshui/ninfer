@@ -141,8 +141,9 @@ prepare_program(const Setup& setup, RankModelInstance<typename Setup::Types>& in
         auto probe_options          = options;
         probe_options.prefill_chunk = startup.chunk;
         const auto key              = setup.graph_plan(probe_options, startup.preparation);
-        for (auto& measured_plan : measured)
+        for (auto& measured_plan : measured) {
             if (measured_plan.plan == key) measured_plan.memory.rebuild_estimate_bytes = reserve;
+        }
         const auto explicit_cost =
             explicit_bytes +
             (ready->shared_physical_memory ? startup.capacity.control_reservation_bytes : 0);
@@ -197,10 +198,11 @@ BuiltModel<typename Setup::Types> build_local_model(const artifact::Reader& read
     std::unique_ptr<artifact::Reader> rank_reader;
     if (options.deployment && options.deployment->ranks.size() == 1) {
         const auto& node = options.deployment->nodes.front();
-        for (const auto& [key, value] : node.environment)
+        for (const auto& [key, value] : node.environment) {
             if (::setenv(key.c_str(), value.c_str(), 1))
                 throw std::system_error(errno, std::generic_category(),
                                         "set local rank environment");
+        }
         rank_reader = std::make_unique<artifact::Reader>(node.artifact);
     }
     Setup setup(reader, rank_reader ? *rank_reader : reader, options, Device::cuda(options.device));

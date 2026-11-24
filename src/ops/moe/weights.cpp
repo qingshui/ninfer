@@ -36,9 +36,10 @@ void ExpertInputUsage::include(const WeightInput& input) {
     if (calibration.operation != ActivationScaleOperation::Divide &&
         calibration.operation != ActivationScaleOperation::Multiply)
         throw std::invalid_argument("expert activation scale operation is invalid");
-    for (const auto value : calibration.values())
+    for (const auto value : calibration.values()) {
         if (!std::isfinite(value) || value <= 0)
             throw std::invalid_argument("expert activation scale must be finite and positive");
+    }
     if (calibration_.empty()) {
         calibration_ = calibration;
         return;
@@ -49,9 +50,10 @@ void ExpertInputUsage::include(const WeightInput& input) {
         unequal_calibrations_ = true;
         return;
     }
-    for (std::size_t i = 0; i < std::max(a.size(), b.size()); ++i)
+    for (std::size_t i = 0; i < std::max(a.size(), b.size()); ++i) {
         unequal_calibrations_ |= std::bit_cast<std::uint32_t>(a[a.size() == 1 ? 0 : i]) !=
                                  std::bit_cast<std::uint32_t>(b[b.size() == 1 ? 0 : i]);
+    }
     if (b.size() > a.size()) calibration_ = calibration;
 }
 

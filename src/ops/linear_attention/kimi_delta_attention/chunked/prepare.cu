@@ -176,7 +176,9 @@ __global__ __launch_bounds__(256, 2) void prepare_kernel(Arguments args,
         workspace + static_cast<std::int64_t>(head) * chunk_count(args.tokens) + chunk);
     const auto* src = reinterpret_cast<const uint4*>(&sm.packet);
 #pragma unroll
-    for (int i = tid; i < static_cast<int>(sizeof(Chunk) / 16); i += 256) dst[i] = src[i];
+    for (int i = tid; i < static_cast<int>(sizeof(Chunk) / 16); i += 256) {
+        dst[i] = src[i];
+    }
 }
 
 } // namespace

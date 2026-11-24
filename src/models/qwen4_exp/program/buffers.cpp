@@ -59,8 +59,9 @@ BufferLayout plan_buffers(LayoutBuilder& b, const Config& c, const EngineOptions
         auto& mtp      = out.mtp.emplace();
         mtp.extents    = rows();
         mtp.skip_first = rows();
-        for (int step = 0; step < width - 1; ++step)
+        for (int step = 0; step < width - 1; ++step) {
             mtp.draft_steps.push_back(metadata(batch, {}, false));
+        }
         last_ingress = mtp.draft_steps.back().record_offsets;
     }
     out.ingress = {

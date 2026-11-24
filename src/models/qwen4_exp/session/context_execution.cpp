@@ -59,8 +59,9 @@ ResidencyBinding SessionImpl::context_binding(BindOperation& operation) {
             definition->options().mtp() ? std::optional<std::uint32_t>{0} : std::nullopt};
     }
     while (sequence.next_capture < sequence.captures.size() &&
-           sequence.captures[sequence.next_capture].frontier <= operation.frontier)
+           sequence.captures[sequence.next_capture].frontier <= operation.frontier) {
         ++sequence.next_capture;
+    }
 
     const auto generated = std::span<const TokenId>(sequence.identity.tokens)
                                .subspan(sequence.request->summary.prompt_tokens);

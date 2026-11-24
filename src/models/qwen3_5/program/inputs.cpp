@@ -140,11 +140,12 @@ void RankProgramImpl::initialize_forward(ComputeOperation& operation, const Forw
         operation.packed   = work.purpose == ForwardPurpose::Prefill && work.rows.size() > 1;
         if (operation.packed) {
             // The decision rows of a packed prefill are its producing segments, in segment order.
-            for (std::size_t i = 0; i < work.rows.size(); ++i)
+            for (std::size_t i = 0; i < work.rows.size(); ++i) {
                 if (work.sampling[i].produces_token) {
                     operation.sampling.push_back(work.sampling[i]);
                     operation.sample_members.push_back(static_cast<std::uint32_t>(i));
                 }
+            }
         } else {
             operation.sampling = work.sampling;
             if (work.sample != SamplePurpose::None) operation.sample_members.assign(1, 0);
@@ -171,17 +172,19 @@ void RankProgramImpl::initialize_forward(ComputeOperation& operation, const Forw
         row.backend_frontier = backend == SpeculativeBackend::Mtp ? row.main_frontier - 1
                                : resources.dflash                 ? row.main_frontier
                                                                   : 0;
-        for (int axis = 0; axis < 3; ++axis)
+        for (int axis = 0; axis < 3; ++axis) {
             row.tail_rope_position[axis] = window.rope_positions[axis * columns + offset - 1];
+        }
     }
     operation.width        = end - offset;
     operation.row_finished = false;
     // A checkpoint at the end of this sub-window copies the State it publishes.
     operation.checkpoints.clear();
-    for (const auto& checkpoint : window.checkpoints)
+    for (const auto& checkpoint : window.checkpoints) {
         if (checkpoint.column == end)
             operation.checkpoints.push_back(
                 {row.state_offsets.destination, checkpoint.state_offset, 0, true});
+    }
     auto& frame = resources.frame();
     // Rows execute one after another as a B=1 window in compact row 0. Only the operation's first
     // window starts from a clean ingress; later windows rebind every field they use (row binding,
@@ -192,8 +195,9 @@ void RankProgramImpl::initialize_forward(ComputeOperation& operation, const Forw
     if (work.sample != SamplePurpose::None)
         frame.host_ingress->sampling[0] = sampling_config(row, work.sampling[index], index);
     frame.host_ingress->sampling_positions[0] += operation.width;
-    for (int axis = 0; axis < 3; ++axis)
+    for (int axis = 0; axis < 3; ++axis) {
         frame.host_ingress->previous_rope[axis] = row.tail_rope_position[axis];
+    }
     upload_ingress();
     operation.input_embeddings.reset();
     if (!operation.width) return;
@@ -201,12 +205,14 @@ void RankProgramImpl::initialize_forward(ComputeOperation& operation, const Forw
     std::copy_n(window.tokens.begin() + offset, operation.width,
                 static_cast<TokenId*>(host.ids.data));
     auto* positions = static_cast<std::int32_t*>(host.cache_positions.data);
-    for (std::uint32_t i = 0; i < operation.width; ++i)
+    for (std::uint32_t i = 0; i < operation.width; ++i) {
         positions[i] = static_cast<std::int32_t>(row.main_frontier + i);
+    }
     auto* rope = static_cast<std::int32_t*>(host.rope_positions.data);
-    for (int axis = 0; axis < 3; ++axis)
+    for (int axis = 0; axis < 3; ++axis) {
         std::copy_n(window.rope_positions.begin() + axis * columns + offset, operation.width,
                     rope + axis * operation.width);
+    }
     upload_input(operation.width, 1);
     const auto prompt_begin = window.prompt_begin + offset;
     if (window.visual) {
@@ -270,8 +276,9 @@ void RankProgramImpl::initialize_packed_forward(ComputeOperation& operation,
         const auto columns = static_cast<std::uint32_t>(work.inputs[i].tokens.size());
         bind_row(*frame.host_ingress, i, row);
         frame.host_ingress->valid_columns[i] = static_cast<std::int32_t>(columns);
-        for (int axis = 0; axis < 3; ++axis)
+        for (int axis = 0; axis < 3; ++axis) {
             frame.host_ingress->previous_rope[axis * count + i] = row.tail_rope_position[axis];
+        }
         operation.segments.push_back({i, total, columns, row.state_offsets.source,
                                       row.state_offsets.destination,
                                       static_cast<std::uint32_t>(row.main_frontier + columns)});
@@ -297,11 +304,13 @@ void RankProgramImpl::initialize_packed_forward(ComputeOperation& operation,
         const auto& window = work.inputs[segment.row];
         const auto& row    = work.rows[segment.row];
         std::copy(window.tokens.begin(), window.tokens.end(), ids + segment.token_offset);
-        for (std::uint32_t i = 0; i < segment.tokens; ++i)
+        for (std::uint32_t i = 0; i < segment.tokens; ++i) {
             positions[segment.token_offset + i] = static_cast<std::int32_t>(row.main_frontier + i);
-        for (int axis = 0; axis < 3; ++axis)
+        }
+        for (int axis = 0; axis < 3; ++axis) {
             std::copy_n(window.rope_positions.begin() + axis * segment.tokens, segment.tokens,
                         rope + axis * total + segment.token_offset);
+        }
     }
     upload_input(total, 1);
 }
@@ -340,7 +349,9 @@ void RankProgramImpl::initialize_decode(ComputeOperation& operation, const Decod
     operation.batch     = static_cast<std::uint32_t>(work.rows.size());
     // Every decode row carries one decision row of its own.
     operation.sample_members.resize(operation.batch);
-    for (std::uint32_t i = 0; i < operation.batch; ++i) operation.sample_members[i] = i;
+    for (std::uint32_t i = 0; i < operation.batch; ++i) {
+        operation.sample_members[i] = i;
+    }
     for (std::size_t i = 0; i < work.rows.size(); ++i) {
         const auto& row = work.rows[i];
         operation.rows.push_back(row.binding);
@@ -366,16 +377,18 @@ void RankProgramImpl::initialize_decode(ComputeOperation& operation, const Decod
             const auto offset = row * operation.width + column;
             positions[offset] = static_cast<int>(work.rows[row].binding.main_frontier +
                                                  std::min(column, work.rows[row].draft_extent));
-            for (int axis = 0; axis < 3; ++axis)
+            for (int axis = 0; axis < 3; ++axis) {
                 rope[axis * columns + offset] =
                     positions[offset] + work.rows[row].binding.rope_delta;
+            }
         }
     }
     for (std::size_t row = 0; row < work.rows.size(); ++row) {
         frame.host_ingress->history_skip[row] = operation.speculative ? 1 : 0;
-        for (int axis = 0; axis < 3; ++axis)
+        for (int axis = 0; axis < 3; ++axis) {
             frame.host_ingress->previous_rope[axis * operation.batch + row] =
                 work.rows[row].binding.tail_rope_position[axis];
+        }
     }
     if (operation.speculative && backend == SpeculativeBackend::Mtp) prepare_mtp_draft(operation);
     // A graph replay uploads the ingress in its own prologue, so a captured target phase needs no
@@ -417,8 +430,9 @@ void RankProgramImpl::initialize_mixed(ComputeOperation& operation, const MixedW
         frame.host_ingress->budgets[i]                = static_cast<int>(row.output_tokens_remaining);
         frame.host_ingress->sampling[i]               = sampling_config(row.binding, row.sampling, i);
         frame.host_ingress->history_skip[i]           = operation.speculative ? 1 : 0;
-        for (int axis = 0; axis < 3; ++axis)
+        for (int axis = 0; axis < 3; ++axis) {
             frame.host_ingress->previous_rope[axis * rows + i] = row.binding.tail_rope_position[axis];
+        }
     }
     // Segment rows keep their own previous-RoPE block behind the decode rows' block.
     const auto previous_rope = [&](std::uint32_t segment, int axis) -> std::int32_t& {
@@ -434,7 +448,9 @@ void RankProgramImpl::initialize_mixed(ComputeOperation& operation, const MixedW
         operation.rows.push_back(row);
         bind_row(*frame.host_ingress, rows + i, row);
         frame.host_ingress->valid_columns[rows + i] = static_cast<std::int32_t>(columns);
-        for (int axis = 0; axis < 3; ++axis) previous_rope(i, axis) = row.tail_rope_position[axis];
+        for (int axis = 0; axis < 3; ++axis) {
+            previous_rope(i, axis) = row.tail_rope_position[axis];
+        }
         operation.segments.push_back({rows + i, total, columns, row.state_offsets.source,
                                       row.state_offsets.destination,
                                       static_cast<std::uint32_t>(row.main_frontier + columns)});
@@ -454,7 +470,9 @@ void RankProgramImpl::initialize_mixed(ComputeOperation& operation, const MixedW
     bind_segment_table(operation, work.prefill);
     // The decision rows are the decode rows followed by the producing segments, in row order.
     operation.sample_members.insert(operation.sample_members.begin(), rows, 0);
-    for (std::uint32_t row = 0; row < rows; ++row) operation.sample_members[row] = row;
+    for (std::uint32_t row = 0; row < rows; ++row) {
+        operation.sample_members[row] = row;
+    }
     operation.prefill_tokens = total;
     operation.axis_tokens    = total + operation.width * rows;
     operation.input_embeddings.reset();
@@ -466,11 +484,13 @@ void RankProgramImpl::initialize_mixed(ComputeOperation& operation, const MixedW
         const auto& window = work.prefill.inputs[segment.row - rows];
         const auto& row    = work.prefill.rows[segment.row - rows];
         std::copy(window.tokens.begin(), window.tokens.end(), ids + segment.token_offset);
-        for (std::uint32_t i = 0; i < segment.tokens; ++i)
+        for (std::uint32_t i = 0; i < segment.tokens; ++i) {
             positions[segment.token_offset + i] = static_cast<std::int32_t>(row.main_frontier + i);
-        for (int axis = 0; axis < 3; ++axis)
+        }
+        for (int axis = 0; axis < 3; ++axis) {
             std::copy_n(window.rope_positions.begin() + axis * segment.tokens, segment.tokens,
                         rope + axis * operation.axis_tokens + segment.token_offset);
+        }
     }
     // The verify block: ids are the anchors (speculative ids are written on the device after the
     // draft), positions clamp at each row's extent. The dense decode planes carry the same
@@ -541,9 +561,10 @@ void RankProgramImpl::validate_mixed(const MixedWork& work) const {
     if (prefill.sample != SamplePurpose::None &&
         (producing == 0 || producing > spec.batch_capacity))
         throw std::invalid_argument("Qwen3.5 sampled mixed execution has unsupported membership");
-    for (const auto& row : decode.rows)
+    for (const auto& row : decode.rows) {
         if (row.sampling.constrained)
             throw std::invalid_argument("Qwen3.5 mixed decode rows cannot be constrained");
+    }
     const auto width = backend == SpeculativeBackend::Mtp ? draft_window + 1ULL : 1ULL;
     if (boundaries > resources.frame().ingress_arrays.boundaries)
         throw std::invalid_argument("Qwen3.5 mixed execution exceeds its boundary capacity");
@@ -576,8 +597,9 @@ void RankProgramImpl::initialize_inputs(ComputeOperation& operation) {
         operation.batch               = static_cast<std::uint32_t>(work->rows.size());
         operation.width               = draft_window + 1;
         resources.frame().clear_host_ingress();
-        for (std::size_t i = 0; i < work->rows.size(); ++i)
+        for (std::size_t i = 0; i < work->rows.size(); ++i) {
             bind_row(*resources.frame().host_ingress, i, work->rows[i]);
+        }
         upload_ingress();
     }
 }

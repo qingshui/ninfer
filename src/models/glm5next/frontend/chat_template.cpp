@@ -14,8 +14,9 @@ using Json = nlohmann::ordered_json;
 Json template_parameters(const PromptOptions& options, const Json& tokens) {
     auto context = models::frontend::template_context(options.chat_template_kwargs_json, tokens);
     for (const char* key : {"enable_thinking", "preserve_thinking", "clear_thinking",
-                            "reasoning_effort", "add_vision_id"})
+                            "reasoning_effort", "add_vision_id"}) {
         if (context.contains(key) && context[key].is_null()) context.erase(key);
+    }
     if (options.enable_thinking)
         models::frontend::merge_template_option(context, "enable_thinking",
                                                 *options.enable_thinking);
@@ -30,9 +31,10 @@ Json template_parameters(const PromptOptions& options, const Json& tokens) {
     if (options.add_vision_id)
         models::frontend::merge_template_option(context, "add_vision_id", true);
     for (const char* key :
-         {"enable_thinking", "preserve_thinking", "clear_thinking", "add_vision_id"})
+         {"enable_thinking", "preserve_thinking", "clear_thinking", "add_vision_id"}) {
         if (context.contains(key) && !context[key].is_boolean())
             throw std::invalid_argument(std::string(key) + " must be a boolean");
+    }
 
     if (context.contains("reasoning_effort")) {
         const auto& effort = context["reasoning_effort"];
@@ -196,8 +198,9 @@ struct TemplateInput {
 std::size_t find_control(const text::TemplateOutput& output, std::string_view marker,
                          std::size_t begin = 0) {
     for (auto pos = output.text.find(marker, begin); pos != std::string::npos;
-         pos      = output.text.find(marker, pos + marker.size()))
+         pos      = output.text.find(marker, pos + marker.size())) {
         if (!text::overlaps(output.literal_spans, pos, pos + marker.size())) return pos;
+    }
     return std::string::npos;
 }
 
@@ -224,7 +227,9 @@ std::size_t final_assistant_body(const text::TemplateOutput& output) {
 void truncate(text::TemplateOutput& output, std::size_t end) {
     output.text.resize(end);
     std::erase_if(output.regions, [&](const auto& region) { return region.begin > end; });
-    for (auto& region : output.regions) region.end = std::min(region.end, end);
+    for (auto& region : output.regions) {
+        region.end = std::min(region.end, end);
+    }
     std::erase_if(output.literal_spans, [&](auto span) { return span.begin >= end; });
     if (!output.literal_spans.empty())
         output.literal_spans.back().end = std::min(output.literal_spans.back().end, end);
@@ -296,8 +301,9 @@ void locate_media(RenderedChat& result, const TemplateInput& input,
         const auto base = restored.text.size();
         restored.text.append(probe.text, begin, end - begin);
         while (literal_cursor < probe.literal_spans.size() &&
-               probe.literal_spans[literal_cursor].end <= begin)
+               probe.literal_spans[literal_cursor].end <= begin) {
             ++literal_cursor;
+        }
         for (auto i = literal_cursor;
              i < probe.literal_spans.size() && probe.literal_spans[i].begin < end; ++i) {
             const auto literal = probe.literal_spans[i];
@@ -329,8 +335,9 @@ RenderedChat render_input(const TemplateInput& input,
                           const models::frontend::ChatTemplate& compiled, bool continuation,
                           const PreparationControl& control) {
     std::vector<std::string> control_variables;
-    for (const auto& item : compiled.special_tokens.items())
+    for (const auto& item : compiled.special_tokens.items()) {
         control_variables.push_back(item.key());
+    }
     const text::TemplateRenderOptions execution{
         .checkpoint =
             [&] { models::frontend::check_preparation_control(control, "GLM chat template"); },
@@ -393,7 +400,9 @@ RenderedChat CompiledChatTemplate::render_impl(std::span<const ChatMessage> mess
     input.context["messages"]               = Json::array();
     input.context["add_generation_prompt"]  = !continuation;
     input.context["continue_final_message"] = continuation;
-    for (const auto& message : messages) input.append_message(message);
+    for (const auto& message : messages) {
+        input.append_message(message);
+    }
     input.context["tools"] = Json::array();
     for (const auto& source : options.tool_jsons) {
         auto tool = Json::parse(source);

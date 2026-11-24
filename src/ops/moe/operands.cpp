@@ -450,10 +450,11 @@ void MoeOperands::unscaled_shared(const SwiGLUWeights& weights, const SwiGLUProf
     auto prepared        = swiglu_profile(weights);
     prepared.clamp_limit = p.clamp_limit;
     require(prepared == p, "MoE: unscaled shared weights differ from profile");
-    for (const Weight* w : {&weights.gate_up.weight, &weights.down.weight})
+    for (const Weight* w : {&weights.gate_up.weight, &weights.down.weight}) {
         if (w->qtype == QType::BF16)
             require(w->group == 0 && w->group_size == 0 && w->high_plane_bytes == 0,
                     "MoE: invalid unscaled BF16 shared metadata");
+    }
     matrix(weights.gate_up.weight, 2 * p.intermediate, p.hidden, p.gate_up_type);
     matrix(weights.down.weight, p.hidden, p.intermediate, p.down_type);
 }

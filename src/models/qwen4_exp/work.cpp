@@ -18,12 +18,16 @@ ExecutionWork ExecutionTypes::describe_work(const Work& work) {
                               : op.kind == ForwardKind::Control ? ExecutionKind::Control
                                                                 : ExecutionKind::Decode;
                 result.rows = op.rows.size();
-                for (const auto& row : op.rows) result.input_tokens += row.ids.size();
+                for (const auto& row : op.rows) {
+                    result.input_tokens += row.ids.size();
+                }
                 result.scheduled_positions = result.input_tokens;
             } else if constexpr (std::is_same_v<T, MtpWork>) {
                 result.kind = ExecutionKind::Decode;
                 result.rows = result.input_tokens = op.rows.size();
-                for (const auto extent : op.draft_extents) result.scheduled_positions += extent + 1;
+                for (const auto extent : op.draft_extents) {
+                    result.scheduled_positions += extent + 1;
+                }
             } else if constexpr (std::is_same_v<T, ScoreWork>) {
                 result.kind         = ExecutionKind::Score;
                 result.rows         = 1;
@@ -46,9 +50,10 @@ void member(const runtime::ExecutionMember& value, std::uint32_t lanes) {
 }
 
 void tokens(std::span<const TokenId> values, std::uint32_t vocabulary) {
-    for (auto value : values)
+    for (auto value : values) {
         if (value < 0 || static_cast<std::uint32_t>(value) >= vocabulary)
             throw std::invalid_argument("Qwen4Exp token is outside its vocabulary");
+    }
 }
 } // namespace
 
@@ -138,12 +143,14 @@ void WorkContract::validate(const Work& work, runtime::FrameKind kind) const {
                 tokens(std::span<const TokenId>(row.ids).subspan(1), public_tokens);
             if (row.control_last_token) tokens({&*row.control_last_token, 1}, public_tokens);
             tokens(row.ple_raw_tail, vocabulary);
-            for (auto position : row.rope_positions)
+            for (auto position : row.rope_positions) {
                 if (position < 0) throw std::invalid_argument("negative Qwen4Exp RoPE position");
+            }
             if (mtp && row.main_frontier)
-                for (auto position : row.previous_rope)
+                for (auto position : row.previous_rope) {
                     if (position < 0)
                         throw std::invalid_argument("negative previous Qwen4Exp RoPE position");
+                }
             for (std::size_t i = 0; i < b; ++i) {
                 const auto& other = rows[i];
                 if (row.member.residency.lane == other.member.residency.lane ||
@@ -163,9 +170,10 @@ void WorkContract::validate(const Work& work, runtime::FrameKind kind) const {
                 const auto count = rows.front().ids.size();
                 if (operation.kind != ForwardKind::Control && count > shape.prefill_chunk)
                     throw std::invalid_argument("Qwen4Exp forward window exceeds its frame");
-                for (const auto& row : rows)
+                for (const auto& row : rows) {
                     if (row.ids.size() != count)
                         throw std::invalid_argument("Qwen4Exp forward rows have different lengths");
+                }
                 if (operation.visual) {
                     const auto& use = operation.visual->window;
                     if (!vision || rows.size() != 1 || !use.id || !use.plan ||
@@ -287,9 +295,10 @@ void validate_decision_rows(const runtime::DecisionInput& input, std::uint32_t s
                 "Qwen4Exp decision mask shape or membership is inconsistent");
         seen[row.member] = true;
     }
-    for (std::size_t i = 0; i < positions.size(); ++i)
+    for (std::size_t i = 0; i < positions.size(); ++i) {
         if (bool(positions[i]) != seen[i])
             throw std::invalid_argument("Qwen4Exp decision omitted a member");
+    }
 }
 
 void WorkContract::validate(const Work& work, const runtime::DecisionRequest& request,
@@ -303,9 +312,10 @@ void WorkContract::validate(const Work& work, const runtime::DecisionRequest& re
             throw std::invalid_argument("Qwen4Exp decision request has an unexpected member");
         positions[row.member] = row.drafts.size() + 1;
     }
-    for (std::size_t i = 0; i < rows.size(); ++i)
+    for (std::size_t i = 0; i < rows.size(); ++i) {
         if (rows[i].constrained != bool(positions[i]))
             throw std::invalid_argument("incomplete Qwen4Exp decision request");
+    }
     validate_decision_rows(input, request.stage, public_tokens, {positions.data(), rows.size()});
 }
 
@@ -356,11 +366,13 @@ void WorkContract::validate_commit(const Work& work, std::span<const RowResult> 
                 (row.cancelled ? (!row.terminal || row.accepted != 0) : row.accepted != processed))
                 throw std::invalid_argument("invalid Qwen4Exp processed-input commit");
         }
-        for (const auto& [rank, offsets] : row.states)
-            for (std::size_t i = 0; i < rows.size(); ++i)
+        for (const auto& [rank, offsets] : row.states) {
+            for (std::size_t i = 0; i < rows.size(); ++i) {
                 if (i != b && (offsets.destination == commit.rows[i].states.at(rank).destination ||
                                offsets.destination == rows[i].states.at(rank).source))
                     throw std::invalid_argument("Qwen4Exp commit rows have overlapping writes");
+            }
+        }
     }
 }
 

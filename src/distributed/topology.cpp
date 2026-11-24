@@ -40,9 +40,10 @@ void ExecutionTopology::validate(const DeploymentOptions& deployment) const {
             });
         if (actual.local_rank != static_cast<std::uint32_t>(local))
             throw std::invalid_argument("topology has an invalid local rank");
-        for (const auto coordinate : {actual.tp, actual.ep, actual.dp, actual.pp, actual.adp})
+        for (const auto coordinate : {actual.tp, actual.ep, actual.dp, actual.pp, actual.adp}) {
             if (!coordinate.size || coordinate.rank >= coordinate.size)
                 throw std::invalid_argument("invalid parallel coordinate");
+        }
         const auto& p = deployment.parallel;
         if (actual.tp.size != p.tp || actual.ep.size != p.ep || actual.dp.size != p.dp ||
             actual.pp.size != p.pp || actual.adp.size != p.adp)
@@ -55,16 +56,18 @@ void ExecutionTopology::validate(const DeploymentOptions& deployment) const {
         if (g.members.empty() || !ids.insert(g.id).second)
             throw std::invalid_argument("empty or duplicate communication group");
         std::set<RankId> members;
-        for (auto r : g.members)
+        for (auto r : g.members) {
             if (r >= ranks.size() || !members.insert(r).second)
                 throw std::invalid_argument("invalid communication group membership");
+        }
     }
     std::map<std::string, std::set<RankId>> roles_by_rank;
     for (const auto& role : roles) {
         if (role.role.empty()) throw std::invalid_argument("empty communication role");
-        for (auto rank : group(role.group).members)
+        for (auto rank : group(role.group).members) {
             if (!roles_by_rank[role.role].insert(rank).second)
                 throw std::invalid_argument("rank has multiple groups for one role");
+        }
     }
 }
 

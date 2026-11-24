@@ -206,7 +206,9 @@ void EngineCore<Instance>::append_output(const std::shared_ptr<Request>& request
 
 template <class Instance>
 void EngineCore<Instance>::flush_consumer_wakes() noexcept {
-    for (const auto& request : held_wakes_) request->cv.notify_one();
+    for (const auto& request : held_wakes_) {
+        request->cv.notify_one();
+    }
     held_wakes_.clear();
 }
 

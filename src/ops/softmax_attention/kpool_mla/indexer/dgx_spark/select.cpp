@@ -22,7 +22,9 @@ IndexerWindows indexer_windows(int lo, int hi, int batch, int columns) {
     // fixed independently of this execution-window choice.
     constexpr int columns_per_slot = (16 << 20) / (4 * kIndexGraphRows);
     int slots                      = 8;
-    while (slots > 1 && columns > columns_per_slot / slots) slots /= 2;
+    while (slots > 1 && columns > columns_per_slot / slots) {
+        slots /= 2;
+    }
     const int target = 2 * std::max(16, slots * (kIndexGraphRows / batch));
     // Cap windows at the old route's maximum width (plus one row), then balance
     // query tiles. A nearly-full window no longer changes every other window's
@@ -58,7 +60,9 @@ Fp8IndexerWindows fp8_indexer_windows(int tokens, int batch, int columns) {
     constexpr int score_bytes      = 16 << 20;
     constexpr int columns_per_slot = score_bytes / (4 * kIndexGraphRows);
     int slots                      = 8;
-    while (slots > 1 && columns > columns_per_slot / slots) slots /= 2;
+    while (slots > 1 && columns > columns_per_slot / slots) {
+        slots /= 2;
+    }
     const int target  = 2 * std::max(16, slots * (kIndexGraphRows / batch));
     const int windows = (tokens + target - 1) / target;
     // Round the planning budget to complete tiles. A partial first window must

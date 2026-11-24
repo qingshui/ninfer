@@ -162,8 +162,9 @@ void launch_sm100_causal_attention_groups(const Sm100GroupOperands& p, KvDType k
         reject("missing operand");
     if (kv != KvDType::Bf16 && (!p.cache.key_scales || !p.cache.value_scales))
         reject("quantized KV needs scale planes");
-    for (const auto& g : groups)
+    for (const auto& g : groups) {
         if (g.token_base < 0 || g.width < 1 || g.batch < 1 || g.row < 0) reject("invalid group");
+    }
 
     switch (kv) {
     case KvDType::Bf16:

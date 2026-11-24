@@ -49,7 +49,9 @@ __global__ __launch_bounds__(32 * Warps, 1) void fold_kernel(FoldArguments a, Ro
         normalize_qk(key, lane);
         common::store_vec(decay, common::load_vec<float4>(a.log_decay + vo + dk));
 #pragma unroll
-        for (int c = 0; c < kQkPerLane; ++c) alpha[c] = common::exp_approx_ftz(decay[c]);
+        for (int c = 0; c < kQkPerLane; ++c) {
+            alpha[c] = common::exp_approx_ftz(decay[c]);
+        }
         const float value = lane < Values ? __bfloat162float(a.value[vo + dv + lane]) : 0.0F;
         apply_transition(state, key, alpha, value, a.beta[column * a.value_heads + head]);
     }
@@ -68,9 +70,10 @@ __global__ __launch_bounds__(32 * Warps, 1) void fold_kernel(FoldArguments a, Ro
                     : a.conv[(record_begin + t) * a.conv_channels + channel];
         }
 #pragma unroll
-        for (int j = 0; j < 3; ++j)
+        for (int j = 0; j < 3; ++j) {
             a.history[row.destination_offset / 2 + history_base +
                       static_cast<std::int64_t>(j) * a.conv_channels] = tail[j];
+        }
     }
 }
 
@@ -95,7 +98,7 @@ __global__ __launch_bounds__(32 * Warps, 1) void staged_fold_kernel(FoldArgument
 
     for (int begin = 0; begin < row.commit_columns; begin += Steps) {
 #pragma unroll
-        for (int j = warp; j < Steps; j += Warps)
+        for (int j = warp; j < Steps; j += Warps) {
             if (begin + j < row.commit_columns) {
                 auto col = start + begin + j;
                 auto qo  = (col * a.qk_heads + head / (a.value_heads / a.qk_heads)) * 128,
@@ -106,15 +109,18 @@ __global__ __launch_bounds__(32 * Warps, 1) void staged_fold_kernel(FoldArgument
                 common::store_vec(decay, common::load_vec<float4>(a.log_decay + vo + dk));
                 common::load_bf16x4(v, a.value + vo + dk);
 #pragma unroll
-                for (int z = 0; z < 4; ++z) alpha[z] = common::exp_approx_ftz(decay[z]);
+                for (int z = 0; z < 4; ++z) {
+                    alpha[z] = common::exp_approx_ftz(decay[z]);
+                }
                 common::store_vec(stage.key[j] + dk, common::load_vec<float4>(k));
                 common::store_vec(stage.alpha[j] + dk, common::load_vec<float4>(alpha));
                 common::store_vec(stage.value[j] + dk, common::load_vec<float4>(v));
                 if (!lane) stage.beta[j] = a.beta[col * a.value_heads + head];
             }
+        }
         __syncthreads();
 #pragma unroll
-        for (int j = 0; j < Steps; ++j)
+        for (int j = 0; j < Steps; ++j) {
             if (begin + j < row.commit_columns) {
                 float k[4], alpha[4];
                 common::store_vec(k, common::load_vec<float4>(stage.key[j] + dk));
@@ -122,6 +128,7 @@ __global__ __launch_bounds__(32 * Warps, 1) void staged_fold_kernel(FoldArgument
                 float v = lane < Values ? stage.value[j][dv + lane] : 0;
                 apply_transition(state, k, alpha, v, stage.beta[j]);
             }
+        }
         __syncthreads();
     }
     store_state(state, a.recurrent + base + row.destination_offset / 4, dv, dk);
@@ -136,9 +143,10 @@ __global__ __launch_bounds__(32 * Warps, 1) void staged_fold_kernel(FoldArgument
                             : a.conv[(start + t) * a.conv_channels + c];
         }
 #pragma unroll
-        for (int j = 0; j < 3; ++j)
+        for (int j = 0; j < 3; ++j) {
             a.history[row.destination_offset / 2 + hb + std::int64_t(j) * a.conv_channels] =
                 tail[j];
+        }
     }
 }
 

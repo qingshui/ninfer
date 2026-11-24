@@ -125,10 +125,11 @@ void TextGraph::prepare(TextRun& run, const Parameters& parameters, moe::Schedul
         epilogue();
         for (const auto& profile : profiles) {
             run.set_attention_envelope(envelope(profile, width, capacity));
-            for (std::uint32_t layer = 0; layer < layers; ++layer)
+            for (std::uint32_t layer = 0; layer < layers; ++layer) {
                 if (std::holds_alternative<AttentionParameters>(
                         parameters.text.layers[layer].mixer))
                     run.mixer(layer);
+            }
         }
         preparation.checkpoint();
         return;
@@ -178,9 +179,10 @@ void TextGraph::prepare(TextRun& run, const Parameters& parameters, moe::Schedul
             preparation.checkpoint();
         }
         if (graph.profiles.size() > 1) {
-            for (std::size_t index = 0; index < graph.mixers.size(); ++index)
+            for (std::size_t index = 0; index < graph.mixers.size(); ++index) {
                 graph.main.executable.update_child(graph.mixers[index],
                                                    graph.profiles.front()[index]);
+            }
             graph.main.executable.upload(cuda.stream());
         }
     } else {

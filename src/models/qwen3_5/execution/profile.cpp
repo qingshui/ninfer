@@ -122,7 +122,9 @@ std::shared_ptr<const ModelProfile> describe_model_impl(const ModelDefinition& p
     const Describe describe(plan);
     const auto& w         = plan.weights();
     out->text.output_head = describe.linear(w.text.output_head_use);
-    for (const auto& layer : w.text.layers) out->text.layers.push_back(describe.block(layer));
+    for (const auto& layer : w.text.layers) {
+        out->text.layers.push_back(describe.block(layer));
+    }
     if (w.mtp) out->mtp = describe.mtp(*w.mtp);
     if (w.vision) out->vision = describe.vision(*w.vision);
     if (w.draft) out->draft = describe.draft(*w.draft);

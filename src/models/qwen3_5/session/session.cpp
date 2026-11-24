@@ -506,7 +506,9 @@ SessionImpl::SessionImpl(std::shared_ptr<const ModelDefinition> definition_in, S
         count_builder.prepare(plan.profile->public_tokens);
     }
     releases.reserve(max_concurrency);
-    for (std::uint32_t i = 0; i < max_concurrency; ++i) sequences[i].lane = i;
+    for (std::uint32_t i = 0; i < max_concurrency; ++i) {
+        sequences[i].lane = i;
+    }
 }
 
 SessionImpl::~SessionImpl() {
@@ -536,8 +538,9 @@ void SessionImpl::fail_all_cleanup() noexcept {
     release_ticket.reset();
     after_releases.reset();
     scoring.reset();
-    for (std::uint32_t l = 0; l < max_concurrency; ++l)
+    for (std::uint32_t l = 0; l < max_concurrency; ++l) {
         if (requests[l].lifecycle != Lifecycle::Empty) clear_lane(sequences[l], requests[l]);
+    }
 }
 
 FinishResult SessionImpl::finish(SequenceHandle h) noexcept {

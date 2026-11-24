@@ -16,7 +16,9 @@ ExecutionCodec::ExecutionCodec(const ModelDefinition& definition,
                 rank.vision_max_features,
                 static_cast<std::uint32_t>(definition.resources().text.control_tokens->size())} {
     scope_.result_owner = topology.output_rank;
-    for (const auto& r : topology.ranks) scope_.owners.push_back(r.rank);
+    for (const auto& r : topology.ranks) {
+        scope_.owners.push_back(r.rank);
+    }
     scope_.validate(topology);
     const std::size_t batch = rank.shape.max_concurrency;
     const auto ranks = topology.ranks.size(), pools = rank.context.pools.size();
@@ -29,10 +31,11 @@ ExecutionCodec::ExecutionCodec(const ModelDefinition& definition,
     auto snapshot = rank.observation;
     snapshot.physical_memory.emplace();
     snapshot.communication.clear();
-    for (const auto& group : topology.groups)
+    for (const auto& group : topology.groups) {
         if (std::find(group.members.begin(), group.members.end(), rank.rank) != group.members.end())
             snapshot.communication.push_back(
                 {group.id, static_cast<std::uint32_t>(group.members.size())});
+    }
     wire::Encoder report;
     runtime::protocol::encode(report, snapshot);
     budget_ = {payloads.compute_work,

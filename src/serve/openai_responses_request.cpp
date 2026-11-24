@@ -876,9 +876,10 @@ void filter_allowed_tools(const Json& choice, ParsedPromptFields& out) {
     }
 
     out.prompt.generation.tool_choice.allowed_names.emplace();
-    for (const ToolDefinition& tool : out.prompt.generation.tools)
+    for (const ToolDefinition& tool : out.prompt.generation.tools) {
         if (selected.contains(tool.name))
             out.prompt.generation.tool_choice.allowed_names->push_back(tool.name);
+    }
 }
 
 void parse_tool_choice(const Json& body, ParsedPromptFields& out) {

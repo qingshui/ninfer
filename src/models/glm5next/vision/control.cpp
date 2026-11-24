@@ -53,13 +53,16 @@ EncoderBatch prepare_batch(
         if (begin > payload.span().size() || count > payload.span().size() - begin)
             throw std::invalid_argument("GLM Vision patch span exceeds its prepared payload");
         out.patches.push_back(payload.span().subspan(begin, count));
-        for (int by = 0; by < grid.height; by += c.merge_size)
-            for (int bx = 0; bx < grid.width; bx += c.merge_size)
-                for (std::uint32_t y = 0; y < c.merge_size; ++y)
+        for (int by = 0; by < grid.height; by += c.merge_size) {
+            for (int bx = 0; bx < grid.width; bx += c.merge_size) {
+                for (std::uint32_t y = 0; y < c.merge_size; ++y) {
                     for (std::uint32_t x = 0; x < c.merge_size; ++x) {
                         out.positions.push_back(by + y);
                         xs.push_back(bx + x);
                     }
+                }
+            }
+        }
         out.cu_seqlens.push_back(out.cu_seqlens.back() + unit.patches);
         out.features += unit.features;
     }
@@ -114,9 +117,10 @@ Work prepare_work(models::vision::WindowUse use, std::shared_ptr<const Execution
     if (!out.window.produce) return out;
     if (!source) throw std::logic_error("GLM Vision production has no prepared input");
     auto input = std::make_shared<WindowInput>();
-    for (std::uint32_t rank = 0; rank < ranks; ++rank)
+    for (std::uint32_t rank = 0; rank < ranks; ++rank) {
         input->batches.push_back(
             prepare_batch(source->items, source->payloads, *out.window.plan, rank, source->config));
+    }
     input->owner = std::move(source);
     out.input    = std::move(input);
     return out;

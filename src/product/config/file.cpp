@@ -107,9 +107,10 @@ public:
             value.ssh      = string(n, "ssh", prefix, false);
             value.worker   = string(n, "worker", prefix, true);
             value.artifact = string(n, "artifact", prefix, true);
-            for (const auto key : {"worker", "artifact"})
+            for (const auto key : {"worker", "artifact"}) {
                 if (!std::filesystem::path(n[key].value<std::string>().value()).is_absolute())
                     error(*n.get(key), prefix + "." + key, "expected an absolute path on the node");
+            }
             if (const auto* env = n.get("environment")) {
                 if (!env->is_table()) error(*env, prefix + ".environment", "expected a table");
                 for (const auto& [key, item] : *env->as_table()) {
@@ -148,9 +149,10 @@ private:
     const toml::table& table(const toml::node& node, const std::string& name,
                              std::initializer_list<std::string_view> keys) {
         if (!node.is_table()) error(node, name, "expected a table");
-        for (const auto& [key, value] : *node.as_table())
+        for (const auto& [key, value] : *node.as_table()) {
             if (std::find(keys.begin(), keys.end(), key.str()) == keys.end())
                 error(value, name + "." + std::string(key.str()), "unknown configuration field");
+        }
         return *node.as_table();
     }
 

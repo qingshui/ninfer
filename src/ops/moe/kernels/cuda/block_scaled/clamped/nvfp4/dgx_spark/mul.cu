@@ -100,8 +100,9 @@ __global__ void prepare_input(const __nv_bfloat16* x, std::uint8_t* codes, std::
             if constexpr (SkipInactive) clear = bits != 0 || !active_tokens;
         }
         if (routed_sum && clear)
-            for (int row = threadIdx.x; row < kHidden; row += blockDim.x)
+            for (int row = threadIdx.x; row < kHidden; row += blockDim.x) {
                 routed_sum[std::int64_t(token) * kHidden + row] = 0;
+            }
     }
     if constexpr (Quantize) {
         if (threadIdx.x >= kHidden / 16) return;
@@ -127,8 +128,9 @@ quantize_grouped_input(const __nv_bfloat16* x, const int* ids, ExpertSubsetKind 
         if (!*groups.jobs) {
             if constexpr (Index) {
                 if (!tid && groups.inverse)
-                    for (int a = blockIdx.x; a < tokens * kTopK; a += gridDim.x)
+                    for (int a = blockIdx.x; a < tokens * kTopK; a += gridDim.x) {
                         groups.inverse[a] = -1;
+                    }
             }
             return;
         }

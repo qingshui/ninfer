@@ -27,9 +27,11 @@ std::size_t rmsnorm_dynamic_grouped_conv_prepare_workspace_capacity_bytes(int mi
                                                                           int max_batch) {
     dc::validate_interval(min_width, max_width, min_batch, max_batch, dc::kPrepareOp);
     std::size_t maximum = 0;
-    for (int width = min_width; width <= max_width; ++width)
-        for (int batch = min_batch; batch <= max_batch; ++batch)
+    for (int width = min_width; width <= max_width; ++width) {
+        for (int batch = min_batch; batch <= max_batch; ++batch) {
             maximum = std::max(maximum, dc::prepare::select_plan(width, batch).workspace_bytes);
+        }
+    }
     return maximum;
 }
 

@@ -150,16 +150,18 @@ bool RecordReservation::contributes_to(const RecordAssessment& pressure,
         return true;
     for (const auto& claim : claims_) {
         if (!claim.count || !claim.reservation->valid()) continue;
-        for (const auto& domain : pressure.domains)
+        for (const auto& domain : pressure.domains) {
             if (domain.domain == claim.domain && domain.placement.reclaim_bytes) return true;
+        }
     }
     return false;
 }
 
 std::uint32_t RecordReservation::remaining(std::uint32_t rank) const noexcept {
     std::uint32_t count = 0;
-    for (const auto& claim : claims_)
+    for (const auto& claim : claims_) {
         if (claim.domain.rank == rank) count += claim.count;
+    }
     return count;
 }
 
@@ -180,7 +182,9 @@ std::vector<RecordLease> RecordReservation::materialize() {
         if (!remaining(rank)) throw std::logic_error("context record bundle is incomplete");
     }
     if (!ready()) throw std::logic_error("context record reservation is not ready");
-    for (const auto rank : ranks_) result.push_back(materialize(rank));
+    for (const auto rank : ranks_) {
+        result.push_back(materialize(rank));
+    }
     return result;
 }
 
@@ -211,11 +215,12 @@ void RecordReservation::defer_return(RecordLease& record) {
 }
 
 void RecordReservation::prepare_metadata_returns(MetadataOwner& owner, std::size_t count) {
-    for (auto& metadata : metadata_)
+    for (auto& metadata : metadata_) {
         if (metadata.owner() == &owner) {
             metadata.prepare_returns(count);
             return;
         }
+    }
     MetadataReservation prepared(owner, {});
     prepared.prepare_returns(count);
     metadata_.push_back(std::move(prepared));
@@ -226,30 +231,34 @@ void RecordReservation::attach_metadata(MetadataReservation metadata) {
 }
 
 std::uint32_t RecordReservation::take_metadata(MetadataOwner& owner) {
-    for (auto& metadata : metadata_)
+    for (auto& metadata : metadata_) {
         if (metadata.owner() == &owner && metadata.remaining()) return metadata.take(owner);
+    }
     throw std::logic_error("context reservation has no logical descriptor claim");
 }
 
 void RecordReservation::restore_metadata(MetadataOwner& owner, std::uint32_t id) {
-    for (auto& metadata : metadata_)
+    for (auto& metadata : metadata_) {
         if (metadata.owner() == &owner) {
             metadata.restore(owner, id);
             return;
         }
+    }
     throw std::logic_error("context reservation has no matching metadata owner");
 }
 
 MetadataReservation RecordReservation::take_metadata_reservation(MetadataOwner& owner) {
-    for (auto& metadata : metadata_)
+    for (auto& metadata : metadata_) {
         if (metadata.owner() == &owner && metadata.remaining()) return std::move(metadata);
+    }
     throw std::logic_error("context reservation has no control descriptor claim");
 }
 
 RecordReservation RecordReservation::split(std::uint32_t count) {
-    for (const auto rank : ranks_)
+    for (const auto rank : ranks_) {
         if (remaining(rank) < count)
             throw std::logic_error("context split exceeds reserved records");
+    }
     RecordReservation result;
     result.claims_.reserve(claims_.size());
     result.ranks_ = ranks_;
@@ -300,18 +309,24 @@ void RecordReservation::reserve_merge(const RecordReservation& other) {
     metadata_.reserve(metadata_.size() + other.metadata_.size());
     claims_.reserve(claims_.size() + other.claims_.size());
     auto ranks = ranks_.size();
-    for (const auto rank : other.ranks_)
+    for (const auto rank : other.ranks_) {
         ranks += std::find(ranks_.begin(), ranks_.end(), rank) == ranks_.end();
+    }
     ranks_.reserve(ranks);
 }
 
 void RecordReservation::merge(RecordReservation&& other) {
     reserve_merge(other);
-    for (auto& metadata : other.metadata_) metadata_.push_back(std::move(metadata));
+    for (auto& metadata : other.metadata_) {
+        metadata_.push_back(std::move(metadata));
+    }
     other.metadata_.clear();
-    for (const auto rank : other.ranks_)
+    for (const auto rank : other.ranks_) {
         if (std::find(ranks_.begin(), ranks_.end(), rank) == ranks_.end()) ranks_.push_back(rank);
-    for (auto& claim : other.claims_) claims_.push_back(std::move(claim));
+    }
+    for (auto& claim : other.claims_) {
+        claims_.push_back(std::move(claim));
+    }
     other.claims_.clear();
     other.ranks_.clear();
 }
@@ -372,23 +387,26 @@ RecordDomains::RecordDomains(std::span<const ContextRankSpec> ranks,
                              std::span<const ContextRecordLayout> layouts)
     : ranks_(ranks.begin(), ranks.end()), layouts_(layouts.begin(), layouts.end()) {
     for (std::size_t i = 0; i < layouts_.size(); ++i) {
-        for (std::size_t j = 0; j < i; ++j)
+        for (std::size_t j = 0; j < i; ++j) {
             if (layouts_[i].id == layouts_[j].id)
                 throw std::invalid_argument("duplicate context record layout");
+        }
         for (std::size_t j = 0; j < layouts_[i].parts.size(); ++j) {
             const auto rank = layouts_[i].parts[j].rank;
             if (std::none_of(ranks_.begin(), ranks_.end(),
                              [&](const auto& item) { return item.rank == rank; }))
                 throw std::invalid_argument("record layout names an unknown context rank");
-            for (std::size_t k = 0; k < j; ++k)
+            for (std::size_t k = 0; k < j; ++k) {
                 if (layouts_[i].parts[k].rank == rank)
                     throw std::invalid_argument("duplicate rank in context record layout");
+            }
         }
     }
     for (std::size_t i = 0; i < ranks_.size(); ++i) {
-        for (std::size_t j = 0; j < i; ++j)
+        for (std::size_t j = 0; j < i; ++j) {
             if (ranks_[i].rank == ranks_[j].rank)
                 throw std::invalid_argument("duplicate context rank");
+        }
         for (const auto memory : {ContextMemory::Device, ContextMemory::Host}) {
             auto value = std::make_unique<Domain>();
             value->id  = {ranks_[i].rank, memory};
@@ -405,11 +423,13 @@ RecordDomains::RecordDomains(std::span<const ContextRankSpec> ranks,
                 memory == ContextMemory::Device ? ranks_[i].device_bytes : ranks_[i].host_bytes;
             value->pool = std::make_unique<ContextPool>(static_cast<std::uint32_t>(domains_.size()),
                                                         bytes, specs);
-            for (std::size_t j = 0; j < specs.size(); ++j)
+            for (std::size_t j = 0; j < specs.size(); ++j) {
                 value->classes[j].record_class = value->pool->record_class(j);
+            }
             const auto occupancy = value->pool->usage();
-            for (auto& item : value->classes)
+            for (auto& item : value->classes) {
                 item.usage.stride_bytes = occupancy.classes.at(item.record_class.index).stride;
+            }
             domains_.push_back(std::move(value));
         }
     }
@@ -472,11 +492,12 @@ RecordAssessment RecordDomains::assess(std::span<const RecordDemand> demands,
     RecordAssessment result;
     for (const auto& demand : demands) {
         const auto& spec = layout(demand.layout);
-        for (const auto rank : demand.ranks)
+        for (const auto rank : demand.ranks) {
             if (std::none_of(spec.parts.begin(), spec.parts.end(),
                              [&](const auto& part) { return part.rank == rank; }))
                 throw std::invalid_argument(
                     "context demand selects a rank outside its record placement");
+        }
     }
     for (const auto& value : domains_) {
         std::vector<RecordRequest> requests;
@@ -492,8 +513,9 @@ RecordAssessment RecordDomains::assess(std::span<const RecordDemand> demands,
         }
         if (requests.empty()) continue;
         std::vector<AllocationId> freed;
-        for (const auto& release : releases)
+        for (const auto& release : releases) {
             if (release.domain == value->id) freed.push_back(release.allocation);
+        }
         result.domains.push_back({value->id, value->pool->assess(requests, freed)});
     }
     return result;
@@ -571,9 +593,10 @@ void RecordDomains::prepare_returns(RecordReservation& reservation, const Record
 
 std::size_t RecordDomains::metadata_bytes() const {
     std::size_t bytes = sizeof(*this);
-    for (const auto& value : domains_)
+    for (const auto& value : domains_) {
         bytes += sizeof(Domain) + value->classes.capacity() * sizeof(Domain::Class) +
                  value->pool->usage().metadata_bytes;
+    }
     return bytes;
 }
 

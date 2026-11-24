@@ -69,19 +69,21 @@ std::span<const Route> routes(Geometry geometry, bool norm = false) {
 
 Plan select_projection_plan(Geometry geometry, std::int32_t columns) {
     if (columns <= 0) throw std::invalid_argument("gdn_control: nonpositive projection extent");
-    for (const auto& route : routes(geometry))
+    for (const auto& route : routes(geometry)) {
         if (columns >= route.first && columns <= route.last) return route.plan;
+    }
     throw std::logic_error("gdn_control: missing production route");
 }
 
 NormPlan select_norm_plan(Geometry geometry, std::int32_t columns) {
     if (columns <= 0) throw std::invalid_argument("gdn_control: nonpositive projection extent");
     Plan projection;
-    for (const auto& route : routes(geometry, true))
+    for (const auto& route : routes(geometry, true)) {
         if (columns >= route.first && columns <= route.last) {
             projection = route.plan;
             break;
         }
+    }
     if (geometry.input_rows == 5120 && columns <= 42) {
         if (columns <= 2) return {NormKernel::Simt, {}, {}, 1, 512};
         if (columns <= 14) return {NormKernel::Simt, {}, {}, 2, 512};

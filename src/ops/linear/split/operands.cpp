@@ -103,9 +103,12 @@ std::array<operand::Range, 4> weight_ranges(const Weight& w) {
 }
 
 void disjoint_weights(operand::Range range, Weights weights) {
-    for (const auto* weight : {&weights.first, weights.second})
+    for (const auto* weight : {&weights.first, weights.second}) {
         if (weight)
-            for (const auto plane : weight_ranges(*weight)) operand::disjoint(range, plane, kOp);
+            for (const auto plane : weight_ranges(*weight)) {
+                operand::disjoint(range, plane, kOp);
+            }
+    }
 }
 } // namespace
 
@@ -137,8 +140,9 @@ void validate_operands(const Tensor& x, Weights weights, std::span<const Tensor>
         const auto out = operand::range(outputs[i].data, outputs[i].bytes(), kOp);
         operand::disjoint(out, input, kOp);
         disjoint_weights(out, weights);
-        for (std::size_t j = 0; j < i; ++j)
+        for (std::size_t j = 0; j < i; ++j) {
             operand::disjoint(out, operand::range(outputs[j].data, outputs[j].bytes(), kOp), kOp);
+        }
     }
 }
 
@@ -149,8 +153,9 @@ void validate_bias(const Tensor& bias, int rows, std::span<const Tensor> outputs
                 operand::aligned(bias.data, 2),
             "invalid BF16 bias vector");
     const auto range = operand::range(bias.data, bias.bytes(), kOp);
-    for (const auto& out : outputs)
+    for (const auto& out : outputs) {
         operand::disjoint(range, operand::range(out.data, out.bytes(), kOp), kOp);
+    }
 }
 
 void validate_bias_scratch(const Tensor& bias, MemorySpan scratch) {
@@ -163,7 +168,8 @@ void validate_scratch(const Tensor& x, Weights weights, std::span<const Tensor> 
     const auto range = operand::range(scratch.data, scratch.bytes, kOp);
     operand::disjoint(range, operand::range(x.data, x.bytes(), kOp), kOp);
     disjoint_weights(range, weights);
-    for (const auto& out : outputs)
+    for (const auto& out : outputs) {
         operand::disjoint(range, operand::range(out.data, out.bytes(), kOp), kOp);
+    }
 }
 } // namespace ninfer::ops::detail::linear_split

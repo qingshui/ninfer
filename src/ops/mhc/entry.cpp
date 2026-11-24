@@ -42,17 +42,24 @@ struct Validation {
     void output(const Tensor& t, DType type, std::initializer_list<int> dims, const char* name,
                 bool residual_alias = false) {
         auto range = tensor(t, type, dims, name);
-        for (int i = residual_alias ? 1 : 0; i < input_count; ++i)
+        for (int i = residual_alias ? 1 : 0; i < input_count; ++i) {
             operand::disjoint(range, inputs[i], kOp);
-        for (int i = 0; i < output_count; ++i) operand::disjoint(range, outputs[i], kOp);
+        }
+        for (int i = 0; i < output_count; ++i) {
+            operand::disjoint(range, outputs[i], kOp);
+        }
         outputs[output_count++] = range;
     }
 
     void scratch(MemorySpan span) {
         operand::device(span.device, device, kOp, "workspace");
         const auto range = operand::range(span.data, span.bytes, kOp);
-        for (int i = 0; i < input_count; ++i) operand::disjoint(range, inputs[i], kOp);
-        for (int i = 0; i < output_count; ++i) operand::disjoint(range, outputs[i], kOp);
+        for (int i = 0; i < input_count; ++i) {
+            operand::disjoint(range, inputs[i], kOp);
+        }
+        for (int i = 0; i < output_count; ++i) {
+            operand::disjoint(range, outputs[i], kOp);
+        }
     }
 
     void weights(const MhcPreWeights& w) {
@@ -76,9 +83,10 @@ struct Validation {
 
 void parameters(const MhcPreParameters& p) {
     for (float value : {p.coefficient_epsilon, p.branch_epsilon, p.pre_epsilon, p.sinkhorn_epsilon,
-                        p.post_multiplier})
+                        p.post_multiplier}) {
         require(value > 0 && std::isnormal(value),
                 "parameters must be positive normal FP32 values");
+    }
     require(p.sinkhorn_iterations > 0, "Sinkhorn iterations must be positive");
 }
 

@@ -14,8 +14,9 @@ const Fp8BlockLinearShape& shape(int n, int k, LinearPolicy policy) {
         &kFp8BlockN2048K4096,  &kFp8BlockN512K4096,  &kFp8BlockN16384K1536,
         &kFp8BlockN4096K16384, &kFp8BlockN4096K1024,
     };
-    for (const auto* shape : shapes)
+    for (const auto* shape : shapes) {
         if (shape->n == n && shape->k == k) return *shape;
+    }
 #endif
     throw std::invalid_argument("fp8_block linear: unsupported shape");
 }

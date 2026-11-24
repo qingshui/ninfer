@@ -12,8 +12,9 @@ inline constexpr int kHistory  = 9;
 
 inline bool pair_aligned(const Tensor& t) {
     if (reinterpret_cast<std::uintptr_t>(t.data) % 4) return false;
-    for (int d = 1; d < 4; ++d)
+    for (int d = 1; d < 4; ++d) {
         if (t.ne[d] > 1 && t.nb[d] % 4) return false;
+    }
     return true;
 }
 

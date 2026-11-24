@@ -397,9 +397,10 @@ std::optional<std::uint64_t> try_price_context_transfer_requirements(
                 std::min<std::uint64_t>(operations, std::numeric_limits<std::uint32_t>::max()));
         }
         std::uint64_t serial_work = 0;
-        for (std::size_t index = 0; index < coalesced.size(); ++index)
+        for (std::size_t index = 0; index < coalesced.size(); ++index) {
             serial_work =
                 saturating_add(serial_work, model.transfer_ns(directions[index], coalesced[index]));
+        }
         for (std::size_t peer_first = 0; peer_first < requirements.size(); ++peer_first) {
             const auto& first_peer = requirements[peer_first];
             if (first_peer.rank != rank ||

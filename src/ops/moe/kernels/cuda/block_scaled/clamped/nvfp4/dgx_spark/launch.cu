@@ -36,8 +36,9 @@ __global__ void quantize_input(const __nv_bfloat16* x, std::uint8_t* codes, std:
     __syncthreads();
     if (!live) return;
     if (routed_sum)
-        for (int row = threadIdx.x; row < kHidden; row += blockDim.x)
+        for (int row = threadIdx.x; row < kHidden; row += blockDim.x) {
             routed_sum[std::int64_t(token) * kHidden + row] = 0;
+        }
     if (group < tokens * (kHidden / 16)) {
         const auto packed = common::quantize_nvfp4_k16(x + std::int64_t(group) * 16, divisor);
         *reinterpret_cast<uint2*>(codes + std::int64_t(group) * 8) =

@@ -153,8 +153,9 @@ void RankProgramImpl::prepare_mtp() {
                 f.draft_visible[s] = std::max(f.draft_visible[s], r.mtp_frontier + s + 1);
         }
     }
-    for (int s = 0; s < steps; ++s)
+    for (int s = 0; s < steps; ++s) {
         fill_local_metadata(m.draft_steps[s], 1, f.batch.attention.rows);
+    }
     f.hidden               = resources.packed(io.pending_hidden,
                                               {dimension(parameters.profile->config.text.hidden), width, b});
     const bool read_drafts = !f.decision;

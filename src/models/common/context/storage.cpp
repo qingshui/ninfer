@@ -189,7 +189,9 @@ std::size_t ContextStorage::mapping_capacity_elements() const noexcept { return 
 
 std::size_t ContextStorage::copy_segment_capacity() const noexcept {
     std::size_t result = 4 * (tables_.size() + 1);
-    for (const auto& table : tables_) result += 4 * table.tables->row_count();
+    for (const auto& table : tables_) {
+        result += 4 * table.tables->row_count();
+    }
     return result;
 }
 

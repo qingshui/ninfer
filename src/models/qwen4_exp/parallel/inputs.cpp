@@ -6,12 +6,16 @@ namespace wire = distributed::wire;
 
 void integers(wire::Encoder& out, std::span<const std::int32_t> values) {
     out.u64(values.size());
-    for (auto value : values) out.i32(value);
+    for (auto value : values) {
+        out.i32(value);
+    }
 }
 
 std::vector<std::int32_t> integers(wire::Decoder& in) {
     std::vector<std::int32_t> values(in.count(4));
-    for (auto& value : values) value = in.i32();
+    for (auto& value : values) {
+        value = in.i32();
+    }
     return values;
 }
 } // namespace
@@ -35,7 +39,9 @@ ExecutionCodec::prepare_inputs(const Work& work, const distributed::ExecutionTop
         integers(out, batch.position_indices);
         integers(out, batch.cu_seqlens);
         out.u64(batch.position_weights.size());
-        for (auto value : batch.position_weights) out.f32(value);
+        for (auto value : batch.position_weights) {
+            out.f32(value);
+        }
         out.u64(batch.patches.size());
         for (auto part : batch.patches) {
             out.u64(part.size_bytes());
@@ -81,7 +87,9 @@ std::optional<std::uint64_t> ExecutionCodec::receive_input(wire::Kind kind,
         batch.position_indices = integers(metadata);
         batch.cu_seqlens       = integers(metadata);
         batch.position_weights.resize(metadata.count(4));
-        for (auto& value : batch.position_weights) value = metadata.f32();
+        for (auto& value : batch.position_weights) {
+            value = metadata.f32();
+        }
         std::vector<std::size_t> sizes(metadata.count(8));
         for (auto& size : sizes) {
             size = metadata.u64();
@@ -105,9 +113,10 @@ std::optional<std::uint64_t> ExecutionCodec::receive_input(wire::Kind kind,
     if (kind != wire::Kind::InputEnd) throw std::invalid_argument("unknown Vision input action");
     in.finish();
     auto& input = *receiving_->input;
-    for (auto part : receiver_.finish(id))
+    for (auto part : receiver_.finish(id)) {
         input.batches.at(rank_).patches.emplace_back(static_cast<const std::uint16_t*>(part.data),
                                                      part.bytes / sizeof(std::uint16_t));
+    }
     inputs_.install({std::move(receiving_->window), std::move(receiving_->input)});
     receiving_.reset();
     return id;

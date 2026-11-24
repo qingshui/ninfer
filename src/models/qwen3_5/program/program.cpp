@@ -185,10 +185,11 @@ void RankProgramImpl::validate_work(const Work& work, runtime::FrameKind kind) c
     };
     for (std::size_t i = 0; i < work.installs.size(); ++i) {
         validate_binding(work.installs[i]);
-        for (std::size_t j = 0; j < i; ++j)
+        for (std::size_t j = 0; j < i; ++j) {
             if (work.installs[j].member.residency.lane.value ==
                 work.installs[i].member.residency.lane.value)
                 throw std::invalid_argument("Qwen3.5 work installs a lane twice");
+        }
     }
     std::vector<std::int64_t> checkpoint_images, row_images;
     auto validate_input = [&](const InputWindow& input, std::uint32_t limit) {
@@ -234,7 +235,9 @@ void RankProgramImpl::validate_work(const Work& work, runtime::FrameKind kind) c
         [&](const auto& op) {
             using T = std::decay_t<decltype(op)>;
             if constexpr (std::is_same_v<T, ContextWork>) {
-                for (const auto& binding : op.bindings) validate_binding(binding);
+                for (const auto& binding : op.bindings) {
+                    validate_binding(binding);
+                }
                 for (auto id : op.releases) {
                     if (id.lane.value >= max_concurrency || !residencies[id.lane.value].installed ||
                         residencies[id.lane.value].id != id)
@@ -285,12 +288,16 @@ void RankProgramImpl::validate_work(const Work& work, runtime::FrameKind kind) c
                     [](const auto& row) -> const ExecutionRow& { return row.binding; });
                 validate_members(op.prefill.rows,
                                  [](const auto& row) -> const ExecutionRow& { return row; });
-                for (const auto& prefill : op.prefill.rows)
-                    for (const auto& decode : op.decode.rows)
+                for (const auto& prefill : op.prefill.rows) {
+                    for (const auto& decode : op.decode.rows) {
                         if (prefill.member.residency.lane.value ==
                             decode.binding.member.residency.lane.value)
                             throw std::invalid_argument("Qwen3.5 mixed work repeats a residency");
-                for (const auto& input : op.prefill.inputs) validate_input(input, prefill_chunk);
+                    }
+                }
+                for (const auto& input : op.prefill.inputs) {
+                    validate_input(input, prefill_chunk);
+                }
                 validate_decode_extents(op.decode.rows);
                 validate_mixed(op);
                 reject_shared_images(checkpoint_images, row_images);

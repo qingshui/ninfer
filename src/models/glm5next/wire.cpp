@@ -127,12 +127,16 @@ WorkRow row(Decoder& in) {
 
 void rows(Encoder& out, const std::vector<WorkRow>& values) {
     out.u64(values.size());
-    for (const auto& v : values) row(out, v);
+    for (const auto& v : values) {
+        row(out, v);
+    }
 }
 
 std::vector<WorkRow> rows(Decoder& in) {
     std::vector<WorkRow> result(in.count(96));
-    for (auto& value : result) value = row(in);
+    for (auto& value : result) {
+        value = row(in);
+    }
     return result;
 }
 
@@ -194,7 +198,9 @@ void encode_work(Encoder& out, const Work& work, std::uint32_t rank) {
                     encode_token_counts(out, binding.counts);
                 }
                 out.u64(v.releases.size());
-                for (auto id : v.releases) residency(out, id);
+                for (auto id : v.releases) {
+                    residency(out, id);
+                }
             } else {
                 out.u8(4);
                 row(out, v.row);
@@ -210,7 +216,9 @@ Work decode_work(Decoder& in, const VisionInputBindings& inputs) {
     const auto rank    = in.u32();
     work.batch.members = integers<std::uint32_t>(in);
     work.batch.owners.resize(in.count(8));
-    for (auto& range : work.batch.owners) range = {in.u32(), in.u32()};
+    for (auto& range : work.batch.owners) {
+        range = {in.u32(), in.u32()};
+    }
     work.actions.emplace(rank, context::decode_actions(in));
     switch (in.u8()) {
     case 1: {
@@ -240,7 +248,9 @@ Work decode_work(Decoder& in, const VisionInputBindings& inputs) {
             binding.counts = decode_token_counts(in);
         }
         v.releases.resize(in.count(12));
-        for (auto& id : v.releases) id = residency(in);
+        for (auto& id : v.releases) {
+            id = residency(in);
+        }
         work.operation = std::move(v);
         break;
     }
@@ -333,7 +343,9 @@ void encode_result(Encoder& out, const Result& result) {
                 out.u8(3);
                 out.u32(v.processed);
                 out.u64(v.logprobs.size());
-                for (auto value : v.logprobs) out.f32(value);
+                for (auto value : v.logprobs) {
+                    out.f32(value);
+                }
             }
         },
         result);
@@ -373,7 +385,9 @@ Result decode_result(Decoder& in) {
         ScoreResult v;
         v.processed = in.u32();
         v.logprobs.resize(in.count(4));
-        for (auto& value : v.logprobs) value = in.f32();
+        for (auto& value : v.logprobs) {
+            value = in.f32();
+        }
 
         return v;
     }

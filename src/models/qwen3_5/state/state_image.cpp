@@ -36,7 +36,9 @@ StateImageViews::StateImageViews(MemorySpan backing, const StateImageDeviceLayou
     pool_bytes_ = backing.bytes - tail;
     // Validates the scratch row and every staging row are aligned, in-bounds images.
     (void)storage_.image(static_cast<std::int64_t>(pool_bytes_));
-    for (std::uint32_t row = 0; row < staging_images; ++row) (void)storage_.image(staging_row(row));
+    for (std::uint32_t row = 0; row < staging_images; ++row) {
+        (void)storage_.image(staging_row(row));
+    }
 }
 
 std::int64_t StateImageViews::staging_row(std::uint32_t index) const {

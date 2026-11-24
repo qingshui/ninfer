@@ -72,27 +72,35 @@ struct SparseMlaFixture {
         reshape_tokens(tokens);
         (void)selection_metadata(cap, ragged, frozen, selection_span);
         std::map<std::pair<int, int>, int> physical;
-        for (auto [b, p] : pages)
+        for (auto [b, p] : pages) {
             physical.emplace(std::pair{p < shared_prefix / 64 ? 0 : b + 1, p}, 0);
+        }
         const int physical_pages = std::max<std::size_t>(1, physical.size());
         packed =
             std::make_unique<PackedKVFixture>(cuda.device(), layout.page.geometry, physical_pages);
         int multiplier = 17;
-        while (std::gcd(multiplier, physical_pages) != 1) multiplier += 2;
+        while (std::gcd(multiplier, physical_pages) != 1) {
+            multiplier += 2;
+        }
         int ordinal = 0;
-        for (auto& [key, page] : physical)
+        for (auto& [key, page] : physical) {
             page = (std::int64_t(ordinal++) * multiplier + physical_pages / 2) % physical_pages;
-        for (auto [b, p] : pages)
+        }
+        for (auto [b, p] : pages) {
             tables.at(p, B - 1 - b) =
                 packed->physical_offset(physical.at({p < shared_prefix / 64 ? 0 : b + 1, p}));
+        }
         cache = layout.layer(PagedRecordView{packed->storage(), tables.view, 64}, layer).latent;
         plane_index = packed->plane_index(cache.data.plane);
         if (storage == ops::KpoolMlaStorage::Fp8E4m3fnGroup128Ue8m0)
             scale_plane_index = packed->plane_index(cache.scales.plane);
         latent.resize(std::size_t(physical_pages) * 64 * 512);
-        for (std::size_t i = 0; i < latent.size(); ++i) latent[i] = sample(i + 3351, 1.F / 512);
-        for (std::size_t i = 0; i < query.host.size(); ++i)
+        for (std::size_t i = 0; i < latent.size(); ++i) {
+            latent[i] = sample(i + 3351, 1.F / 512);
+        }
+        for (std::size_t i = 0; i < query.host.size(); ++i) {
             query.host[i] = sample(i + 719, magnitude / 512);
+        }
         for (std::size_t i = 0; i < key_up.host.size(); ++i) {
             key_up.host[i]   = sample(i + 1157, 1.F / 8192);
             value_up.host[i] = sample(i + 7759, 1.F / 8192);
@@ -126,7 +134,9 @@ struct SparseMlaFixture {
                 counts.at(row) = std::min(cap, c);
                 ends.at(row)   = e;
                 int stride     = 503;
-                while (c && std::gcd(stride, c) != 1) stride += 2;
+                while (c && std::gcd(stride, c) != 1) {
+                    stride += 2;
+                }
                 for (int i = 0; i < counts.at(row); ++i) {
                     const int g    = (std::int64_t(i) * stride + t + 17 * b) % c;
                     ids.at(i, row) = g;
@@ -160,9 +170,10 @@ struct SparseMlaFixture {
     void reset_tokens(int tokens, int cap, bool ragged, bool frozen, int selection_span,
                       CudaExecutionView cuda) {
         reshape_tokens(tokens);
-        for (auto [b, page] : selection_metadata(cap, ragged, frozen, selection_span))
+        for (auto [b, page] : selection_metadata(cap, ragged, frozen, selection_span)) {
             if (tables.at(page, B - 1 - b) < 0)
                 throw std::invalid_argument("Sparse MLA sweep page was not reserved");
+        }
         positions.upload();
         valid.upload();
         selectors.upload();
@@ -208,9 +219,14 @@ struct SparseMlaFixture {
         std::vector<int> result;
         if (t >= valid.at(b)) return result;
         const int row = selection_rows.at(t, b), end = ends.at(row);
-        for (int i = 0; i < counts.at(row); ++i)
-            for (int j = 0; j < 4; ++j) result.push_back(ids.at(i, row) * 4 + j);
-        for (int i = end / 4 * 4; i < end; ++i) result.push_back(i);
+        for (int i = 0; i < counts.at(row); ++i) {
+            for (int j = 0; j < 4; ++j) {
+                result.push_back(ids.at(i, row) * 4 + j);
+            }
+        }
+        for (int i = end / 4 * 4; i < end; ++i) {
+            result.push_back(i);
+        }
         return result;
     }
 
@@ -225,12 +241,14 @@ struct SparseMlaFixture {
 
     void encode_factors(CudaExecutionView cuda) {
         std::vector<float> values(key_up.host.size());
-        for (std::size_t i = 0; i < values.size(); ++i)
+        for (std::size_t i = 0; i < values.size(); ++i) {
             values[i] = std::ldexp(decode(key_up.host[i]), int((i / 512 + i / 32) % 5) - 2);
+        }
         key_encoded =
             std::make_unique<EncodedWeight>(query.view.device, QType::MXFP8, 16384, 512, values);
-        for (std::size_t i = 0; i < values.size(); ++i)
+        for (std::size_t i = 0; i < values.size(); ++i) {
             values[i] = std::ldexp(decode(value_up.host[i]), int((i / 512 + i / 32) % 5) - 2);
+        }
         value_encoded =
             std::make_unique<EncodedWeight>(query.view.device, QType::MXFP8, 16384, 512, values);
         workspace_bytes = ops::kpool_sparse_mla_workspace_capacity_bytes(

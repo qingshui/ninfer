@@ -62,17 +62,18 @@ const char* context_domain_name(ContextMemoryDomain domain) noexcept {
 
 Json context_capacity_json(std::span<const ContextPoolCapacity> capacity) {
     Json result = Json::array();
-    for (const auto& pool : capacity)
+    for (const auto& pool : capacity) {
         result.push_back({{"rank", pool.rank},
                           {"domain", context_domain_name(pool.domain)},
                           {"capacity_bytes", pool.capacity_bytes},
                           {"block_bytes", pool.block_bytes}});
+    }
     return result;
 }
 
 Json context_usage_json(const RuntimeStats& stats) {
     Json pools = Json::array();
-    for (const auto& pool : stats.context_pools)
+    for (const auto& pool : stats.context_pools) {
         pools.push_back({{"rank", pool.rank},
                          {"domain", context_domain_name(pool.domain)},
                          {"capacity_bytes", pool.capacity_bytes},
@@ -89,6 +90,7 @@ Json context_usage_json(const RuntimeStats& stats) {
                          {"unassigned_free_bytes", pool.unassigned_free_bytes},
                          {"tail_bytes", pool.tail_bytes},
                          {"peak_occupied_bytes", pool.peak_occupied_bytes}});
+    }
     return {{"pools", std::move(pools)},
             {"state_objects", stats.state_objects},
             {"history_objects", stats.history_objects},
@@ -141,10 +143,12 @@ Json request_execution_json(const RequestStats& value) {
     constexpr const char* names[] = {"prefill", "decode", "replay", "control", "score", "context"};
 
     Json out;
-    for (std::size_t i = 0; i < value.executions.size(); ++i)
+    for (std::size_t i = 0; i < value.executions.size(); ++i) {
         out[names[i]] = execution_json(value.executions[i]);
-    for (std::size_t i = 0; i < value.max_rank_gpu.size(); ++i)
+    }
+    for (std::size_t i = 0; i < value.max_rank_gpu.size(); ++i) {
         out["max_rank_gpu_intervals"][kGpuIntervalNames[i]] = duration_json(value.max_rank_gpu[i]);
+    }
     return out;
 }
 
@@ -258,8 +262,9 @@ Json startup_resources_json(const EngineDescription& description, const StartupR
                  {"hardware", rank.hardware},
                  {"shared_physical_memory", rank.shared_physical_memory},
                  {"budget", budget_json(startup.ranks.at(i))}};
-        for (const auto& sample : snapshot.ranks)
+        for (const auto& sample : snapshot.ranks) {
             if (sample.rank == rank.rank) out["resources"] = resource_json(sample);
+        }
         ranks.push_back(std::move(out));
     }
     return {{"ranks", std::move(ranks)},

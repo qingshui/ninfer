@@ -73,10 +73,12 @@ void validate_replay_record(const Tensor& q, const Tensor& k, const Tensor& v, c
     for (const Tensor* tensor : tensors) {
         if (tensor->data != nullptr) ranges[count++] = common::operand::blocks(*tensor, kOp);
     }
-    for (std::size_t i = 0; i < count; ++i)
-        for (std::size_t j = 0; j < i; ++j)
+    for (std::size_t i = 0; i < count; ++i) {
+        for (std::size_t j = 0; j < i; ++j) {
             if (common::operand::overlaps(ranges[i], ranges[j]))
                 throw std::invalid_argument("gated_delta_net_replay_record: tensors overlap");
+        }
+    }
 }
 
 } // namespace

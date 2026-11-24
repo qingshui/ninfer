@@ -24,11 +24,14 @@ public:
         : states_(&states), continuation_(std::move(continuation)), prefixes_(std::move(prefixes)),
           identity_(std::move(identity)) {
         if (!identity_) throw std::invalid_argument("snapshot has no input identity");
-        for (const auto& prefix : prefixes_)
+        for (const auto& prefix : prefixes_) {
             if (!prefix.valid())
                 throw std::invalid_argument("snapshot has an empty prefix reference");
+        }
         states_->retain_checkpoint_reference(continuation_.image);
-        for (auto& prefix : prefixes_) prefix.set_use(ContextUse::Cache);
+        for (auto& prefix : prefixes_) {
+            prefix.set_use(ContextUse::Cache);
+        }
     }
 
     ~ContextSnapshot() { release(); }
@@ -88,7 +91,9 @@ public:
             states_->retain_request_reference(continuation_.image, memory);
         if (states_ && use_ == ContextUse::Request)
             states_->release_request_reference(continuation_.image, memory_);
-        for (auto& prefix : prefixes_) prefix.set_use(use, memory);
+        for (auto& prefix : prefixes_) {
+            prefix.set_use(use, memory);
+        }
         use_    = use;
         memory_ = memory;
     }

@@ -75,15 +75,17 @@ std::shared_ptr<MonitorEvents::Subscription> MonitorEvents::subscribe() {
 void MonitorEvents::publish(const std::string& event) {
     std::lock_guard lock(mutex_);
     if (!closed_)
-        for (const auto& weak : subscribers_)
+        for (const auto& weak : subscribers_) {
             if (auto subscriber = weak.lock()) subscriber->push(event);
+        }
 }
 
 void MonitorEvents::close() {
     std::lock_guard lock(mutex_);
     closed_ = true;
-    for (const auto& weak : subscribers_)
+    for (const auto& weak : subscribers_) {
         if (auto subscriber = weak.lock()) subscriber->close();
+    }
 }
 
 ServiceObservations::ServiceObservations() {
@@ -254,7 +256,7 @@ nlohmann::json service_observation_json(const ServiceSnapshot& snapshot) {
                {"positions", c.constraint_positions},
                {"upload_bytes", c.constraint_upload_bytes}}},
              {"requests", Json::array()}};
-    for (const auto& r : snapshot.requests)
+    for (const auto& r : snapshot.requests) {
         out["requests"].push_back({{"id", r.id},
                                    {"engine_request_id", r.engine_request_id},
                                    {"http_request_id", r.http_request_id},
@@ -263,6 +265,7 @@ nlohmann::json service_observation_json(const ServiceSnapshot& snapshot) {
                                    {"received_ns", r.received_ns},
                                    {"preparing", r.preparing},
                                    {"stream", r.stream}});
+    }
     return out;
 }
 } // namespace ninfer::serve

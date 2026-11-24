@@ -125,8 +125,9 @@ __global__ void partial_kernel(const __nv_bfloat16* logits, int rows, int begin,
 __global__ void merge_greedy(const unsigned long long* input, unsigned long long* output,
                              int partials) {
     unsigned long long key = 0;
-    for (int i = threadIdx.x; i < partials; i += blockDim.x)
+    for (int i = threadIdx.x; i < partials; i += blockDim.x) {
         key = max(key, input[std::int64_t(blockIdx.x) * partials + i]);
+    }
     __shared__ unsigned long long warp_keys[4];
     key = block_reduce_max_key(key, warp_keys);
     if (threadIdx.x == 0) output[blockIdx.x] = key;
@@ -186,8 +187,9 @@ void vocabulary_candidates(const Tensor& logits, int token_begin, int token_doma
     if (!configs || !operand::aligned(configs, alignof(SamplingConfig)))
         throw std::invalid_argument("vocabulary_candidates: invalid configs");
     const auto destination = operand::range(keys, kOp);
-    for (const auto* input : {&logits, &valid_columns, &drafts})
+    for (const auto* input : {&logits, &valid_columns, &drafts}) {
         if (input->data) operand::disjoint(destination, operand::strided_range(*input, kOp), kOp);
+    }
     const auto config_range = operand::range(configs, sizeof(SamplingConfig) * batch, kOp);
     operand::disjoint(destination, config_range, kOp);
     operand::device(workspace.device(), execution.device(), kOp, "workspace");
@@ -199,8 +201,9 @@ void vocabulary_candidates(const Tensor& logits, int token_begin, int token_doma
         const auto range   = operand::range(scratch.data, scratch.bytes, kOp);
         operand::disjoint(range, destination, kOp);
         operand::disjoint(range, config_range, kOp);
-        for (const auto* input : {&logits, &valid_columns, &drafts})
+        for (const auto* input : {&logits, &valid_columns, &drafts}) {
             if (input->data) operand::disjoint(range, operand::strided_range(*input, kOp), kOp);
+        }
         first  = static_cast<unsigned long long*>(scratch.data);
         second = reinterpret_cast<unsigned long long*>(static_cast<char*>(scratch.data) +
                                                        selected.first_bytes);

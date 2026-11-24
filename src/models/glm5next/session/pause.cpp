@@ -24,9 +24,10 @@ std::vector<PauseOption> Session::pause_options(SequenceHandle h) const {
     std::vector<PauseOption> result;
     if (s.request->can_checkpoint(s.continuation.metadata.main_frontier)) {
         ContextDemand checkpoint_demand;
-        for (std::uint32_t pool = 0; pool < p.pool_count(); ++pool)
+        for (std::uint32_t pool = 0; pool < p.pool_count(); ++pool) {
             checkpoint_demand.add_growth(p.directory.pool(pool).histories(),
                                          s.histories[pool].handle(), 0);
+        }
         result.push_back({.action   = {runtime::PauseKind::KeepDevice, {}},
                           .demand   = checkpoint_demand,
                           .released = preparation_release});
@@ -39,8 +40,9 @@ std::vector<PauseOption> Session::pause_options(SequenceHandle h) const {
     for (std::uint32_t pool = 0; pool < p.pool_count(); ++pool) {
         const auto& histories = p.directory.pool(pool).histories();
         const auto history    = s.histories[pool].handle();
-        for (const auto page : histories.released_pages(history))
+        for (const auto page : histories.released_pages(history)) {
             released.merge(p.directory.page_release(page));
+        }
         const auto retired = histories.released_histories(history);
         released.histories.insert(released.histories.end(), retired.begin(), retired.end());
     }
@@ -74,10 +76,11 @@ bool Session::pause_contributes(SequenceHandle h, const PauseOption& option,
     if (assessment.metadata_contribution(option.released) ||
         p.directory.useful_release_bytes(option.released, assessment))
         return true;
-    for (std::uint32_t pool = 0; pool < p.pool_count(); ++pool)
+    for (std::uint32_t pool = 0; pool < p.pool_count(); ++pool) {
         if (p.directory.pool(pool).histories().growth_contributes(
                 s.histories[pool].handle(), assessment.placement, assessment.metadata_shortage))
             return true;
+    }
     return false;
 }
 
@@ -98,9 +101,10 @@ bool Session::prepare_pause(SequenceHandle h, runtime::PauseAction action,
     sequence.capture_pending = false;
     ContextDemand demand;
     if (action.kind != runtime::PauseKind::ReleaseAndReplay) {
-        for (std::uint32_t pool = 0; pool < p.pool_count(); ++pool)
+        for (std::uint32_t pool = 0; pool < p.pool_count(); ++pool) {
             demand.add_growth(p.directory.pool(pool).histories(), sequence.histories[pool].handle(),
                               0);
+        }
     }
     detail::RelocationTargets relocation;
     if (action.kind == runtime::PauseKind::Relocate) {

@@ -277,12 +277,14 @@ private:
                 description.context_token_capacity_estimate =
                     runtime::estimate_context_token_capacity(instance->context_capacities);
                 const auto usage = instance->session->physical_usage();
-                for (const auto& pool : usage.pools)
+                for (const auto& pool : usage.pools) {
                     description.context_pools.push_back(
                         {pool.rank, pool.domain, pool.capacity_bytes, pool.block_bytes});
+                }
                 startup.ranks = instance->rank_budgets;
-                for (const auto& pool : instance->session->kv_pools())
+                for (const auto& pool : instance->session->kv_pools()) {
                     description.kv_pools.push_back({pool.id.index, std::string(pool.label), 0});
+                }
                 const auto ranks = instance->executor->rank_descriptions();
                 description.ranks.assign(ranks.begin(), ranks.end());
                 description.placements = instance->session->placement_descriptions();

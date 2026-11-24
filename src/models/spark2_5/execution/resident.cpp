@@ -22,9 +22,11 @@ std::unique_ptr<ModelShard> materialize_resident(const artifact::Reader& reader,
     if (device.device().type() != DeviceType::CUDA)
         throw artifact::ArtifactError("Spark2_5 weights are placed on a GPU");
     std::vector<artifact::PlacementRequest> requests;
-    for (const auto& parameter : definition->parameters())
-        for (const auto& part : parameter.binding.parts)
+    for (const auto& parameter : definition->parameters()) {
+        for (const auto& part : parameter.binding.parts) {
             requests.push_back({part.object, device.device(), artifact::HostAccess::CpuOnly});
+        }
+    }
     auto backing = artifact::materialize(reader, artifact::plan_materialization(reader, requests),
                                          device.transfer_view(), observer);
     std::vector<PendingWeight> pending;

@@ -56,7 +56,7 @@ void validate_pair_weights(const Weight& first, const Weight& second, int max_to
         if (max_tokens <= 0 || (first.n != 4096 && first.n != 8192) || first.k != 128 ||
             second.n != first.n || second.k != first.k)
             throw std::invalid_argument("linear_pair: unsupported BF16 geometry");
-        for (const auto* w : {&first, &second})
+        for (const auto* w : {&first, &second}) {
             if (w->ndim != 2 || w->shape[0] != w->n || w->shape[1] != w->k ||
                 w->padded_shape[0] != w->n || w->padded_shape[1] != w->k ||
                 w->layout != QuantLayout::Contiguous || w->group || w->group_size || w->scales ||
@@ -64,6 +64,7 @@ void validate_pair_weights(const Weight& first, const Weight& second, int max_to
                 w->payload_bytes < std::uint64_t(w->n) * w->k * 2 ||
                 !common::operand::aligned(w->qdata, 16))
                 throw std::invalid_argument("linear_pair: invalid BF16 weight");
+        }
         return;
     }
     (void)select_linear_pair(first.k, max_tokens);

@@ -31,14 +31,16 @@ RankProgramImpl::RankProgramImpl(const execution::Parameters& values, const Sequ
     if (auto* cache = resources.backend_kv()) tables.push_back({1, &cache->tables()});
     storage = std::make_unique<context::ContextStorage>(resources.context.span(),
                                                         resources.host_context.span(), tables);
-    for (std::uint32_t frame = 0; frame < compute_frames; ++frame)
+    for (std::uint32_t frame = 0; frame < compute_frames; ++frame) {
         slots.push_back(std::make_unique<ComputeSlot>(device, *storage, plan.gpu_timing));
+    }
     context_actions = std::make_unique<context::ContextMigration>(device, *storage);
     if (plan.moe) {
         std::vector<const moe::Parameters*> layers;
-        for (const auto& block : parameters.text.layers)
+        for (const auto& block : parameters.text.layers) {
             if (const auto* layer = std::get_if<moe::Parameters>(&block.ffn))
                 layers.push_back(layer);
+        }
         resources.moe = plan.moe->create(layers, parameters.model.expert_banks(), device,
                                          plan.graph_probe ? moe::ResourcePurpose::GraphCalibration
                                                           : moe::ResourcePurpose::Execution);
@@ -83,7 +85,9 @@ void RankProgramImpl::install_residencies(const ContextWork& work) {
         }
         residency.installed = false;
     }
-    for (const auto& binding : work.bindings) install_binding(binding, device.transfer_stream());
+    for (const auto& binding : work.bindings) {
+        install_binding(binding, device.transfer_stream());
+    }
 }
 
 void RankProgramImpl::install_binding(const ResidencyBinding& binding, cudaStream_t stream) {
@@ -129,8 +133,9 @@ void RankProgramImpl::start(runtime::ExecutionRequest<ExecutionTypes>&& request)
         slot().gpu_timer.begin();
         slot().compute = std::make_unique<ComputeOperation>(std::move(request), max_concurrency);
         // Stream order of a flight: residency installs, deferred context actions, the forward.
-        for (const auto& binding : slot().compute->request.work.installs)
+        for (const auto& binding : slot().compute->request.work.installs) {
             install_binding(binding, device.stream());
+        }
         slot().compute_actions->submit(slot().compute->request.work.context);
         initialize_inputs(*slot().compute);
     }
@@ -191,7 +196,9 @@ void RankProgramImpl::drain() {
         attempt([&] { resources.moe->cancel(); });
         attempt([&] { resources.moe->synchronize(); });
     }
-    for (auto& entry : slots) attempt([&] { entry->compute_actions->drain(); });
+    for (auto& entry : slots) {
+        attempt([&] { entry->compute_actions->drain(); });
+    }
     attempt([&] { context_actions->drain(); });
     const auto wait_stream = [](cudaStream_t stream) {
         const auto status = cudaStreamSynchronize(stream);
@@ -201,7 +208,9 @@ void RankProgramImpl::drain() {
     };
     attempt([&] { wait_stream(device.transfer_stream()); });
     attempt([&] { wait_stream(device.stream()); });
-    for (auto& entry : slots) entry->compute.reset();
+    for (auto& entry : slots) {
+        entry->compute.reset();
+    }
     context_operation.reset();
     events.clear();
     if (resources.vision)

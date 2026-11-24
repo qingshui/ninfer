@@ -50,8 +50,9 @@ std::size_t convolution_capacity(const WeightProfile& weights, Publication publi
     std::size_t capacity = 0;
     // Short-window routes are not monotone. Above 16, B=1 always materializes and the
     // allocation recipe grows monotonically, so the upper endpoint covers that whole region.
-    for (int tokens = first; tokens <= std::min(last, 16); ++tokens)
+    for (int tokens = first; tokens <= std::min(last, 16); ++tokens) {
         capacity = std::max(capacity, at(tokens));
+    }
     if (last > 16) capacity = std::max(capacity, at(last));
     return capacity;
 }

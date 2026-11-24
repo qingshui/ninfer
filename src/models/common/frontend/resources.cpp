@@ -22,7 +22,9 @@ std::vector<TokenId> parse_stop_tokens(std::string_view generation_config,
     const auto& eos = generation.at("eos_token_id");
     if (eos.is_array()) {
         if (eos.empty()) throw artifact::ArtifactError("eos_token_id must not be empty");
-        for (const auto& id : eos) append(id);
+        for (const auto& id : eos) {
+            append(id);
+        }
     } else
         append(eos);
     return stops;
@@ -48,10 +50,11 @@ void prepare_control_tokens(TextResources& resources, std::string_view text,
         resources.tokenizer->decode(*tokens, {.skip_special_tokens = true}).find(close) ==
             std::string::npos)
         throw std::invalid_argument("tokenizer cannot present the thinking control suffix");
-    for (auto id : *tokens)
+    for (auto id : *tokens) {
         if (std::find(resources.stop_token_ids.begin(), resources.stop_token_ids.end(), id) !=
             resources.stop_token_ids.end())
             throw std::invalid_argument("thinking control contains a terminal token");
+    }
     resources.control_tokens = std::move(tokens);
 }
 

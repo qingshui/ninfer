@@ -51,8 +51,9 @@ void populate_host_pages(MemorySpan storage) {
             const auto tail   = pages.count % pages.workers;
             const auto begin  = rank * width + std::min<std::size_t>(rank, tail);
             const auto end    = begin + width + (rank < tail);
-            for (auto page = begin; page < end; ++page)
+            for (auto page = begin; page < end; ++page) {
                 pages.data[page * kPayloadAlignment] = std::byte{};
+            }
         },
         &pages);
     cpu_detail::join_workers(threads);
@@ -309,9 +310,10 @@ MaterializedArtifact materialize(const Reader& reader, MaterializationPlan&& pla
          {&plan.device_objects, &plan.ordinary_host_objects, &plan.registered_host_objects}) {
         for (const auto& placement : *placements) {
             const auto& tensor = plan.tensors.at(placement.storage.index);
-            for (const auto& copy : tensor.copies)
+            for (const auto& copy : tensor.copies) {
                 total = checked_add(total, checked_mul(copy.bytes, copy.count, "copy payload"),
                                     "materialized payload bytes");
+            }
             if (!tensor.csf_slices.empty())
                 total = checked_add(total, csf_repack_bytes(tensor.geometry), "CSF payload bytes");
         }
@@ -491,8 +493,9 @@ MaterializedArtifact materialize(const Reader& reader, MaterializationPlan&& pla
             bool uploaded         = false;
             while (next_range < ranges.size() &&
                    (ranges[next_range].file < span.file ||
-                    (ranges[next_range].file == span.file && ranges[next_range].end <= source)))
+                    (ranges[next_range].file == span.file && ranges[next_range].end <= source))) {
                 ++next_range;
+            }
             for (auto index = next_range;
                  index < ranges.size() && ranges[index].file == span.file &&
                  ranges[index].begin < chunk_end;

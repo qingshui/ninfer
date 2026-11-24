@@ -69,10 +69,11 @@ void RankProgramImpl::prepare_mtp_draft(ComputeOperation& operation) {
             valid[row] = step == 0 || step < work.rows[row].draft_extent;
             positions[row] =
                 valid[row] ? static_cast<std::int32_t>(binding.main_frontier - 1 + step) : 0;
-            for (int axis = 0; axis < 3; ++axis)
+            for (int axis = 0; axis < 3; ++axis) {
                 rope[axis * batch + row] = !valid[row] ? 0
                                            : step == 0 ? binding.tail_rope_position[axis]
                                                        : positions[row] + binding.rope_delta;
+            }
         }
     }
 }
@@ -117,8 +118,9 @@ void RankProgramImpl::begin_mtp_draft(ComputeOperation& operation) {
     // anchor's MTP history even when no row proposes a draft.
     if (operation.drafts == 0 && !operation.mixed) return;
     std::uint32_t maximum = 1;
-    for (std::uint32_t row = 0; row < operation.batch; ++row)
+    for (std::uint32_t row = 0; row < operation.batch; ++row) {
         maximum = std::max(maximum, operation.rows[row].main_frontier);
+    }
     run_mtp_draft(operation.batch, std::max(operation.drafts, 1U), maximum);
 }
 

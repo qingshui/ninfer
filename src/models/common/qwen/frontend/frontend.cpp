@@ -210,9 +210,10 @@ prepare_context_cache(ContextCacheHints hints, std::size_t message_count,
     if (cache_boundaries.size() != rendered_markers.size())
         throw std::logic_error("rendered cache marker count changed during preparation");
     std::vector<std::uint32_t> semantic, structural;
-    for (const auto boundary : message_boundaries)
+    for (const auto boundary : message_boundaries) {
         if (boundary && exact_vision_frontier(*boundary, vision_items))
             semantic.push_back(*boundary);
+    }
     std::vector<std::optional<std::uint32_t>> explicit_frontiers;
     for (std::size_t i = 0; i < hints.markers.size(); ++i) {
         const auto frontier = cache_boundaries[i];

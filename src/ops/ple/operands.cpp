@@ -19,7 +19,9 @@ void contiguous(const Tensor& t, DType dtype, std::initializer_list<std::int32_t
     const auto expected = Tensor::metadata(dtype, shape);
     require(t.dtype == dtype && t.is_contiguous() && common::operand::aligned(t.data, alignment),
             label);
-    for (int d = 0; d < 4; ++d) require(t.ne[d] == expected.ne[d], label);
+    for (int d = 0; d < 4; ++d) {
+        require(t.ne[d] == expected.ne[d], label);
+    }
 }
 
 using common::operand::Range;
@@ -94,11 +96,13 @@ void validate_gate(const PleProjectionView& projected, const Tensor& residual,
     const int tokens = residual.ne[2], rows = residual.ne[3];
     validate_batch_extent(rows);
     require(tokens > 0, "token extent");
-    for (const Tensor* t : {&residual, &gated})
+    for (const Tensor* t : {&residual, &gated}) {
         contiguous(*t, DType::BF16, {kFeatures, kStreams, tokens, rows}, 16, "activation",
                    execution.device());
-    for (const Tensor* t : {&parameters.norm_key, &parameters.norm_query, &parameters.norm_conv})
+    }
+    for (const Tensor* t : {&parameters.norm_key, &parameters.norm_query, &parameters.norm_conv}) {
         contiguous(*t, DType::BF16, {kFeatures, kStreams}, 2, "norm weight", execution.device());
+    }
     require(std::isfinite(parameters.rms_epsilon) && parameters.rms_epsilon > 0, "norm epsilon");
     metadata(batch.valid_columns, rows, "valid columns", execution.device());
     metadata(records.offsets, rows, "record offsets", execution.device());
@@ -120,9 +124,10 @@ void validate_gate(const PleProjectionView& projected, const Tensor& residual,
         columns(records.values, records.values.ne[1], rows, "records", execution.device());
     const auto out = common::operand::range(gated.data, gated.bytes(), "PLE");
     for (const Tensor* input : {&residual, &parameters.norm_key, &parameters.norm_query,
-                                &parameters.norm_conv, &batch.valid_columns, &records.offsets})
+                                &parameters.norm_conv, &batch.valid_columns, &records.offsets}) {
         require(!common::operand::overlaps(out, common::operand::range(*input, "PLE")),
                 "gate output/input overlap");
+    }
     require(!overlaps_columns(out, keys) && !overlaps_columns(out, values) &&
                 !overlaps_columns(out, record),
             "gate output/projection or record overlap");
@@ -138,12 +143,14 @@ void validate_conv(const Tensor& residual, const Tensor& gated, const Tensor& ke
     const int tokens = residual.ne[2], rows = residual.ne[3];
     validate_batch_extent(rows);
     require(tokens > 0, "token extent");
-    for (const Tensor* t : {&residual, &gated, &updated})
+    for (const Tensor* t : {&residual, &gated, &updated}) {
         contiguous(*t, DType::BF16, {kFeatures, kStreams, tokens, rows}, 16, "activation",
                    execution.device());
+    }
     if (updated.data == residual.data)
-        for (int d = 0; d < 4; ++d)
+        for (int d = 0; d < 4; ++d) {
             require(updated.nb[d] == residual.nb[d], "in-place residual strides");
+        }
     contiguous(kernel, DType::BF16, {kChannels, 4}, 2, "convolution kernel", execution.device());
     metadata(batch.valid_columns, rows, "valid columns", execution.device());
     require(before.history.field.layers == 1, "history layer");

@@ -16,7 +16,9 @@ std::vector<RecordSpec> specs(const ExecutionPlan& p) {
 
 std::vector<RecordRequest> demand(const ContextPoolGeometry& geometry, std::uint32_t batch) {
     std::vector<RecordRequest> out;
-    for (auto id : geometry.spec_classes) out.push_back({id, batch});
+    for (auto id : geometry.spec_classes) {
+        out.push_back({id, batch});
+    }
     return out;
 }
 } // namespace
@@ -49,8 +51,9 @@ void GraphInputs::prepare() {
         CUDA_CHECK(cudaMemsetAsync(span.data, 0, span.bytes, p.cuda.stream()));
         return std::int64_t(binding.offset);
     };
-    for (std::uint32_t row = 0; row < p.shape.max_concurrency; ++row)
+    for (std::uint32_t row = 0; row < p.shape.max_concurrency; ++row) {
         states_.push_back(allocate(0));
+    }
     for (int pool = 0; pool < (r.mtp ? 2 : 1); ++pool) {
         auto& tables    = (pool ? *r.mtp : r.main).tables();
         mappings_[pool] = PinnedHostBuffer(p.shape.max_concurrency * sizeof(std::int64_t));
@@ -68,7 +71,9 @@ void GraphInputs::prepare() {
 
 GraphInputs::~GraphInputs() {
     (void)cudaStreamSynchronize(owner_.cuda.stream());
-    for (auto id : allocations_) records_->release(id);
+    for (auto id : allocations_) {
+        records_->release(id);
+    }
 }
 
 void GraphInputs::set(int g, int c, int depth) {
@@ -103,7 +108,9 @@ void GraphInputs::set(int g, int c, int depth) {
         }
     };
     batch(io.decode, width, base, extent + 1, false);
-    for (int j = 0; j < g; ++j) i32(io.rows.anchors)[j] = 0;
+    for (int j = 0; j < g; ++j) {
+        i32(io.rows.anchors)[j] = 0;
+    }
     for (int j = 0; j < g; ++j) {
         i64(io.rows.source_offsets)[j]      = states_[j];
         i64(io.rows.destination_offsets)[j] = states_[j];
@@ -129,13 +136,17 @@ void GraphInputs::set(int g, int c, int depth) {
         i32(a.accepted_columns)[j]    = live ? 1 : 0;
         i32(a.active_columns)[j]      = live ? 0 : -1;
     }
-    for (int rank = 0; rank < ranks; ++rank)
-        for (int j = 0; j < counts[rank]; ++j) i32(a.from_gather)[begins[rank] + j] = rank * c + j;
+    for (int rank = 0; rank < ranks; ++rank) {
+        for (int j = 0; j < counts[rank]; ++j) {
+            i32(a.from_gather)[begins[rank] + j] = rank * c + j;
+        }
+    }
     if (io.mtp) {
         const auto& m = *io.mtp;
-        for (int s = 0; s < depth; ++s)
+        for (int s = 0; s < depth; ++s) {
             batch(m.draft_steps[s], 1, std::max(base - 1, 0) + std::min(s, extent), s < extent,
                   false);
+        }
         for (int j = 0; j < g; ++j) {
             i32(m.extents)[j]      = extent;
             i32(m.skip_first)[j]   = depth ? extent != 0 : base == 0;
@@ -144,10 +155,13 @@ void GraphInputs::set(int g, int c, int depth) {
     }
     p.fill_local_metadata(io.decode, width, c);
     if (io.mtp)
-        for (int step = 0; step < depth; ++step)
+        for (int step = 0; step < depth; ++step) {
             p.fill_local_metadata(io.mtp->draft_steps[step], 1, c);
+        }
     auto* configs = static_cast<ops::SamplingConfig*>(p.host(*io.sampling).data);
-    for (int j = 0; j < g; ++j) configs[j] = {.temperature = 0, .top_k = 1, .top_p = 1};
+    for (int j = 0; j < g; ++j) {
+        configs[j] = {.temperature = 0, .top_k = 1, .top_p = 1};
+    }
     p.upload_region(io.ingress, io.ingress.bytes);
     p.upload_region(io.commit_ingress, io.commit_ingress.bytes);
 }

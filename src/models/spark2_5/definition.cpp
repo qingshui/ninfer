@@ -92,8 +92,9 @@ std::shared_ptr<const ModelDefinition> read_definition(const artifact::Reader& r
     stats.read_bytes               = out->prepared_resources.read_bytes;
     stats.owned_value_bytes        = out->prepared_resources.owned_value_bytes;
     stats.host_object_count        = out->prepared_resources.objects.size();
-    for (const auto& resource : out->prepared_resources.objects)
+    for (const auto& resource : out->prepared_resources.objects) {
         stats.retained_host_bytes += resource.data.size();
+    }
     return std::shared_ptr<const ModelDefinition>(new ModelDefinition(std::move(out)));
 }
 

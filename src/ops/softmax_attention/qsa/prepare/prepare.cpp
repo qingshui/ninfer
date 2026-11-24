@@ -10,8 +10,9 @@ namespace {
 
 bool identical(const Tensor& a, const Tensor& b) {
     if (a.data != b.data || a.device != b.device || a.dtype != b.dtype) return false;
-    for (int d = 0; d < 4; ++d)
+    for (int d = 0; d < 4; ++d) {
         if (a.ne[d] != b.ne[d] || a.nb[d] != b.nb[d]) return false;
+    }
     return true;
 }
 
@@ -100,8 +101,9 @@ void qsa_prepare(const QsaProjectionView& p, const QsaPrepareParameters& paramet
                  &parameters.query_norm, &parameters.kv.key_norm, &parameters.index_query_norm,
                  &parameters.kv.index_key_norm, &batch.positions, &batch.valid_columns,
                  &batch.table_rows, &rope_positions, &before.raw_keys.records.byte_offsets,
-                 &before.first_rope.records.byte_offsets, &records.offsets})
+                 &before.first_rope.records.byte_offsets, &records.offsets}) {
             v.require(!v.overlap(*out, *in), "output/parameter overlap");
+        }
     }
     detail::qsa::launch_prepare(p, parameters, batch, rope_positions, before, cache, records, query,
                                 index_query, execution);

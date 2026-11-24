@@ -228,11 +228,14 @@ RequestSnapshot EngineCore<Instance>::observe_request(const Request& request) co
     out.recovery         = request.recovery;
     out.recovery_pending = request.recovery_pending;
     if (request.last_progress) out.last_progress_ns = elapsed_ns({}, *request.last_progress);
-    for (const auto* flights : {&compute_, &retiring_})
-        for (const auto& flight : *flights)
+    for (const auto* flights : {&compute_, &retiring_}) {
+        for (const auto& flight : *flights) {
             if (flight)
-                for (const auto& member : flight->requests)
+                for (const auto& member : flight->requests) {
                     if (member.get() == &request) out.execution_in_flight = true;
+                }
+        }
+    }
     return out;
 }
 
@@ -309,7 +312,9 @@ void EngineCore<Instance>::publish_runtime_stats() {
         if (request.capture_pending) { ++snapshot.capture_pending_requests; }
         if (request.terminal_reason) { ++snapshot.terminal_pending_requests; }
     }
-    for (const auto& request : paused_) request_observations_.push_back(observe_request(*request));
+    for (const auto& request : paused_) {
+        request_observations_.push_back(observe_request(*request));
+    }
     for (const auto& entry : materializing_) {
         if (entry) { request_observations_.push_back(observe_request(*entry->request)); }
     }

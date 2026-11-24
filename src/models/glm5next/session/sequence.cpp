@@ -7,11 +7,12 @@ namespace ninfer::models::glm5next::detail {
 std::uint32_t SessionImpl::window_end(const Sequence& s, std::uint32_t begin,
                                       std::uint32_t end) const {
     end = std::min(end, begin + shape.prefill_chunk);
-    for (const auto frontier : s.identity.execution_frontiers)
+    for (const auto frontier : s.identity.execution_frontiers) {
         if (frontier > begin) {
             end = std::min(end, frontier);
             break;
         }
+    }
     if (s.capture && s.next_capture < s.captures.size())
         end = std::min(end, s.captures[s.next_capture].frontier);
     if (s.request->vision)
@@ -118,10 +119,11 @@ ContinuationMetadata SessionImpl::prepare_commit(Sequence& s, const WorkRow& row
         if (pool_count() > 1) metadata.mtp_frontier = mtp_history_frontier(metadata.main_frontier);
     }
     const auto peak = retain_recovery ? s.recovery_peak : 0;
-    for (std::uint32_t i = 0; i < pool_count(); ++i)
+    for (std::uint32_t i = 0; i < pool_count(); ++i) {
         directory.pool(i).histories().prepare_commit(
             s.histories[i], i ? *metadata.mtp_frontier : metadata.main_frontier,
             i ? mtp_history_frontier(peak) : peak, transaction);
+    }
     return metadata;
 }
 

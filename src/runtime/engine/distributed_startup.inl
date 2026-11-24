@@ -75,9 +75,11 @@ build_distributed_model(const artifact::Reader& reader, EngineOptions& options,
                                                        options.context_cost.preset_path);
     load.context_cost   = std::move(cost.summary);
     std::set<std::string> formats;
-    for (const auto& weight : setup.definition()->weight_data())
-        for (const auto& part : weight.view.parts)
+    for (const auto& weight : setup.definition()->weight_data()) {
+        for (const auto& part : weight.view.parts) {
             formats.emplace(artifact::format_name(part.parent->geometry.format));
+        }
+    }
     load.weight_formats.assign(formats.begin(), formats.end());
     load.load_seconds =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();

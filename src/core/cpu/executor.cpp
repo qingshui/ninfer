@@ -92,8 +92,9 @@ struct CpuExecutor::Impl {
             },
             this);
         features = states[0].features;
-        for (std::uint32_t rank = 1; rank < count; ++rank)
+        for (std::uint32_t rank = 1; rank < count; ++rank) {
             features = features.intersect(states[rank].features);
+        }
     }
 
     ~Impl() {

@@ -59,12 +59,13 @@ create_output_session(const OutputResources& resources, const PreparedOutput& pr
                                "one output language");
         const auto close = prompt.starts_in_reasoning ? kThinkClose : std::string_view{};
         if (tool_constraint) {
-            for (const auto& tool : tools->tools)
+            for (const auto& tool : tools->tools) {
                 if (!valid_tool_name(tool.name, output.tool_name_max_length))
                     throw RequestError(RequestErrorKind::InvalidToolConstraint,
                                        "tool name is outside the GLM output contract: " + tool.name,
                                        "/" + std::to_string(tool.declaration_index) + "/name",
                                        RequestErrorSource::Tools);
+            }
             matcher = compile_tool_grammar(resources.text.grammars(), tools, close,
                                            prompt.continuation_content, constraint);
         } else

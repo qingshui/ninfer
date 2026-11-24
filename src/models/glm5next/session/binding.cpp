@@ -6,7 +6,9 @@ namespace ninfer::models::glm5next {
 
 std::vector<PlacementDescriptor> Session::placement_descriptions() const {
     std::vector<PlacementDescriptor> result;
-    for (const auto id : impl_->placements) result.push_back({id.value, {id.value}});
+    for (const auto id : impl_->placements) {
+        result.push_back({id.value, {id.value}});
+    }
     return result;
 }
 
@@ -78,12 +80,14 @@ Session::inspect_source(const RequestBasePlan& base, std::optional<CheckpointHan
                 return transfer.direction == runtime::ContextTransferDirection::HostToDevice;
             });
     }
-    for (const auto point : carried)
+    for (const auto point : carried) {
         if ((!h || point != *h || !out.consume_source) && p.source_matches(base, point, resume) &&
             p.checkpoints.at(point).frontier() <= out.reused_tokens)
             out.private_points.push_back(point);
-    for (const auto point : retired)
+    }
+    for (const auto point : retired) {
         if ((!h || point != *h) && valid_checkpoint(point)) out.retired_points.push_back(point);
+    }
     return out;
 }
 
@@ -138,12 +142,14 @@ detail::SessionImpl::plan_binding(const RequestBasePlan& base, runtime::LaneId l
             return plan;
         }
         plan.retired.push_back(point);
-        for (std::uint16_t pool = 0; pool < directory.pool_count(); ++pool)
+        for (std::uint16_t pool = 0; pool < directory.pool_count(); ++pool) {
             retired_prefixes[pool].push_back(&checkpoints.at(point).snapshot.prefix(pool));
+        }
     }
     if (consume)
-        for (std::uint16_t pool = 0; pool < directory.pool_count(); ++pool)
+        for (std::uint16_t pool = 0; pool < directory.pool_count(); ++pool) {
             retired_prefixes[pool].push_back(&checkpoint->snapshot.prefix(pool));
+        }
     auto& action          = plan.action;
     action.lane           = lane.value;
     action.placement      = candidate.placement;
@@ -312,8 +318,9 @@ ResidencyBinding SessionImpl::context_binding(BindOperation& operation) {
     if (!operation.source && pool_count() > 1) sequence.continuation.metadata.mtp_frontier = 0;
     sequence.continuation.metadata.placement = operation.placement;
     while (sequence.next_capture < sequence.captures.size() &&
-           sequence.captures[sequence.next_capture].frontier <= operation.frontier)
+           sequence.captures[sequence.next_capture].frontier <= operation.frontier) {
         ++sequence.next_capture;
+    }
 
     const auto generated = std::span<const TokenId>(sequence.identity.tokens)
                                .subspan(sequence.request->summary.prompt_tokens);
@@ -391,7 +398,9 @@ conversion_requirements(const SessionPlan& plan, const Snapshot& snapshot, std::
         const auto full_pages = f / page.geometry.page_tokens;
         auto bytes            = full_pages * page.page_bytes;
         const auto ranges     = history_conversion(page, from, to, f % page.geometry.page_tokens);
-        for (const auto& range : ranges.partial_page) bytes += range.bytes;
+        for (const auto& range : ranges.partial_page) {
+            bytes += range.bytes;
+        }
         runtime::ContextTransferRequirement r;
         r.resource    = {runtime::KvPoolId{pool}};
         r.direction   = runtime::ContextTransferDirection::PeerDeviceToDevice;

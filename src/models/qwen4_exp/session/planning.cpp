@@ -39,9 +39,10 @@ SessionPlan plan_session(const ExecutionPlan& execution) {
     if (execution.persistent.mtp) add(*execution.persistent.mtp);
     plan.context.metadata_budget_bytes = execution.capacity.metadata_budget_bytes;
     if (plan.context.metadata_budget_bytes)
-        for (auto& pool : plan.context.pools)
+        for (auto& pool : plan.context.pools) {
             pool.histories = context::HistoryDirectory::capacity_for_metadata(
                 plan.context.metadata_budget_bytes);
+        }
     if (execution.workspace.vision)
         plan.vision_max_features = execution.workspace.vision->max_features;
     return plan;
@@ -59,7 +60,9 @@ runtime::ContextMetadataPlan session_metadata_plan(const ExecutionPlan& executio
     for (auto& pool : schema.pools) {
         const auto part = pool.parts.front();
         pool.parts.clear();
-        for (std::uint32_t i = 0; i < ranks; ++i) pool.parts.push_back({i, part.record});
+        for (std::uint32_t i = 0; i < ranks; ++i) {
+            pool.parts.push_back({i, part.record});
+        }
     }
     for (std::uint32_t i = 0; i < ranks; ++i) {
         schema.ranks.push_back({i, 0, i == rank ? local_rank.host_bytes : 0});
@@ -72,9 +75,10 @@ runtime::ContextMetadataPlan session_metadata_plan(const ExecutionPlan& executio
     const auto recovery_cost =
         context::RecoveryIndex<>::metadata_bytes(1) - context::RecoveryIndex<>::metadata_bytes(0);
     std::size_t history_cost = 0;
-    for (const auto& pool : schema.pools)
+    for (const auto& pool : schema.pools) {
         history_cost += context::HistoryDirectory::metadata_bytes(1, 0, pool.page_capacity, ranks) -
                         context::HistoryDirectory::metadata_bytes(0, 0, pool.page_capacity, ranks);
+    }
     if (rank == 0)
         metadata.fixed_bytes +=
             TokenCountBuilder::capacity_bytes(execution.shape.purpose == EnginePurpose::Generation

@@ -73,8 +73,9 @@ void decode_nf4_row(std::span<const std::byte> encoded, const Nf4Bf16Lut& lut,
     if (!k || k % 16 || k / 2 + k / 16 > 4096 || encoded.size() != k / 2 + k / 16)
         throw std::invalid_argument("invalid NF4 row geometry");
     const auto* row = reinterpret_cast<const std::uint8_t*>(encoded.data());
-    for (std::size_t group = 0; group < k / 16; ++group)
+    for (std::size_t group = 0; group < k / 16; ++group) {
         if (row[k / 2 + group] >= 127) throw std::invalid_argument("invalid NF4 scale word");
+    }
     for (std::size_t group = 0; group < k / 16; ++group) {
         const auto* table = lut.words.data() + row[k / 2 + group] * 16;
         for (unsigned j = 0; j < 8; ++j) {

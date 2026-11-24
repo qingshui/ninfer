@@ -75,8 +75,9 @@ public:
         if (buckets_.size() < hash_size) {
             metadata_.reserve(buckets_, hash_size);
             buckets_.assign(hash_size, none);
-            for (std::uint32_t i = 1; i < nodes_.size(); ++i)
+            for (std::uint32_t i = 1; i < nodes_.size(); ++i) {
                 if (nodes_[i].first_alias != none) link_bucket(i);
+            }
         }
         scratch_.reserve(evaluation_bytes(capacity, capacity + 1));
     }
@@ -96,8 +97,9 @@ public:
         ++work_.synchronizations;
         reserve_metadata(view.capacity());
         try {
-            for (std::uint32_t i = 0; i < slots_.size(); ++i)
+            for (std::uint32_t i = 0; i < slots_.size(); ++i) {
                 if (slots_[i].node != none && !view.valid(slots_[i].handle)) erase(i);
+            }
             for (std::uint32_t i = 0; i < view.capacity(); ++i) {
                 const auto handle = view.handle(i);
                 if (slots_[i].node == none && view.valid(handle)) insert(handle, view);
@@ -148,7 +150,9 @@ private:
 
     static std::size_t hash_capacity(std::size_t capacity) {
         std::size_t size = 2;
-        while (size < 2 * (capacity + 1)) size *= 2;
+        while (size < 2 * (capacity + 1)) {
+            size *= 2;
+        }
         return size;
     }
 
@@ -240,7 +244,9 @@ private:
             child = next;
         }
         auto* link = &buckets_[bucket(node.frontier, node.key)];
-        while (*link != id) link = &nodes_[*link].bucket_next;
+        while (*link != id) {
+            link = &nodes_[*link].bucket_next;
+        }
         *link  = node.bucket_next;
         auto d = depth(node.frontier);
         if (!--d->count) depths_.erase(d);
@@ -263,10 +269,11 @@ private:
     template <class View>
     std::uint32_t find(const View& view, Handle handle, std::uint32_t frontier,
                        const RecoveryKey& key) {
-        for (auto id = buckets_[bucket(frontier, key)]; id != none; id = nodes_[id].bucket_next)
+        for (auto id = buckets_[bucket(frontier, key)]; id != none; id = nodes_[id].bucket_next) {
             if (nodes_[id].frontier == frontier && nodes_[id].key == key &&
                 prefix(view, representative(id), handle))
                 return id;
+        }
         return none;
     }
 
@@ -393,8 +400,9 @@ public:
                 ++available_[node];
             }
         }
-        for (const auto node : index.preorder_)
+        for (const auto node : index.preorder_) {
             nearest_[node] = available_[node] ? node : nearest_[index.nodes_[node].parent];
+        }
     }
 
     [[nodiscard]] bool contains(Handle handle) const {
@@ -474,8 +482,9 @@ public:
         result.include(additions);
         for (const auto added : additions) {
             std::optional<Handle> nearest;
-            for (const auto h : removed)
+            for (const auto h : removed) {
                 if (prefix(h, added) && (!nearest || frontier(h) > frontier(*nearest))) nearest = h;
+            }
             if (nearest && std::none_of(removed.begin(), removed.end(), [&](auto h) {
                     return frontier(h) > frontier(*nearest) && prefix(*nearest, h);
                 }))
@@ -509,8 +518,9 @@ public:
             }
             stack.push_back({node, worst, true});
         }
-        for (const auto& path : stack)
+        for (const auto& path : stack) {
             if (path.leaf) total += path.worst;
+        }
         return total;
     }
 
@@ -519,10 +529,11 @@ public:
     [[nodiscard]] std::uint32_t best_remaining(std::span<const Handle> candidates,
                                                std::span<const Handle> removed) {
         prepare(removed);
-        for (const auto handle : candidates)
+        for (const auto handle : candidates) {
             if (index_->node(handle) != none && advertised_[handle.index] &&
                 handle_stamp_[handle.index] != stamp_)
                 return frontier(handle);
+        }
         return 0;
     }
 
@@ -578,8 +589,12 @@ private:
             }
             removed_[node] += advertised_[handle.index];
         };
-        for (const auto handle : unavailable) mark(handle, false);
-        for (const auto handle : handles) mark(handle, true);
+        for (const auto handle : unavailable) {
+            mark(handle, false);
+        }
+        for (const auto handle : handles) {
+            mark(handle, true);
+        }
     }
 
     std::uint32_t fallback(std::uint32_t node) {

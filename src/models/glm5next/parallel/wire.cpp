@@ -34,8 +34,9 @@ RankLoadRequest decode_rank_load(Decoder& in) {
     p.rank    = in.u32();
     p.size    = in.u32();
     p.ep_size = in.u32();
-    for (auto* r : {&p.kda_heads, &p.vocabulary, &p.dense_intermediate, &p.shared_intermediate})
+    for (auto* r : {&p.kda_heads, &p.vocabulary, &p.dense_intermediate, &p.shared_intermediate}) {
         *r = {in.u32(), in.u32()};
+    }
     p.assemblies                   = decode_assemblies(in);
     p.experts                      = decode_expert_partitions(in);
     request.options                = decode_rank_options(in);
@@ -48,7 +49,9 @@ RankLoadRequest decode_rank_load(Decoder& in) {
 void encode(Encoder& out, const RankResourceDescription& r) {
     out.u32(r.rank);
     const auto& s = r.shape;
-    for (auto n : {s.max_context, s.max_concurrency, s.prefill_chunk, s.draft_tokens}) out.u32(n);
+    for (auto n : {s.max_context, s.max_concurrency, s.prefill_chunk, s.draft_tokens}) {
+        out.u32(n);
+    }
     out.u8(static_cast<std::uint8_t>(s.kv_storage));
     out.u8(static_cast<std::uint8_t>(s.index_format));
     out.u8(static_cast<std::uint8_t>(s.purpose));
@@ -59,8 +62,9 @@ void encode(Encoder& out, const RankResourceDescription& r) {
         out.u64(record.alignment);
     }
     for (auto n :
-         {r.state.owner_fields.offset, r.state.owner_fields.bytes, r.state.owner_fields.alignment})
+         {r.state.owner_fields.offset, r.state.owner_fields.bytes, r.state.owner_fields.alignment}) {
         out.u64(n);
+    }
     context::encode_directory(out, r.context);
     runtime::protocol::encode(out, r.budget);
     runtime::protocol::encode(out, r.observation);

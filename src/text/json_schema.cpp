@@ -65,7 +65,9 @@ void check_literal(const Json& value, const std::string& path) {
         fail(Kind::UnsupportedJsonSchema, path,
              "const/enum integers must fit signed 64-bit integers");
     if (value.is_object() || value.is_array())
-        for (const auto& [key, item] : value.items()) check_literal(item, child(path, key));
+        for (const auto& [key, item] : value.items()) {
+            check_literal(item, child(path, key));
+        }
 }
 
 class Schema {
@@ -137,8 +139,9 @@ public:
             if (!node.contains(key)) continue;
             if (!node[key].is_object())
                 fail(Kind::InvalidJsonSchema, child(path, key), "definitions must be an object");
-            for (auto& [name, definition] : node[key].items())
+            for (auto& [name, definition] : node[key].items()) {
                 check(definition, child(child(path, key), name));
+            }
         }
         for (const char* key : {"$ref", "anyOf", "oneOf", "allOf"}) {
             if (!node.contains(key)) continue;
@@ -168,8 +171,9 @@ public:
                     }))
                     fail(Kind::UnsupportedJsonSchema, child(path, key),
                          "allOf cannot be reduced to supported constraints");
-                for (std::size_t i = 0; i < node[key].size(); ++i)
+                for (std::size_t i = 0; i < node[key].size(); ++i) {
                     check(node[key][i], child(child(path, key), std::to_string(i)));
+                }
             }
             if (!source_validation) return;
         }
@@ -191,18 +195,21 @@ public:
                 if (node["type"].empty())
                     fail(Kind::InvalidJsonSchema, child(path, "type"),
                          "type array must not be empty");
-                for (const auto& type : node["type"]) add(type);
+                for (const auto& type : node["type"]) {
+                    add(type);
+                }
             } else
                 add(node["type"]);
         }
         if (node.contains("const") || node.contains("enum")) {
             const bool constant = node.contains("const");
             const char* key     = constant ? "const" : "enum";
-            for (const auto& [sibling, value] : node.items())
+            for (const auto& [sibling, value] : node.items()) {
                 if (!source_validation && sibling != key && sibling != "type" &&
                     !annotation(sibling))
                     fail(Kind::UnsupportedJsonSchema, child(path, sibling),
                          "finite values support only a type assertion alongside const/enum");
+            }
             if (node.contains("enum")) {
                 if (!node["enum"].is_array() || node["enum"].empty())
                     fail(Kind::InvalidJsonSchema, child(path, "enum"),
@@ -231,8 +238,9 @@ public:
                     if (!admitted(node[key])) impossible();
                 } else {
                     Json filtered = Json::array();
-                    for (const auto& value : node[key])
+                    for (const auto& value : node[key]) {
                         if (admitted(value)) filtered.push_back(value);
+                    }
                     if (filtered.empty())
                         impossible();
                     else
@@ -245,7 +253,9 @@ public:
         // JSON Schema meaning instead of silently treating the whole schema as unrestricted.
         if (!source_validation && types.empty()) {
             bool assertions = false;
-            for (const auto& [key, value] : node.items()) assertions |= !annotation(key);
+            for (const auto& [key, value] : node.items()) {
+                assertions |= !annotation(key);
+            }
             if (assertions) {
                 node["type"] =
                     Json::array({"object", "array", "string", "number", "boolean", "null"});
@@ -306,8 +316,9 @@ public:
             if (!node["properties"].is_object())
                 fail(Kind::InvalidJsonSchema, child(path, "properties"),
                      "properties must be an object");
-            for (auto& [key, value] : node["properties"].items())
+            for (auto& [key, value] : node["properties"].items()) {
                 check(value, child(child(path, "properties"), key));
+            }
         }
         if (node.contains("required")) {
             if (!node["required"].is_array())
@@ -332,8 +343,9 @@ public:
                 if (!node[key].is_array() || node[key].empty())
                     fail(Kind::InvalidJsonSchema, child(path, key),
                          "tuple positions must be a nonempty array of schemas");
-                for (std::size_t i = 0; i < node[key].size(); ++i)
+                for (std::size_t i = 0; i < node[key].size(); ++i) {
                     check(node[key][i], child(child(path, key), std::to_string(i)));
+                }
             } else {
                 check(node[key], child(path, key));
             }
@@ -375,12 +387,13 @@ std::string prepare_json_schema(std::string_view source) {
     } catch (const RequestError& error) {
         std::string pointer = error.pointer();
         std::size_t matched = 0;
-        for (const auto& [generated, source] : normalized.origins)
+        for (const auto& [generated, source] : normalized.origins) {
             if (generated.size() > matched &&
                 (error.pointer() == generated || error.pointer().starts_with(generated + "/"))) {
                 pointer = source + error.pointer().substr(generated.size());
                 matched = generated.size();
             }
+        }
         if (pointer == error.pointer()) throw;
         std::string message      = error.what();
         const std::string suffix = " at " + (error.pointer().empty() ? "/" : error.pointer());

@@ -67,10 +67,12 @@ ConvLaunch select_conv(const ConvArguments& a, bool paired, bool wide_history,
 #if NINFER_TARGET_SPARK
         if (columns >= 1024) {
             bool aligned = wide_history;
-            for (const auto* p : {a.kernel, a.history, a.records, a.norm})
+            for (const auto* p : {a.kernel, a.history, a.records, a.norm}) {
                 aligned &= reinterpret_cast<std::uintptr_t>(p) % 8 == 0;
-            for (auto stride : {a.history_column, a.record_column, a.record_batch})
+            }
+            for (auto stride : {a.history_column, a.record_column, a.record_batch}) {
                 aligned &= stride % 4 == 0;
+            }
             if (aligned) return launch_conv_norm<512, 4, true>;
         }
 #else

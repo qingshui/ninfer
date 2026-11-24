@@ -136,9 +136,9 @@ VisionEncoderBatch encoder_batch(const VisionExecutionInput& input, const vision
         const auto merge = static_cast<std::int32_t>(input.config.spatial_merge_size);
         const auto side  = static_cast<std::int32_t>(input.config.position_grid_side);
         const auto h = source.grid.height, w = source.grid.width;
-        for (std::int32_t by = 0; by < h / merge; ++by)
-            for (std::int32_t bx = 0; bx < w / merge; ++bx)
-                for (std::int32_t iy = 0; iy < merge; ++iy)
+        for (std::int32_t by = 0; by < h / merge; ++by) {
+            for (std::int32_t bx = 0; bx < w / merge; ++bx) {
+                for (std::int32_t iy = 0; iy < merge; ++iy) {
                     for (std::int32_t ix = 0; ix < merge; ++ix) {
                         const auto y = by * merge + iy, x = bx * merge + ix;
                         out.positions.push_back(y);
@@ -155,6 +155,9 @@ VisionEncoderBatch encoder_batch(const VisionExecutionInput& input, const vision
                             out.position_weights.end(),
                             {(1 - wy) * (1 - wx), (1 - wy) * wx, wy * (1 - wx), wy * wx});
                     }
+                }
+            }
+        }
         out.cu_seqlens.push_back(out.cu_seqlens.back() + unit.patches);
         out.features += unit.features;
     }
@@ -169,8 +172,9 @@ VisionWork prepare_vision_work(vision::WindowUse use,
     if (!out.window.produce) return out;
     if (!source) throw std::logic_error("Vision production has no prepared input");
     auto input = std::make_shared<VisionWindowInput>();
-    for (std::uint32_t rank = 0; rank < ranks; ++rank)
+    for (std::uint32_t rank = 0; rank < ranks; ++rank) {
         input->batches.push_back(encoder_batch(*source, *out.window.plan, rank));
+    }
     input->owner = std::move(source);
     out.input    = std::move(input);
     return out;

@@ -100,7 +100,9 @@ CacheAllocation allocate_cache(const Plan& plan, std::size_t capacity,
         }
     }
     auto used = remainder;
-    while (selected[used] == -1) --used;
+    while (selected[used] == -1) {
+        --used;
+    }
     out.bytes += used * unit;
     while (used) {
         const auto i = static_cast<std::size_t>(selected[used]);
@@ -127,8 +129,9 @@ std::optional<CacheAllocation> fixed_allocation(const Plan& plan, std::uint32_t 
     for (const auto& layer : plan.layers) {
         if (!layer.spec.profile.routed.experts) continue;
         const auto bytes = plan.cache.banks[layer.spec.bank.index].entry_bytes;
-        for (std::uint32_t n = 1; n <= std::uint32_t(layer.spec.profile.routed.experts); ++n)
+        for (std::uint32_t n = 1; n <= std::uint32_t(layer.spec.profile.routed.experts); ++n) {
             shares.push_back(n * bytes);
+        }
     }
     std::sort(shares.begin(), shares.end());
     shares.erase(std::unique(shares.begin(), shares.end()), shares.end());

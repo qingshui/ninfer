@@ -39,8 +39,9 @@ void GraphInputs::prepare() {
     }
     const auto geometry = describe_context_pool(specs);
     std::vector<RecordRequest> demand;
-    for (const auto id : geometry.spec_classes)
+    for (const auto id : geometry.spec_classes) {
         demand.push_back({id, owner_.shape.max_concurrency});
+    }
     const auto bytes = geometry.required_bytes(demand);
     if (bytes > r.context_backing().bytes)
         throw std::logic_error("Graph records exceed the planned Context working set");
@@ -56,8 +57,9 @@ void GraphInputs::prepare() {
         CUDA_CHECK(cudaMemsetAsync(record.data, 0, record.bytes, owner_.cuda.stream()));
         return static_cast<std::int64_t>(binding.offset);
     };
-    for (std::uint32_t b = 0; b < owner_.shape.max_concurrency; ++b)
+    for (std::uint32_t b = 0; b < owner_.shape.max_concurrency; ++b) {
         state_offsets_.push_back(allocate(0));
+    }
     for (std::uint32_t pool = 0; pool < r.pool_count(); ++pool) {
         auto& tables         = r.pool(pool).tables();
         const auto capacity  = tables.logical_page_capacity();
@@ -85,7 +87,9 @@ void GraphInputs::prepare() {
         }
     }
     std::vector<ops::SamplingConfig> configs(owner_.shape.max_concurrency);
-    for (auto& config : configs) config.temperature = 0;
+    for (auto& config : configs) {
+        config.temperature = 0;
+    }
     const auto target = r.tensor(*buffers.sampling);
     copy_bytes({target.data, target.bytes(), owner_.cuda.device()},
                {configs.data(), configs.size() * sizeof(configs[0]), Device::cpu()}, owner_.cuda);
@@ -94,7 +98,9 @@ void GraphInputs::prepare() {
 GraphInputs::~GraphInputs() {
     // prepare() reports execution failures; unwinding still drains the staging readers.
     (void)cudaStreamSynchronize(owner_.cuda.stream());
-    for (const auto id : allocations_) records_->release(id);
+    for (const auto id : allocations_) {
+        records_->release(id);
+    }
 }
 
 void GraphInputs::stage() {
@@ -114,7 +120,9 @@ void GraphInputs::batch(execution::BatchView call, std::uint32_t visible) {
         for (int j = 0; j < t; ++j) {
             const auto position    = base + std::min<std::uint32_t>(j, valid - 1);
             positions[j + t * row] = position;
-            for (int axis = 0; axis < 3; ++axis) rope[j + t * (axis + 3 * row)] = position;
+            for (int axis = 0; axis < 3; ++axis) {
+                rope[j + t * (axis + 3 * row)] = position;
+            }
         }
     }
     write_values<std::int32_t>(call.ids, ids, owner_.cuda);
@@ -135,7 +143,9 @@ void GraphInputs::batch(execution::BatchView call, std::uint32_t visible) {
         std::vector<std::int32_t>(2 * b, owner_.parameters.profile->config.text.ple.eos),
         owner_.cuda);
     std::vector<std::int64_t> tail_offsets(b);
-    for (int row = 0; row < b; ++row) tail_offsets[row] = row * 2 * sizeof(TokenId);
+    for (int row = 0; row < b; ++row) {
+        tail_offsets[row] = row * 2 * sizeof(TokenId);
+    }
     write_values<std::int64_t>(owner_.resources.tensor(io.raw_tail_offsets).slice(0, 0, b),
                                tail_offsets, owner_.cuda);
 }
@@ -176,12 +186,18 @@ void Graphs::prepare_main(Batch& graph, std::uint32_t batch, bool verify,
         execution::TextRun run(p.parameters, execution, call, update, p.cuda);
         if (!preparation.capturing()) {
             run.stem();
-            for (std::uint32_t layer = 0; layer < c.ple.layer; ++layer)
-                while (!run.advance_layer(layer)) std::this_thread::yield();
+            for (std::uint32_t layer = 0; layer < c.ple.layer; ++layer) {
+                while (!run.advance_layer(layer)) {
+                    std::this_thread::yield();
+                }
+            }
             run.consume_ple(ple[0].values);
             for (std::uint32_t layer = c.ple.layer; layer < p.parameters.text.layers.size();
-                 ++layer)
-                while (!run.advance_layer(layer)) std::this_thread::yield();
+                 ++layer) {
+                while (!run.advance_layer(layer)) {
+                    std::this_thread::yield();
+                }
+            }
             run.finish(output, logits);
             preparation.checkpoint();
             return;
@@ -198,9 +214,13 @@ void Graphs::prepare_main(Batch& graph, std::uint32_t batch, bool verify,
         selected.replay(0, p.cuda);
     } else {
         selected.begin_prefix(p.cuda);
-        while (!selected.advance_prefix(p.cuda)) std::this_thread::yield();
+        while (!selected.advance_prefix(p.cuda)) {
+            std::this_thread::yield();
+        }
         selected.consume_ple(0, p.cuda);
-        while (!selected.advance_suffix(p.cuda)) std::this_thread::yield();
+        while (!selected.advance_suffix(p.cuda)) {
+            std::this_thread::yield();
+        }
     }
     preparation.checkpoint();
 }
@@ -230,9 +250,10 @@ void Graphs::prepare_drafts(Batch& graph, std::uint32_t batch, GraphInputs& inpu
             call.workspace_bytes.push_back(p.resources.workspace.peak_used());
         }
         const auto ids = p.draft_output_ids(step, batch);
-        for (std::uint32_t slot = 0; slot < 2; ++slot)
+        for (std::uint32_t slot = 0; slot < 2; ++slot) {
             call.handoffs[slot].capture(
                 p.cuda.stream(), [&] { p.host_ple->capture_append(slot, ids, step, p.cuda); });
+        }
     }
     if (!preparation.capturing()) return;
     CudaCompletionEvent fork(p.device), join(p.device);
@@ -254,17 +275,19 @@ void Graphs::prepare_drafts(Batch& graph, std::uint32_t batch, GraphInputs& inpu
             join.wait(p.cuda.stream());
         });
         for (std::size_t context = 0; context < bounds_.size(); ++context) {
-            for (std::uint32_t step = 0; step < depth; ++step)
+            for (std::uint32_t step = 0; step < depth; ++step) {
                 chain.graph.executable.update_child(chain.steps[step],
                                                     graph.drafts[step].definitions[context]);
+            }
             chain.graph.executable.upload(p.cuda.stream());
             p.device.synchronize();
         }
         std::fill(chain.installed.begin(), chain.installed.end(), bounds_.size() - 1);
         for (std::uint32_t slot : {1U, 0U}) {
-            for (std::uint32_t step = 0; step < depth; ++step)
+            for (std::uint32_t step = 0; step < depth; ++step) {
                 chain.graph.executable.update_child(chain.handoffs[step],
                                                     graph.drafts[step].handoffs[slot]);
+            }
             chain.graph.executable.launch(p.cuda.stream());
             preparation.checkpoint();
         }
@@ -293,9 +316,10 @@ void Graphs::prepare(GraphInputs& inputs, GraphPreparation& observation) {
         graph.sample_workspace = r.workspace.peak_used();
         if (p.parameters.mtp) {
             const auto& frame = *r.plan.persistent.buffers.mtp;
-            for (std::uint32_t step = 0; step < p.shape.draft_tokens; ++step)
+            for (std::uint32_t step = 0; step < p.shape.draft_tokens; ++step) {
                 inputs.batch(r.mtp_batch(frame.draft_steps[step], 1, batch, bounds_.back()),
                              bounds_.back());
+            }
             inputs.stage();
             prepare_drafts(graph, batch, inputs, observation);
             inputs.batch(r.main_batch(p.shape.draft_tokens + 1, batch, bounds_.back()),
@@ -347,8 +371,9 @@ void Graphs::draft(std::uint32_t batch, std::span<const execution::BatchView> ca
     }
     chain.slot = ticket.slot;
     chain.graph.executable.launch(owner_.cuda.stream());
-    for (std::uint32_t step = 0; step < calls.size(); ++step)
+    for (std::uint32_t step = 0; step < calls.size(); ++step) {
         owner_.host_ple->append_submitted(ticket, extents, step);
+    }
 }
 
 void Graphs::sample(std::uint32_t batch) {
@@ -372,7 +397,9 @@ void MtpCommitGraphs::prepare(GraphInputs& inputs, GraphPreparation& preparation
         inputs.batch(r.mtp_batch(io.mtp->draft_steps[0], 1, batch, p.shape.max_context),
                      p.shape.max_context);
         std::vector<std::int32_t> slots(batch);
-        for (std::uint32_t b = 0; b < batch; ++b) slots[b] = b;
+        for (std::uint32_t b = 0; b < batch; ++b) {
+            slots[b] = b;
+        }
         write_values<std::int32_t>(r.tensor(io.batch.count_slots).slice(0, 0, batch), slots,
                                    p.cuda);
         write_values<std::int32_t>(r.tensor(io.batch.accepted_columns).slice(0, 0, batch),

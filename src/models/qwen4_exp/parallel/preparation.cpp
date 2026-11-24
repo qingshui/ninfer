@@ -78,9 +78,10 @@ void RankPreparation::prepare_communication() {
                                 dtype_size(DType::BF16) / dtype_size(DType::U32)});
     }
     if (shape.purpose == EnginePurpose::Generation) {
-        for (const auto columns : {std::size_t(1), batch, decode})
+        for (const auto columns : {std::size_t(1), batch, decode}) {
             work.push_back(
                 {Collective::AllGather, DType::I64, DistributedVocabulary::candidates * columns});
+        }
         if (profile_->mtp)
             work.push_back({Collective::AllReduce, DType::U64, batch, Reduction::Max});
     } else {
@@ -88,10 +89,11 @@ void RankPreparation::prepare_communication() {
                         3 * std::size_t(std::min(shape.prefill_chunk, 1024U))});
     }
     if (plan.workspace.vision)
-        for (std::uint32_t root = 0; root < binding_.group->size(); ++root)
+        for (std::uint32_t root = 0; root < binding_.group->size(); ++root) {
             work.push_back({Collective::Broadcast, DType::BF16,
                             plan.workspace.vision->output_bytes / dtype_size(DType::BF16),
                             Reduction::Sum, root});
+        }
     binding_.group->prepare(work, {}, device_.execution_view());
 }
 

@@ -51,10 +51,13 @@ struct Buffer {
     Buffer(Device device, DType type, std::initializer_list<int> shape, bool padded = false)
         : view(Tensor::metadata(type, shape)) {
         if (padded)
-            for (int d = 1; d < 4; ++d)
+            for (int d = 1; d < 4; ++d) {
                 view.nb[d] = view.nb[d - 1] * view.ne[d - 1] + 32 * sizeof(T);
+            }
         std::size_t count = 1;
-        for (int d = 0; d < 4; ++d) count += (view.ne[d] - 1) * view.nb[d] / sizeof(T);
+        for (int d = 0; d < 4; ++d) {
+            count += (view.ne[d] - 1) * view.nb[d] / sizeof(T);
+        }
         host.resize(count, T(0xa5a5));
         storage = DeviceBuffer(device, count * sizeof(T) + 512);
         storage.fill(0xa5);

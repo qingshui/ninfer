@@ -28,10 +28,11 @@ struct IndexerCase {
     int pages(int batch, int fallback) const {
         if (ends.empty()) return batch * std::max(1, (fallback + 63) / 64);
         int count = shared_prefix / 64;
-        for (int b = 0; b < batch; ++b)
+        for (int b = 0; b < batch; ++b) {
             count +=
                 (reserve_ends.empty() ? (ends.at(b) + 63) / 64 : (reserve_ends.at(b) + 63) / 64) -
                 shared_prefix / 64;
+        }
         return std::max(1, count);
     }
 };
@@ -83,7 +84,9 @@ struct IndexerFixture {
         if (index_format == KvCacheVectorFormat::Fp8E4m3fnGroup128Ue8m0)
             scale_plane_index = packed.plane_index(cache.scales.plane);
         int multiplier = 17;
-        while (std::gcd(multiplier, physical_pages) != 1) multiplier += 2;
+        while (std::gcd(multiplier, physical_pages) != 1) {
+            multiplier += 2;
+        }
         int next_page = shape.shared_prefix / 64;
         if (shape.shared_prefix % 64)
             throw std::invalid_argument("shared prefix must contain whole pages");
@@ -98,8 +101,9 @@ struct IndexerFixture {
                 throw std::invalid_argument("invalid per-row history");
             valid.at(b)     = n;
             selectors.at(b) = n ? B - 1 - b : -1;
-            for (int t = 0; t < T; ++t)
+            for (int t = 0; t < T; ++t) {
                 positions.at(t, b) = t < n ? (shape.ends.empty() ? E - T : row_end - n) + t : -1;
+            }
             const int row_pages =
                 shape.ends.empty()
                     ? P
@@ -118,11 +122,15 @@ struct IndexerFixture {
                 tables.at(p, B - 1 - b) = packed.physical_offset(physical);
             }
         }
-        for (std::size_t i = 0; i < query.host.size(); ++i)
+        for (std::size_t i = 0; i < query.host.size(); ++i) {
             query.host[i] = sample(i + 719, 1.F / 512);
-        for (std::size_t i = 0; i < coeff.host.size(); ++i)
+        }
+        for (std::size_t i = 0; i < coeff.host.size(); ++i) {
             coeff.host[i] = (int(hash(i + 2071) % 1025) - 512) * (1.F / 512);
-        for (std::size_t i = 0; i < keys.size(); ++i) keys[i] = sample(i + 3307, 1.F / 512);
+        }
+        for (std::size_t i = 0; i < keys.size(); ++i) {
+            keys[i] = sample(i + 3307, 1.F / 512);
+        }
         query.upload();
         coeff.upload();
         upload_metadata();
@@ -161,7 +169,9 @@ struct IndexerFixture {
             const int n     = ragged && b == B - 1 ? 0 : ragged ? std::max(1, T - b) : T;
             valid.at(b)     = n;
             selectors.at(b) = n ? B - 1 - b : -1;
-            for (int t = 0; t < T; ++t) positions.at(t, b) = t < n ? E - T + t : -1;
+            for (int t = 0; t < T; ++t) {
+                positions.at(t, b) = t < n ? E - T + t : -1;
+            }
         }
         positions.upload();
         valid.upload();
@@ -183,14 +193,18 @@ struct IndexerFixture {
         key_scales.resize(keys.size() / 128);
         for (std::size_t row = 0; row < key_scales.size(); ++row) {
             float values[128];
-            for (int d = 0; d < 128; ++d) values[d] = decode(keys[row * 128 + d]);
-            for (int stride = 1; stride < 128; stride *= 2)
-                for (int start = 0; start < 128; start += 2 * stride)
+            for (int d = 0; d < 128; ++d) {
+                values[d] = decode(keys[row * 128 + d]);
+            }
+            for (int stride = 1; stride < 128; stride *= 2) {
+                for (int start = 0; start < 128; start += 2 * stride) {
                     for (int j = 0; j < stride; ++j) {
                         const float x = values[start + j], y = values[start + j + stride];
                         values[start + j]          = x + y;
                         values[start + j + stride] = x - y;
                     }
+                }
+            }
             float maximum = 0;
             for (auto& value : values) {
                 value *= 0.08838834764831845F;
@@ -203,9 +217,10 @@ struct IndexerFixture {
                 exponent              = std::max(-127, e - (fraction == .5));
             }
             key_scales[row] = exponent + 127;
-            for (int d = 0; d < 128; ++d)
+            for (int d = 0; d < 128; ++d) {
                 key_codes[row * 128 + d] = __nv_cvt_float_to_fp8(std::ldexp(values[d], -exponent),
                                                                  __NV_SATFINITE, __NV_E4M3);
+            }
         }
         Tensor codes({key_codes.data(), key_codes.size(), Device::cpu()}, DType::FP8_E4M3FN,
                      {128, 16, 1, physical_pages});

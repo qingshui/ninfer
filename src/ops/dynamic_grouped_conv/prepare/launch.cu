@@ -126,10 +126,11 @@ __launch_bounds__(Capacity * 16, 4) __global__
         const int coefficient = tid / Capacity, position = tid % Capacity,
                   row = coefficient * kGroups + group;
         float sum     = 0;
-        for (int split = 0; split < splits; ++split)
+        for (int split = 0; split < splits; ++split) {
             sum += partial[(static_cast<std::int64_t>(split) * tokens + batch * width + position) *
                                kCoefficientRows +
                            row];
+        }
         projected[coefficient][position] = sum;
     }
     const int position = tid / 16, channel = tid % 16, hidden = group * 16 + channel;

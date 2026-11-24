@@ -78,7 +78,7 @@ struct RowProductEpilogue {
             return __fdividef(g, 1.F + __expf(-g)) * u;
         };
         if (wr == 1)
-            for (int mi = 0; mi < C::kMmaRows; ++mi)
+            for (int mi = 0; mi < C::kMmaRows; ++mi) {
                 for (int ni = 0; ni < C::kMmaTokens; ++ni) {
                     int r            = mi * 16 + (lane >> 2),
                         t            = wt * C::kWarpTokens + ni * 8 + 2 * (lane & 3);
@@ -88,9 +88,10 @@ struct RowProductEpilogue {
                     at(r + 8, t)     = a[2];
                     at(r + 8, t + 1) = a[3];
                 }
+            }
         __syncthreads();
         if (wr == 0)
-            for (int mi = 0; mi < C::kMmaRows; ++mi)
+            for (int mi = 0; mi < C::kMmaRows; ++mi) {
                 for (int ni = 0; ni < C::kMmaTokens; ++ni) {
                     int r            = mi * 16 + (lane >> 2),
                         t            = wt * C::kWarpTokens + ni * 8 + 2 * (lane & 3);
@@ -100,12 +101,15 @@ struct RowProductEpilogue {
                     at(r + 8, t)     = tb + t < logical ? calc(a[2], at(r + 8, t)) : 1.F;
                     at(r + 8, t + 1) = tb + t + 1 < logical ? calc(a[3], at(r + 8, t + 1)) : 1.F;
                 }
+            }
         __syncthreads();
         for (int i = tid; i < C::kBlockTokens * (P / 4); i += C::kThreads) {
             int t = i / (P / 4), r = i % (P / 4) * 4;
             auto v  = common::load_vec<float4>(&at(r, t));
             float m = fmaxf(fmaxf(fabsf(v.x), fabsf(v.y)), fmaxf(fabsf(v.z), fabsf(v.w)));
-            for (int d = 4; d; d >>= 1) m = fmaxf(m, __shfl_xor_sync(0xffffffffu, m, d, 8));
+            for (int d = 4; d; d >>= 1) {
+                m = fmaxf(m, __shfl_xor_sync(0xffffffffu, m, d, 8));
+            }
             auto sf = common::fp8_ue8m0_scale(m);
             if (rb + r + 3 < rows / 2 && (Full || tb + t < tokens)) {
                 unsigned word =
@@ -160,11 +164,12 @@ struct VectorDownEpilogue : Bf16TmaVectorEpilogue {
                     common::cp_async_zfill<16, Cache::cg>(at(r, t), source, valid ? 16 : 0);
                 else {
 #pragma unroll
-                    for (int j = 0; j < 4; ++j)
+                    for (int j = 0; j < 4; ++j) {
                         common::cp_async_zfill<4>(at(r, t) + j,
                                                   static_cast<const unsigned char*>(source) +
                                                       j * sizeof(float),
                                                   valid ? 4 : 0);
+                    }
                 }
             }
             common::cp_commit();

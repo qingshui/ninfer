@@ -77,14 +77,16 @@ load_stage(typename RecurrenceShared<DV>::Stage& stage, const RecurrenceOperands
         qk_workspace + static_cast<std::int64_t>(qh) * chunks + chunk);
     auto* qk_dst = reinterpret_cast<uint4*>(&stage.qk);
 #pragma unroll
-    for (int i = tid; i < sizeof(QkChunk) / 16; i += kThreads<DV>)
+    for (int i = tid; i < sizeof(QkChunk) / 16; i += kThreads<DV>) {
         common::cp_async<16, Cache::cg>(qk_dst + i, qk_src + i);
+    }
     const auto* ctrl_src = reinterpret_cast<const uint4*>(
         control_workspace + static_cast<std::int64_t>(head) * chunks + chunk);
     auto* ctrl_dst = reinterpret_cast<uint4*>(&stage.control);
 #pragma unroll
-    for (int i = tid; i < sizeof(ControlChunk) / 16; i += kThreads<DV>)
+    for (int i = tid; i < sizeof(ControlChunk) / 16; i += kThreads<DV>) {
         common::cp_async<16, Cache::cg>(ctrl_dst + i, ctrl_src + i);
+    }
     constexpr int vectors = kChunkSize * DV / 8;
 #pragma unroll
     for (int i = tid; i < vectors; i += kThreads<DV>) {

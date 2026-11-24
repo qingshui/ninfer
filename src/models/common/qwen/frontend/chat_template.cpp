@@ -99,7 +99,9 @@ bool real_user(const ChatMessage& message) {
     if (message.role != ChatRole::User) return false;
     if (message.has_media()) return true;
     std::string content;
-    for (const auto& part : message.parts) content += part.text;
+    for (const auto& part : message.parts) {
+        content += part.text;
+    }
     const auto bytes = text::unicode_internal::trim_utf8(
         content, true, true, text::unicode_internal::is_whitespace, "message content");
     const auto body = std::string_view(content).substr(bytes.begin, bytes.end - bytes.begin);
@@ -220,8 +222,9 @@ RenderedChat CompiledChatTemplate::render(const std::vector<ChatMessage>& messag
         }
     }
     std::vector<std::string> control_variables;
-    for (const auto& item : compiled_.special_tokens.items())
+    for (const auto& item : compiled_.special_tokens.items()) {
         control_variables.push_back(item.key());
+    }
     text::TemplateRenderOptions execution{
         .checkpoint =
             [&] { models::frontend::check_preparation_control(control, "chat template"); },
@@ -245,7 +248,9 @@ RenderedChat CompiledChatTemplate::render(const std::vector<ChatMessage>& messag
         output.text.resize(content->end);
         std::erase_if(output.regions,
                       [&](const auto& region) { return region.begin > output.text.size(); });
-        for (auto& region : output.regions) region.end = std::min(region.end, output.text.size());
+        for (auto& region : output.regions) {
+            region.end = std::min(region.end, output.text.size());
+        }
         std::erase_if(output.literal_spans,
                       [&](auto span) { return span.begin >= output.text.size(); });
         if (!output.literal_spans.empty())
@@ -486,8 +491,9 @@ RenderedChat CompiledChatTemplate::render(const std::vector<ChatMessage>& messag
             turns.erase(turns.begin() + index + 1U, turns.end());
             auto& tail = turns[index];
             std::string content;
-            for (std::size_t part = 0; part < marker.after_message_part_count; ++part)
+            for (std::size_t part = 0; part < marker.after_message_part_count; ++part) {
                 content += message.parts[part].text;
+            }
             tail["content"] = std::move(content);
             if (tail.contains("reasoning_content"))
                 tail["reasoning_content"] =
@@ -500,10 +506,11 @@ RenderedChat CompiledChatTemplate::render(const std::vector<ChatMessage>& messag
             try {
                 const auto partial      = compiled_.program.render(probe, execution);
                 std::size_t media_count = 0;
-                for (std::size_t i = 0; i <= index; ++i)
+                for (std::size_t i = 0; i <= index; ++i) {
                     media_count +=
                         std::count_if(sources[i].part_media.begin(), sources[i].part_media.end(),
                                       [](const auto& item) { return item.has_value(); });
+                }
                 const auto partial_layout = inspect_prompt_layout(
                     partial, std::span<const models::frontend::Modality>(media).first(media_count));
                 if (!partial_layout.messages.empty()) {

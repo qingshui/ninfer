@@ -43,16 +43,19 @@ __global__ void mxfp8_a8_quantize_kernel(const Input* x, Mxfp8A8Workspace out, i
     }
     float maximum = 0;
 #pragma unroll
-    for (int i = 0; i < 8; ++i) maximum = fmaxf(maximum, fabsf(values[i]));
+    for (int i = 0; i < 8; ++i) {
+        maximum = fmaxf(maximum, fabsf(values[i]));
+    }
     const unsigned mask = __activemask();
     maximum             = fmaxf(maximum, __shfl_xor_sync(mask, maximum, 1, 4));
     maximum             = fmaxf(maximum, __shfl_xor_sync(mask, maximum, 2, 4));
     const auto scale    = common::fp8_ue8m0_scale(maximum);
     unsigned codes[4];
 #pragma unroll
-    for (int pair = 0; pair < 4; ++pair)
+    for (int pair = 0; pair < 4; ++pair) {
         codes[pair] =
             common::fp8_quant_code2(values[2 * pair], values[2 * pair + 1], scale.inverse_scale);
+    }
     common::store_vec(out.codes + static_cast<std::int64_t>(group) * 32 + part * 8,
                       make_uint2(codes[0] | (codes[1] << 16), codes[2] | (codes[3] << 16)));
     if (part == 0) out.scales[group] = scale.scale;

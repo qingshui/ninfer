@@ -17,7 +17,9 @@ std::vector<RecordSpec> specs(const ExecutionPlan& plan) {
 
 std::vector<RecordRequest> demand(const ContextPoolGeometry& geometry, std::uint32_t batch) {
     std::vector<RecordRequest> out;
-    for (const auto id : geometry.spec_classes) out.push_back({id, batch});
+    for (const auto id : geometry.spec_classes) {
+        out.push_back({id, batch});
+    }
     return out;
 }
 
@@ -51,8 +53,9 @@ void GraphInputs::prepare() {
         CUDA_CHECK(cudaMemsetAsync(span.data, 0, span.bytes, p.cuda.stream()));
         return static_cast<std::int64_t>(binding.offset);
     };
-    for (std::uint32_t row = 0; row < p.shape.max_concurrency; ++row)
+    for (std::uint32_t row = 0; row < p.shape.max_concurrency; ++row) {
         states_.push_back(allocate(0));
+    }
     auto& tables         = r.kv.tables();
     const auto capacity  = tables.logical_page_capacity();
     const auto row_bytes = std::size_t(capacity) * sizeof(std::int64_t);
@@ -71,7 +74,9 @@ void GraphInputs::prepare() {
 GraphInputs::~GraphInputs() {
     // prepare() reports execution failures; unwinding still drains the staging readers.
     (void)cudaStreamSynchronize(owner_.cuda.stream());
-    for (const auto id : allocations_) records_->release(id);
+    for (const auto id : allocations_) {
+        records_->release(id);
+    }
 }
 
 void GraphInputs::set(std::uint32_t batch, std::uint32_t visible) {
@@ -93,7 +98,9 @@ void GraphInputs::set(std::uint32_t batch, std::uint32_t visible) {
         i32(io.count_columns)[b]                                    = 0;
     }
     auto* configs = static_cast<ops::SamplingConfig*>(p.host_tensor(*io.sampling).data);
-    for (std::uint32_t b = 0; b < batch; ++b) configs[b] = {.temperature = 0, .top_k = 1, .top_p = 1};
+    for (std::uint32_t b = 0; b < batch; ++b) {
+        configs[b] = {.temperature = 0, .top_k = 1, .top_p = 1};
+    }
     p.upload_inputs(batch);
 }
 

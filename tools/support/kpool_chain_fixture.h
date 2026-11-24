@@ -63,27 +63,34 @@ struct ChainFixture {
             after_offsets.at(b)  = index.valid.at(b) ? 256 + (B + b) * stride : -1;
             for (int t = 0; t < T; ++t) {
                 selection_rows.at(t, b) = t < index.valid.at(b) ? b * T + t : -1;
-                for (int d = 0; d < 4096; ++d)
+                for (int d = 0; d < 4096; ++d) {
                     // A bounded set of independent inputs permits complete long-T validation.
                     x.at(d, t, b) = sample(
                         d + 4096 * (repeated_inputs ? t % 7 : t) + 9397 * b + 317, 1.F / 256);
+                }
             }
             if (!index.valid.at(b)) continue;
-            for (int kind = 0; kind < 2; ++kind)
-                for (int r = 0; r < 3; ++r)
-                    for (int d = 0; d < 128; ++d)
+            for (int kind = 0; kind < 2; ++kind) {
+                for (int r = 0; r < 3; ++r) {
+                    for (int d = 0; d < 128; ++d) {
                         initial_state[state_index(false, kind, b, r, d)] =
                             r < index.positions.at(0, b) % 4
                                 ? sample(d + 128 * r + 777 * b + 99 * kind, 1.F / 512)
                                 : 0;
+                    }
+                }
+            }
         }
-        for (std::size_t i = 0; i < latent.size(); ++i) latent[i] = sample(i + 3351, 1.F / 512);
+        for (std::size_t i = 0; i < latent.size(); ++i) {
+            latent[i] = sample(i + 3351, 1.F / 512);
+        }
         for (std::size_t i = 0; i < key_up.host.size(); ++i) {
             key_up.host[i]   = sample(i + 1157, 1.F / 8192);
             value_up.host[i] = sample(i + 7759, 1.F / 8192);
         }
-        for (std::size_t i = 0; i < w_b.host.size(); ++i)
+        for (std::size_t i = 0; i < w_b.host.size(); ++i) {
             w_b.host[i] = sample(i + 997, 1.F / 16384);
+        }
         w_b.upload();
         query_weight.device  = cuda.device();
         query_weight.payload = query_weight.qdata = w_b.view.data;

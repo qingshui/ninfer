@@ -76,7 +76,9 @@ std::size_t map_file_range(FileObjectView object, std::uint64_t offset, std::uin
                                       return segment.destination_offset + segment.bytes <= position;
                                   });
     auto last      = first;
-    while (last != object.segments.end() && last->destination_offset < end) ++last;
+    while (last != object.segments.end() && last->destination_offset < end) {
+        ++last;
+    }
     const auto count = static_cast<std::size_t>(last - first);
     if (count > output.size()) throw ArtifactError("insufficient file range output capacity");
     std::size_t i         = 0;

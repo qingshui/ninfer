@@ -32,8 +32,9 @@ constexpr std::array<Plan, 10> kPlans{{
 const Plan& select_plan(int rows, int k, int tokens) {
     if (rows != 34816 || k != 5120 || tokens <= 0)
         throw std::invalid_argument("q4 linear_swiglu: unsupported shape or token extent");
-    for (const auto& plan : kPlans)
+    for (const auto& plan : kPlans) {
         if (tokens <= plan.last_tokens) return plan;
+    }
     throw std::logic_error("q4 linear_swiglu: missing token route");
 }
 

@@ -50,9 +50,10 @@ xgrammar::Grammar strict_arguments(const Contract::Tool& tool) {
 int32_t basic_arguments(xgrammar::GrammarBuilder& builder, const Contract::Tool& tool,
                         xgrammar::StringDispatch& names, int32_t json) {
     std::vector<std::pair<std::string, int32_t>> cases;
-    for (const auto& item : tool.parameters)
+    for (const auto& item : tool.parameters) {
         if (valid_parameter_name(item.name) && item.encoding == Contract::Encoding::JsonValue)
             cases.emplace_back(item.name, json);
+    }
     const auto parameter = builder.AddSequence(
         {builder.AddByteString(std::string(kParamOpen)), builder.AddRuleRef(names.Add(cases))});
     return builder.AddRuleWithHint("parameters",
@@ -132,10 +133,11 @@ compile_tool_grammar(text::GrammarCompiler& compiler, const Contract& contract,
             entry["source_index"] = tool.declaration_index;
         } else {
             entry["encodings"] = Json::array();
-            for (const auto& parameter : tool.parameters)
+            for (const auto& parameter : tool.parameters) {
                 if (valid_parameter_name(parameter.name))
                     entry["encodings"].push_back(
                         {parameter.name, static_cast<int>(parameter.encoding)});
+            }
         }
         identity["qwen_tools"].push_back(std::move(entry));
     }

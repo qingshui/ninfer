@@ -42,10 +42,11 @@ void validate_deployment(const DeploymentOptions& options) {
         if (rank.device < 0 || !devices.emplace(rank.node, rank.device).second)
             fail("each rank requires a distinct nonnegative node/device pair");
     }
-    for (const auto node : nodes)
+    for (const auto node : nodes) {
         if (std::none_of(options.ranks.begin(), options.ranks.end(),
                          [node](const auto& rank) { return rank.node == node; }))
             fail("node has no ranks");
+    }
 }
 
 } // namespace ninfer

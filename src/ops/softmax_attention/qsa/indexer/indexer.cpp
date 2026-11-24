@@ -51,17 +51,22 @@ void qsa_indexer(const Tensor& query, const ConstQsaIndexCacheView& cache,
     const Tensor* inputs[]{&query, &table, &batch.positions, &batch.valid_columns,
                            &batch.table_rows};
     v.require(!v.overlap(out.block_ids, out.block_counts), "output overlap");
-    for (const auto* dst : {&out.block_ids, &out.block_counts})
-        for (const auto* src : inputs) v.require(!v.overlap(*dst, *src), "output/input overlap");
+    for (const auto* dst : {&out.block_ids, &out.block_counts}) {
+        for (const auto* src : inputs) {
+            v.require(!v.overlap(*dst, *src), "output/input overlap");
+        }
+    }
     const auto plan = detail::qsa::select_indexer_plan(tokens, rows, envelope.max_visible_tokens);
     auto scope      = workspace.scope();
     const auto scratch = detail::qsa::allocate_indexer_workspace(workspace, plan, rows);
     for (const auto* work : {&scratch.scores, &scratch.candidates}) {
         if (!work->data) continue;
-        for (const auto* src : inputs)
+        for (const auto* src : inputs) {
             v.require(!v.overlap(*work, *src), "workspace/input overlap");
-        for (const auto* dst : {&out.block_ids, &out.block_counts})
+        }
+        for (const auto* dst : {&out.block_ids, &out.block_counts}) {
             v.require(!v.overlap(*work, *dst), "workspace/output overlap");
+        }
     }
     detail::qsa::launch_indexer(query, cache, batch, plan, scratch, out, execution);
 }

@@ -69,19 +69,26 @@ __global__ __launch_bounds__(common::kWarpSize* kFoldWarps, 2) void fold_kernel(
             const auto raw =
                 load_raw_qk_lane(access.key_ptr(coord, token), lane * 4 + p * kFoldLanes * 4);
 #pragma unroll
-            for (int j = 0; j < 4; ++j) key[p * 4 + j] = raw.value[j];
+            for (int j = 0; j < 4; ++j) {
+                key[p * 4 + j] = raw.value[j];
+            }
         }
         float sum = 0;
 #pragma unroll
-        for (int j = 0; j < kFoldCols; ++j) sum += key[j] * key[j];
+        for (int j = 0; j < kFoldCols; ++j) {
+            sum += key[j] * key[j];
+        }
         sum             = common::warp_sum<kFoldLanes>(sum, 0xffffU << (group * kFoldLanes));
         const float inv = rsqrtf(sum + kQkL2NormEps);
 #pragma unroll
-        for (int j = 0; j < kFoldCols; ++j) key[j] *= inv;
+        for (int j = 0; j < kFoldCols; ++j) {
+            key[j] *= inv;
+        }
 #pragma unroll
-        for (int p = 0; p < kFoldCols / 4; ++p)
+        for (int p = 0; p < kFoldCols / 4; ++p) {
             common::store_vec(&sm.key[token][lane * 4 + p * kFoldLanes * 4],
                               common::load_vec<float4>(key + p * 4));
+        }
         if (lane == 0) {
             const auto gate = access.load_gate(coord, token);
             sm.alpha[token] = expf(gate.g);
@@ -94,20 +101,25 @@ __global__ __launch_bounds__(common::kWarpSize* kFoldWarps, 2) void fold_kernel(
     for (int t = 0; t < valid; ++t) {
         __align__(16) float key[kFoldCols];
 #pragma unroll
-        for (int p = 0; p < kFoldCols / 4; ++p)
+        for (int p = 0; p < kFoldCols / 4; ++p) {
             common::store_vec(key + p * 4,
                               common::load_vec<float4>(&sm.key[t][lane * 4 + p * kFoldLanes * 4]));
+        }
         const float alpha = sm.alpha[t], beta = sm.beta[t];
 #pragma unroll
         for (int r = 0; r < kFoldRows; ++r) {
             const float value = __bfloat162float(sm.value[t][coord.dv_base % kFoldDv + r]);
             float dot         = 0;
 #pragma unroll
-            for (int j = 0; j < kFoldCols; ++j) dot += state[r][j] * key[j];
+            for (int j = 0; j < kFoldCols; ++j) {
+                dot += state[r][j] * key[j];
+            }
             dot               = common::warp_sum<kFoldLanes>(dot);
             const float delta = beta * (value - alpha * dot);
 #pragma unroll
-            for (int j = 0; j < kFoldCols; ++j) state[r][j] = alpha * state[r][j] + delta * key[j];
+            for (int j = 0; j < kFoldCols; ++j) {
+                state[r][j] = alpha * state[r][j] + delta * key[j];
+            }
         }
         represent_state<State>(state);
     }

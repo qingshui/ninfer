@@ -37,8 +37,9 @@ Tensor RankProgramImpl::host_tensor(const TensorRegion& region) {
 }
 
 std::size_t RankProgramImpl::envelope_index(std::uint32_t visible) const {
-    for (std::size_t i = 0; i < envelopes.size(); ++i)
+    for (std::size_t i = 0; i < envelopes.size(); ++i) {
         if (visible <= envelopes[i].max_visible_keys) return i;
+    }
     throw std::logic_error("Spark2_5 decode context exceeds its capacity");
 }
 
@@ -78,8 +79,9 @@ void RankProgramImpl::prepare_inputs(std::span<const WorkRow> rows, std::uint32_
         std::copy_n(r.ids.data(), valid, ids_row);
         std::fill(ids_row + valid, ids_row + width, 0);
         const auto last = count ? count - 1 : 0;
-        for (std::uint32_t t = 0; t < width; ++t)
+        for (std::uint32_t t = 0; t < width; ++t) {
             pos_row[t] = static_cast<std::int32_t>(r.main_frontier + std::min<std::size_t>(t, last));
+        }
         f.visible = std::max<std::uint32_t>(f.visible, r.main_frontier + count);
     }
     if (io.sampling) {
@@ -101,7 +103,9 @@ void RankProgramImpl::prepare_inputs(std::span<const WorkRow> rows, std::uint32_
         ++f.attention.forwards;
         f.attention.rows += rows.size();
         f.attention.scheduled_positions += std::uint64_t(width) * rows.size();
-        for (const auto& r : rows) f.attention.valid_positions += r.ids.size();
+        for (const auto& r : rows) {
+            f.attention.valid_positions += r.ids.size();
+        }
     }
     upload_inputs(width * rows.size());
 }
@@ -173,11 +177,12 @@ void RankProgramImpl::select_window() {
     const auto& work     = std::get<ForwardWork>(f.request.work.operation);
     const auto& original = work.rows.at(f.control_row);
     auto end = std::min<std::size_t>(original.ids.size(), f.control_offset + shape.prefill_chunk);
-    for (const auto boundary : original.window_ends)
+    for (const auto boundary : original.window_ends) {
         if (boundary > f.control_offset) {
             end = std::min<std::size_t>(end, boundary);
             break;
         }
+    }
     f.window = original;
     auto& w  = *f.window;
     w.ids.assign(original.ids.begin() + f.control_offset, original.ids.begin() + end);
@@ -186,7 +191,9 @@ void RankProgramImpl::select_window() {
     w.main_frontier += f.control_offset;
     // Later windows continue from the image the first one produced.
     if (f.control_offset)
-        for (auto& [rank, selectors] : w.states) selectors.source = selectors.destination;
+        for (auto& [rank, selectors] : w.states) {
+            selectors.source = selectors.destination;
+        }
 }
 
 void RankProgramImpl::forward() {
@@ -217,8 +224,9 @@ void RankProgramImpl::forward() {
     prepare_inputs(rows, width);
     f.hidden = f.sequence ? device_tensor(io.hidden).slice(1, 0, width)
                           : resources.packed(io.hidden, {hidden_by, batch});
-    for (std::size_t i = 0; i < rows.size(); ++i)
+    for (std::size_t i = 0; i < rows.size(); ++i) {
         f.result.rows[control ? f.control_row : i].processed += rows[i].ids.size();
+    }
     const bool sampled = forward && forward->sample != SampleKind::None;
     if (!f.tokens) {
         // An exact-frontier restore samples from the hidden its image kept.
@@ -301,8 +309,9 @@ void RankProgramImpl::request_decision() {
     if (!forward || forward->sample == SampleKind::None) return;
     runtime::DecisionRequest request;
     request.vocabulary = parameters.profile->public_tokens;
-    for (std::uint32_t i = 0; i < forward->rows.size(); ++i)
+    for (std::uint32_t i = 0; i < forward->rows.size(); ++i) {
         if (forward->rows[i].constrained) request.rows.push_back({i, {}});
+    }
     if (request.rows.empty()) {
         f.decision.emplace();
         return;
@@ -368,7 +377,9 @@ void RankProgramImpl::result() {
     const auto* forward = std::get_if<ForwardWork>(&f.request.work.operation);
     if (forward && forward->sample != SampleKind::None) {
         const auto* ids = static_cast<const TokenId*>(resources.egress().data);
-        for (std::size_t b = 0; b < f.result.rows.size(); ++b) f.result.rows[b].tokens = {ids[b]};
+        for (std::size_t b = 0; b < f.result.rows.size(); ++b) {
+            f.result.rows[b].tokens = {ids[b]};
+        }
     }
     timer.observe_result(f.gpu);
     if (ExecutionTypes::describe_work(f.request.work).kind == ExecutionKind::Decode)

@@ -82,9 +82,10 @@ void DecodeGraphSection::capture(cudaStream_t stream, const std::function<void()
 void DecodeGraphSection::set_enabled(const DecodeGraphExecutable& executable, bool enabled) {
     if (!executable.ready()) throw std::logic_error("graph section has no executable");
     if (enabled == enabled_) return;
-    for (auto node : nodes_)
+    for (auto node : nodes_) {
         check_graph(cudaGraphNodeSetEnabled(executable.exec_, node, enabled),
                     "cudaGraphNodeSetEnabled");
+    }
     enabled_ = enabled;
 }
 

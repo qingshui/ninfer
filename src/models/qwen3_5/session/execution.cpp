@@ -15,11 +15,15 @@ SessionImpl::submit_execution(Execution&& pending, runtime::ExecutionReservation
     auto& current = *slot;
     try {
         current.lanes.clear();
-        for (const auto handle : current.members) current.lanes.push_back(lane(handle));
+        for (const auto handle : current.members) {
+            current.lanes.push_back(lane(handle));
+        }
         current.preparation->prepare_actions();
         adopt_deferred_bindings(current, work);
         const auto ticket = executor().submit(std::move(reservation), std::move(work));
-        for (const auto l : current.lanes) ++lane_busy_[l];
+        for (const auto l : current.lanes) {
+            ++lane_busy_[l];
+        }
         current.ticket    = ticket;
         if (current.vision_id) vision_window.submitted(current.vision_id, ticket);
         current.preparation->mark_submitted();
@@ -170,15 +174,18 @@ std::optional<PrefillStart> SessionImpl::start_prefill(std::span<const SequenceH
         pending.preparation = std::make_unique<context::ContextTransaction>(directory);
         ForwardWork forward;
         forward.purpose = ForwardPurpose::Prefill;
-        for (std::size_t i = 0; i < segments.size(); ++i)
+        for (std::size_t i = 0; i < segments.size(); ++i) {
             append_prefill_row(pending, forward, candidates[i], segments[i].begin, segments[i].end,
                                segments[i].constrained, segments[i].produces);
+        }
         forward.sample    = final_segment ? SamplePurpose::FirstToken : SamplePurpose::None;
         const auto ticket = submit_execution(std::move(pending), std::move(*reservation),
                                              Work{.operation = std::move(forward)});
         PrefillStart start;
         start.ticket = *ticket;
-        for (const auto& segment : segments) start.segments.push_back({segment.produces});
+        for (const auto& segment : segments) {
+            start.segments.push_back({segment.produces});
+        }
         return start;
     } catch (const std::exception& error) {
         executor().fail(error.what());
@@ -281,7 +288,9 @@ SessionImpl::start_mixed(std::span<const SequenceHandle> prefill,
     // The decode rows admitted are a prefix that stops before the first constrained row.
     std::size_t rows = 0;
     const auto limit = std::min<std::size_t>(decode.size(), mixed_decode_limit());
-    while (rows < limit && (decode_constrained.empty() || !decode_constrained[rows])) ++rows;
+    while (rows < limit && (decode_constrained.empty() || !decode_constrained[rows])) {
+        ++rows;
+    }
     if (!rows) {
         const auto start = start_prefill(prefill, prefill_constrained);
         if (!start) return {};
@@ -355,20 +364,24 @@ SessionImpl::start_mixed(std::span<const SequenceHandle> prefill,
         MixedWork work;
         work.prefill.purpose = ForwardPurpose::Prefill;
         work.prefill.sample  = final_segment ? SamplePurpose::FirstToken : SamplePurpose::None;
-        for (std::size_t i = 0; i < segments.size(); ++i)
+        for (std::size_t i = 0; i < segments.size(); ++i) {
             append_prefill_row(pending, work.prefill, prefill[i], segments[i].begin, segments[i].end,
                                !prefill_constrained.empty() && prefill_constrained[i],
                                segments[i].produces);
+        }
         pending.decode_begin = segments.size();
-        for (std::size_t b = 0; b < rows; ++b)
+        for (std::size_t b = 0; b < rows; ++b) {
             append_decode_row(pending, work.decode, decode[b], budgets[b],
                               !decode_constrained.empty() && decode_constrained[b]);
+        }
         const auto ticket = submit_execution(std::move(pending), std::move(*reservation),
                                              Work{.operation = std::move(work)});
         MixedStart start;
         start.ticket      = *ticket;
         start.decode_rows = static_cast<std::uint32_t>(rows);
-        for (const auto& segment : segments) start.segments.push_back({segment.produces});
+        for (const auto& segment : segments) {
+            start.segments.push_back({segment.produces});
+        }
         return start;
     } catch (const std::exception& error) {
         executor().fail(error.what());
@@ -475,9 +488,10 @@ SessionImpl::start_control(std::span<const SequenceHandle> members, std::span<co
                 throw std::logic_error("forced control sequence is not ready");
             require_unit(l, ExecutionUnitKind::Control, stride);
             const auto forced = tokens.subspan(b * stride, stride);
-            for (const auto id : forced)
+            for (const auto id : forced) {
                 if (id < 0 || static_cast<std::uint32_t>(id) >= plan.profile->public_tokens)
                     throw std::invalid_argument("forced token is outside the public vocabulary");
+            }
             if (splits[b] && (!*splits[b] || *splits[b] > stride))
                 throw std::invalid_argument("forced control split is outside its span");
             pending.bases.push_back(state.continuation);
@@ -492,10 +506,12 @@ SessionImpl::start_control(std::span<const SequenceHandle> members, std::span<co
             auto input = input_window(state, f, f + 1);
             input.tokens.insert(input.tokens.end(), forced.begin(), forced.end() - 1);
             input.rope_positions.resize(3ULL * stride);
-            for (int axis = 0; axis < 3; ++axis)
-                for (std::uint32_t j = 0; j < stride; ++j)
+            for (int axis = 0; axis < 3; ++axis) {
+                for (std::uint32_t j = 0; j < stride; ++j) {
                     input.rope_positions[axis * stride + j] =
                         static_cast<std::int32_t>(f + j) + state.continuation.metadata.rope_delta;
+                }
+            }
             forward.rows.push_back(execution_row(state));
             forward.inputs.push_back(std::move(input));
             forward.control_last_tokens.push_back(forced.back());

@@ -81,7 +81,9 @@ struct Q4GdnSmallTEpilogue {
         static_assert(Tokens <= TileTokens);
         float projected[Tokens];
 #pragma unroll
-        for (int token = 0; token < Tokens; ++token) projected[token] = values[token];
+        for (int token = 0; token < Tokens; ++token) {
+            projected[token] = values[token];
+        }
         if (token_begin == 0 && active == Tokens) conv.store(row, projected);
     }
 };
@@ -109,9 +111,10 @@ struct Q5GdnProjectionEpilogue {
             if (token_begin == 0 && active_tokens == Tokens) conv.store(row, values);
         } else {
 #pragma unroll
-            for (int token = 0; token < Tokens; ++token)
+            for (int token = 0; token < Tokens; ++token) {
                 if (token < active_tokens)
                     output.store(row - kValueRows, token_begin + token, values[token]);
+            }
         }
     }
 };

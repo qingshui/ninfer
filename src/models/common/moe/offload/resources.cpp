@@ -146,9 +146,10 @@ ExpertCacheRequirements storage_requirements(const Plan& plan,
     auto config           = plan.cache.config;
     config.fixed_bytes    = 0;
     config.capacity_bytes = 0;
-    for (const auto& bank : plan.cache.banks)
+    for (const auto& bank : plan.cache.banks) {
         if (!bank.resident)
             config.capacity_bytes = std::max(config.capacity_bytes, bank.entry_bytes * bank.count);
+    }
     return describe_expert_cache(sources, config);
 }
 } // namespace
@@ -226,17 +227,23 @@ struct Resources::Impl {
                 std::make_unique<Partition>(layer.spec.bank, layer.spec.profile.routed.experts,
                                             std::span<const std::int32_t>{}, device);
             state.ready.reserve(layer.spec.profile.routed.experts);
-            for (std::uint32_t e = 0; e < std::uint32_t(layer.spec.profile.routed.experts); ++e)
+            for (std::uint32_t e = 0; e < std::uint32_t(layer.spec.profile.routed.experts); ++e) {
                 state.keys.push_back({layer.spec.bank, e});
-            for (std::uint32_t n = 0; n < layer.cache_experts; ++n)
+            }
+            for (std::uint32_t n = 0; n < layer.cache_experts; ++n) {
                 targets.push_back({layer.spec.bank, layer.spec.priority[n]});
+            }
         }
         if (purpose == ResourcePurpose::GraphCalibration) return;
         sort_keys(targets);
-        for (const auto& placement : this->plan->extra_layout) extra_keys.push_back(placement.key);
+        for (const auto& placement : this->plan->extra_layout) {
+            extra_keys.push_back(placement.key);
+        }
         cache.replace(extra_region(), this->plan->extra_layout);
         cache.prepare({targets});
-        while (!cache.progress({SIZE_MAX, SIZE_MAX}).required_published) cache.wait_for_progress();
+        while (!cache.progress({SIZE_MAX, SIZE_MAX}).required_published) {
+            cache.wait_for_progress();
+        }
         synchronize();
     }
 
@@ -261,8 +268,9 @@ struct Resources::Impl {
     }
 
     std::size_t window_for(std::size_t layer) const {
-        for (std::size_t w = 0; w < plan->window_count; ++w)
+        for (std::size_t w = 0; w < plan->window_count; ++w) {
             if (window_layers[w] == layer) return w;
+        }
         return SIZE_MAX;
     }
 
@@ -280,7 +288,9 @@ struct Resources::Impl {
     }
 
     void release_snapshots() {
-        for (auto& layer : layers) release(layer);
+        for (auto& layer : layers) {
+            release(layer);
+        }
     }
 
     void synchronize() const {
@@ -483,12 +493,14 @@ PreparedExecution Resources::prepare_calibration_layer(ExpertBankId bank,
         const auto& layout = state.storage.banks[bank.index];
         std::vector<ExpertPlacement> entries;
         entries.reserve(layout.count);
-        for (std::uint32_t i = 0; i < layout.count; ++i)
+        for (std::uint32_t i = 0; i < layout.count; ++i) {
             entries.push_back({{bank, i}, i * layout.entry_bytes});
+        }
         state.cache.replace({0, state.storage.config.capacity_bytes, 256}, entries);
         state.cache.prepare({layer.keys});
-        while (!state.cache.progress({SIZE_MAX, SIZE_MAX}).required_published)
+        while (!state.cache.progress({SIZE_MAX, SIZE_MAX}).required_published) {
             state.cache.wait_for_progress();
+        }
         state.calibration_bank = bank;
     }
     const auto count =

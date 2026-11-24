@@ -7,11 +7,12 @@ namespace ninfer::models::spark2_5::detail {
 std::uint32_t SessionImpl::window_end(const Sequence& s, std::uint32_t begin,
                                       std::uint32_t end) const {
     end = std::min(end, begin + shape.prefill_chunk);
-    for (const auto frontier : s.identity.execution_frontiers)
+    for (const auto frontier : s.identity.execution_frontiers) {
         if (frontier > begin) {
             end = std::min(end, frontier);
             break;
         }
+    }
     if (s.capture && s.next_capture < s.captures.size())
         end = std::min(end, s.captures[s.next_capture].frontier);
     return end;
@@ -86,9 +87,10 @@ ContinuationMetadata SessionImpl::prepare_commit(Sequence& s, const WorkRow& row
         metadata.main_frontier = row.main_frontier + input_columns;
     }
     const auto peak = retain_recovery ? s.recovery_peak : 0;
-    for (std::uint32_t i = 0; i < pool_count(); ++i)
+    for (std::uint32_t i = 0; i < pool_count(); ++i) {
         directory.pool(i).histories().prepare_commit(s.histories[i], metadata.main_frontier, peak,
                                                      transaction);
+    }
     return metadata;
 }
 

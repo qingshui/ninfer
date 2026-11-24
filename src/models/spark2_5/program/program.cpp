@@ -61,9 +61,10 @@ void RankProgramImpl::validate_work(const Work& work, runtime::FrameKind kind) c
             if (!bindings[r.lane.value] || bindings[r.lane.value]->residency != r)
                 throw std::logic_error("Spark2_5 stale residency release");
             if (compute)
-                for (const auto& row : work_rows(compute->request.work))
+                for (const auto& row : work_rows(compute->request.work)) {
                     if (row.member.residency == r)
                         throw std::logic_error("Spark2_5 residency has live compute");
+                }
             released[r.lane.value] = true;
         }
         for (const auto& b : c->bindings) {
@@ -71,9 +72,10 @@ void RankProgramImpl::validate_work(const Work& work, runtime::FrameKind kind) c
             if (bindings[lane] &&
                 (!released[lane] || bindings[lane]->residency == b.member.residency))
                 throw std::logic_error("Spark2_5 residency already installed");
-            for (std::size_t i = 0; i < bindings.size(); ++i)
+            for (std::size_t i = 0; i < bindings.size(); ++i) {
                 if (bindings[i] && !released[i] && bindings[i]->sequence == b.member.sequence)
                     throw std::logic_error("Spark2_5 sequence already bound");
+            }
         }
     }
     const auto& migration =
@@ -111,8 +113,9 @@ void RankProgramImpl::validate_decision(runtime::ExecutionTicket ticket,
     runtime::DecisionRequest request;
     request.vocabulary = parameters.profile->public_tokens;
     const auto rows    = work_rows(compute->request.work);
-    for (std::uint32_t i = 0; i < rows.size(); ++i)
+    for (std::uint32_t i = 0; i < rows.size(); ++i) {
         if (rows[i].constrained) request.rows.push_back({i, {}});
+    }
     contract().validate(compute->request.work, request, in);
 }
 
@@ -164,7 +167,9 @@ void RankProgramImpl::drain() {
     compute.reset();
     context.reset();
     events.clear();
-    for (auto& b : bindings) b.reset();
+    for (auto& b : bindings) {
+        b.reset();
+    }
     drained = true;
     if (error) std::rethrow_exception(error);
 }
@@ -185,7 +190,9 @@ void RankProgramImpl::advance_context() {
     if (!f.submitted) {
         const auto transfer   = device.transfer_view();
         const auto vocabulary = parameters.profile->public_tokens;
-        for (auto r : work.releases) bindings[r.lane.value].reset();
+        for (auto r : work.releases) {
+            bindings[r.lane.value].reset();
+        }
         const auto& counts = resources.plan.persistent.buffers.token_counts;
         for (std::size_t i = 0; i < work.bindings.size(); ++i) {
             const auto& b   = work.bindings[i];

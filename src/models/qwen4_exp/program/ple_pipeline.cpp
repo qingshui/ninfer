@@ -21,7 +21,9 @@ void synchronize(cudaStream_t stream) {
 PlePipeline::PlePipeline(Resources& r, const DeviceContext& device)
     : resources_(r), cuda_(device.execution_view()) {
     appends_.reserve(2 * r.plan.shape.draft_tokens);
-    for (std::uint32_t i = 0; i < 2 * r.plan.shape.draft_tokens; ++i) appends_.emplace_back(device);
+    for (std::uint32_t i = 0; i < 2 * r.plan.shape.draft_tokens; ++i) {
+        appends_.emplace_back(device);
+    }
 }
 
 PlePipeline::~PlePipeline() {
@@ -57,8 +59,9 @@ std::optional<ple::Ticket> PlePipeline::prepare(std::uint32_t tokens,
     if (!tokens || rows.empty() || rows.size() > kMaximumSupportedConcurrency ||
         std::uint64_t(tokens) * rows.size() > resources_.plan.ple.max_positions)
         throw std::invalid_argument("invalid PLE input shape");
-    for (const auto& row : rows)
+    for (const auto& row : rows) {
         if (row.ids.size() > tokens) throw std::invalid_argument("invalid PLE input prefix");
+    }
     nvtx::ScopedRange prepare(nvtx::Name::PlePrepare, nvtx::Category::Runtime,
                               tokens * rows.size());
     progress();
@@ -90,8 +93,9 @@ std::optional<ple::Ticket> PlePipeline::prepare(std::uint32_t tokens,
     auto ticket = resources_.ple_prepare->prepare(tokens, rows, owner.has_value());
     if (!ticket) {
         if (owner)
-            for (auto& w : windows_)
+            for (auto& w : windows_) {
                 if (w && !w->owner) cancel(*w);
+            }
         return {};
     }
     auto& w = windows_.at(ticket->slot);
@@ -113,7 +117,9 @@ std::optional<ple::Ticket> PlePipeline::try_require(runtime::ExecutionTicket own
     const auto ticket = try_begin(owner, tokens, rows);
     if (ticket && !window(*ticket).seal_requested) {
         std::array<std::uint32_t, kMaximumSupportedConcurrency> valid{};
-        for (std::size_t b = 0; b < rows.size(); ++b) valid[b] = rows[b].ids.size();
+        for (std::size_t b = 0; b < rows.size(); ++b) {
+            valid[b] = rows[b].ids.size();
+        }
         seal(*ticket, {valid.data(), rows.size()});
     }
     return ticket;
@@ -172,13 +178,16 @@ void PlePipeline::append_submitted(ple::Ticket ticket, std::span<const std::uint
         !w.owner || step != w.next_append + w.append_count)
         throw std::logic_error("invalid PLE draft handoff");
     if (w.error) std::rethrow_exception(w.error);
-    for (const auto extent : extents)
+    for (const auto extent : extents) {
         if (extent > k) throw std::logic_error("invalid PLE draft extent");
+    }
     auto& transfer = appends_.at(ticket.slot * k + step);
     if (transfer.pending) throw std::logic_error("PLE draft handoff is still live");
     transfer.ticket = ticket;
     transfer.batch  = extents.size();
-    for (std::size_t b = 0; b < extents.size(); ++b) transfer.active[b] = step < extents[b];
+    for (std::size_t b = 0; b < extents.size(); ++b) {
+        transfer.active[b] = step < extents[b];
+    }
     transfer.pending = true;
     ++w.append_count;
 }
@@ -188,8 +197,9 @@ void PlePipeline::seal(ple::Ticket ticket, std::span<const std::uint32_t> valid)
     if (w.seal_requested || w.cancelled || valid.size() != w.rows.size())
         throw std::logic_error("invalid PLE seal");
     if (w.error) std::rethrow_exception(w.error);
-    for (const auto length : valid)
+    for (const auto length : valid) {
         if (length > w.tokens) throw std::logic_error("PLE seal exceeds its window");
+    }
     std::copy(valid.begin(), valid.end(), w.valid.begin());
     w.seal_requested = true;
     progress();
@@ -213,7 +223,9 @@ void PlePipeline::prefetch(std::uint32_t tokens, std::span<const ple::InputRow> 
     if (auto ticket = prepare(tokens, rows, {});
         ticket && !window(*ticket).owner && !window(*ticket).seal_requested) {
         std::array<std::uint32_t, kMaximumSupportedConcurrency> valid{};
-        for (std::size_t b = 0; b < rows.size(); ++b) valid[b] = rows[b].ids.size();
+        for (std::size_t b = 0; b < rows.size(); ++b) {
+            valid[b] = rows[b].ids.size();
+        }
         seal(*ticket, {valid.data(), rows.size()});
     }
 }
@@ -246,13 +258,14 @@ void PlePipeline::progress() {
                         .data);
                 std::array<ple::Append, kMaximumSupportedConcurrency> additions;
                 std::size_t count = 0;
-                for (std::uint32_t b = 0; b < transfer.batch; ++b)
+                for (std::uint32_t b = 0; b < transfer.batch; ++b) {
                     if (transfer.active[b]) {
                         if (w.known[b] >= w.tokens)
                             throw std::logic_error("PLE draft exceeds its window");
                         w.ids[b * w.tokens + w.known[b]++] = ids[b];
                         additions[count++]                 = {b, {ids + b, 1}};
                     }
+                }
                 if (count) resources_.ple_prepare->append(w.ticket, {additions.data(), count});
             } catch (...) {
                 const auto status = resources_.ple_prepare->poll(w.ticket);
@@ -329,8 +342,9 @@ void PlePipeline::cancel(Window& w) {
 }
 
 void PlePipeline::cancel(runtime::ExecutionTicket owner) {
-    for (auto& w : windows_)
+    for (auto& w : windows_) {
         if (w && w->owner == owner) cancel(*w);
+    }
     progress();
 }
 
@@ -379,8 +393,9 @@ void PlePipeline::drain() {
     // Joins the producer even if CUDA events can no longer be queried. UploadSlots retains
     // every borrowed Host output until its own consumers have been drained below.
     resources_.ple_prepare.reset();
-    for (auto& append : appends_)
+    for (auto& append : appends_) {
         if (append.pending) attempt([&] { append.copied.synchronize(); });
+    }
     attempt([&] { synchronize(resources_.ple_transfer().stream()); });
     attempt([&] { synchronize(cuda_.stream()); });
     for (auto& w : windows_) {
@@ -388,7 +403,9 @@ void PlePipeline::drain() {
         attempt([&] { (void)resources_.ple_upload->try_release(w->ticket); });
         w.reset();
     }
-    for (auto& append : appends_) append.pending = false;
+    for (auto& append : appends_) {
+        append.pending = false;
+    }
     drained_ = true;
     if (failure) std::rethrow_exception(failure);
 }

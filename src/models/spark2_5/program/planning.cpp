@@ -67,9 +67,11 @@ std::size_t workspace_bytes(const ModelProfile& profile, const EngineOptions& o,
                                   logits + std::size_t(columns) * 16 + 4096);
         return peak;
     }
-    for (std::uint32_t batch = 1; batch <= o.max_concurrency; ++batch)
-        for (const auto& envelope : decode_envelopes(o.max_context))
+    for (std::uint32_t batch = 1; batch <= o.max_concurrency; ++batch) {
+        for (const auto& envelope : decode_envelopes(o.max_context)) {
             text(static_cast<std::int32_t>(batch), 1, envelope);
+        }
+    }
     const auto rows = static_cast<std::int32_t>(o.max_concurrency);
     peak = std::max(peak, output_workspace_bytes(profile.planning_head, 1, rows));
     peak = std::max(peak, ops::sampling_workspace_capacity_bytes(
@@ -225,7 +227,9 @@ ExecutionPlan plan_graph_probe(std::shared_ptr<const ModelProfile> profile,
     const auto budget   = capacity_plan(plan, o);
     const auto geometry = describe_context_pool(budget.records);
     std::vector<RecordRequest> records;
-    for (const auto id : geometry.spec_classes) records.push_back({id, o.max_concurrency});
+    for (const auto id : geometry.spec_classes) {
+        records.push_back({id, o.max_concurrency});
+    }
     plan.capacity.device_bytes              = backing == GraphProbeBacking::Inputs
                                                   ? geometry.required_bytes(records)
                                                   : budget.minimum_capacity().device_bytes;

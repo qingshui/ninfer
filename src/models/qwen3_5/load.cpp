@@ -26,17 +26,21 @@ ResolvedLoadPlan resolve_load(const artifact::Reader& reader,
     for (const auto& layer : definition->weights().text.layers) {
         if (const auto* moe = std::get_if<MoeWeights>(&layer.ffn)) {
             banks[moe->bank.index] = expert_device;
-            for (const auto& expert : moe->experts)
-                for (const auto id : {expert.gate, expert.up, expert.down})
+            for (const auto& expert : moe->experts) {
+                for (const auto id : {expert.gate, expert.up, expert.down}) {
                     devices[id.index] = expert_device;
+                }
+            }
         }
     }
     std::vector<artifact::PlacementRequest> requests;
-    for (std::size_t i = 0; i < devices.size(); ++i)
-        for (const auto& part : definition->parameter({i}).binding.parts)
+    for (std::size_t i = 0; i < devices.size(); ++i) {
+        for (const auto& part : definition->parameter({i}).binding.parts) {
             requests.push_back({part.object, devices[i],
                                 devices[i] == Device::cpu() ? artifact::HostAccess::CudaTransfer
                                                             : artifact::HostAccess::CpuOnly});
+        }
+    }
     auto storage = artifact::plan_materialization(reader, requests);
     return {reader, std::move(definition), std::move(storage), std::move(devices),
             std::move(banks)};

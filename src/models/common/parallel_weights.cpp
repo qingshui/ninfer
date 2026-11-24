@@ -44,7 +44,9 @@ SelectedWeights select_weights(const artifact::Reader& reader,
     for (std::size_t bank = 0; bank < experts.size(); ++bank) {
         const auto& source    = experts[bank].bank;
         const auto& partition = experts[bank].partition;
-        for (const auto parameter : experts[bank].parameters) claim(parameter);
+        for (const auto parameter : experts[bank].parameters) {
+            claim(parameter);
+        }
         const auto count        = source.gate_up.layout.region.count;
         const auto hidden       = source.gate_up.layout.columns;
         const auto intermediate = source.down.layout.columns;
@@ -115,9 +117,10 @@ SelectedWeights select_weights(const artifact::Reader& reader,
         const auto& reference = references[i];
         auto& binding         = out.bindings[i];
         binding.shape         = reference.shape;
-        for (const auto& part : reference.binding.parts)
+        for (const auto& part : reference.binding.parts) {
             binding.parts.push_back(
                 {add(artifact::whole_tensor(reader, part.object)), part.begin, part.end});
+        }
     }
     for (std::size_t parameter = 0; parameter < descriptions.size(); ++parameter) {
         const auto& weight = descriptions[parameter];
@@ -151,9 +154,10 @@ std::vector<BoundWeight> bind_selected_weights(std::span<const BoundWeight> desc
         const auto& local = selection.bindings[i];
         if (!local.parts.empty()) {
             weight.view = {local.shape, {}};
-            for (const auto& part : local.parts)
+            for (const auto& part : local.parts) {
                 weight.view.parts.push_back(
                     {&parents[requests[part.request].index], part.begin, part.end});
+            }
         }
         out.push_back(std::move(weight));
     }
@@ -191,8 +195,9 @@ bind_selected_experts(const SelectedWeights& selection,
                                  device);
         } else {
             std::vector<moe::ResidentExpertEntry> entries;
-            for (const auto& e : bank.entries)
+            for (const auto& e : bank.entries) {
                 entries.push_back({e.expert, &parent(e.gate_up), &parent(e.down)});
+            }
             out.emplace_back(entries, selection.expert_descriptions[i].count, device);
         }
     }

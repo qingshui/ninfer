@@ -24,10 +24,12 @@ std::uint32_t checked_count(std::size_t count) {
 }
 
 void require_text_only(std::span<const ChatMessage> messages) {
-    for (const auto& message : messages)
-        for (const auto& part : message.parts)
+    for (const auto& message : messages) {
+        for (const auto& part : message.parts) {
             if (part.kind == MessagePartKind::Media)
                 throw std::invalid_argument("Spark2_5 does not support media input");
+        }
+    }
 }
 
 void sort_unique(std::vector<std::uint32_t>& values) {
@@ -41,8 +43,9 @@ void encode_prompt(PreparedPromptData& output, const text::Tokenizer& tokenizer,
     std::vector<std::size_t> offsets = boundaries.semantic;
     offsets.insert(offsets.end(), boundaries.structural.begin(), boundaries.structural.end());
     offsets.insert(offsets.end(), boundaries.execution.begin(), boundaries.execution.end());
-    for (const auto marker : boundaries.markers)
+    for (const auto marker : boundaries.markers) {
         if (marker) offsets.push_back(*marker);
+    }
     if (boundaries.rewrite) offsets.push_back(boundaries.rewrite->frontier);
     std::sort(offsets.begin(), offsets.end());
     offsets.erase(std::unique(offsets.begin(), offsets.end()), offsets.end());
@@ -64,14 +67,16 @@ void encode_prompt(PreparedPromptData& output, const text::Tokenizer& tokenizer,
     };
     const auto convert = [&](const auto& source) {
         std::vector<std::uint32_t> values;
-        for (const auto offset : source)
+        for (const auto offset : source) {
             if (const auto value = frontier(offset)) values.push_back(*value);
+        }
         sort_unique(values);
         return values;
     };
     std::vector<std::optional<std::uint32_t>> markers;
-    for (const auto marker : boundaries.markers)
+    for (const auto marker : boundaries.markers) {
         markers.push_back(marker ? frontier(*marker) : std::nullopt);
+    }
     output.context_cache = models::frontend::prepare_context_cache(
         hints, markers, convert(boundaries.semantic), convert(boundaries.structural));
     output.identity.execution_frontiers = convert(boundaries.execution);
@@ -214,9 +219,10 @@ PreparedPrompt Frontend::prepare_tokens(std::vector<TokenId> tokens,
             RequestErrorKind::ContextLengthExceeded,
             runtime::context_length_error_message(tokens.size(), impl_->max_context));
     (void)checked_count(tokens.size());
-    for (const auto token : tokens)
+    for (const auto token : tokens) {
         if (!impl_->tokenizer->is_valid_token(token))
             throw std::invalid_argument("prompt token is outside the checkpoint vocabulary");
+    }
     auto data                                = std::make_unique<PreparedPromptData>();
     data->token_ids                          = std::move(tokens);
     data->identity.reusable                  = allow_prefix_identity;

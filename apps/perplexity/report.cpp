@@ -18,9 +18,10 @@ using Json = nlohmann::json;
 std::string safe_component(std::string_view value) {
     std::string out;
     out.reserve(value.size());
-    for (const unsigned char c : value)
+    for (const unsigned char c : value) {
         out.push_back(std::isalnum(c) || c == '-' || c == '_' || c == '.' ? static_cast<char>(c)
                                                                           : '-');
+    }
     return out.empty() ? "unknown" : out;
 }
 
@@ -92,8 +93,9 @@ Json make_report(const Options& options, const RunDescription& run, const Corpus
         domains.push_back(std::move(item));
     }
     Json configuration = Json::object();
-    for (const auto& item : run.configuration.items)
+    for (const auto& item : run.configuration.items) {
         std::visit([&](const auto& value) { configuration[item.key] = value; }, item.value);
+    }
     return {
         {"schema_version", 2},
         {"metric",
@@ -166,8 +168,9 @@ void write_report(const std::filesystem::path& directory, const Json& report,
                 << std::setprecision(6) << score.at("mean_nll").get<double>() << std::setw(16)
                 << score.at("perplexity").get<double>() << '\n';
     };
-    for (const auto& domain : report.at("domains"))
+    for (const auto& domain : report.at("domains")) {
         row(domain.at("domain").get<std::string>(), domain);
+    }
     row("overall", report.at("overall"));
     summary << "\nscore rate: " << std::setprecision(1)
             << report.at("timing").at("scored_tokens_per_second").get<double>()

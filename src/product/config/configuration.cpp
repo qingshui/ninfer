@@ -275,8 +275,9 @@ StartupConfigurationView view(const LaunchOptions& launch, EntryPoint entry, con
             std::vector<std::string> stops;
             const auto channel =
                 spec.field == Field::Stop ? OutputChannel::Content : OutputChannel::Reasoning;
-            for (const auto& stop : cli->stop_strings)
+            for (const auto& stop : cli->stop_strings) {
                 if (stop.channel == channel) stops.push_back(stop.text);
+            }
             value = std::move(stops);
             break;
         }
@@ -336,8 +337,9 @@ StartupConfigurationView view(const LaunchOptions& launch, EntryPoint entry, con
             append(key + "ssh", node.ssh);
             append(key + "worker", node.worker.string());
             append(key + "artifact", node.artifact.string());
-            for (const auto& [name, value] : node.environment)
+            for (const auto& [name, value] : node.environment) {
                 append(key + "environment." + name, value);
+            }
         }
         for (std::size_t i = 0; i < d.ranks.size(); ++i) {
             const auto key   = "distributed.ranks[" + std::to_string(i) + "].";

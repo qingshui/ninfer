@@ -50,10 +50,13 @@ public:
     std::optional<Span> message(const MessageSources& source) const {
         std::optional<Span> result;
         if (source.content) include(result, at(source.content->tag));
-        for (const auto& part : source.parts)
+        for (const auto& part : source.parts) {
             if (part) include(result, at(part->tag));
+        }
         include(result, at(source.reasoning.tag));
-        for (const auto tag : source.tool_calls) include(result, at(tag));
+        for (const auto tag : source.tool_calls) {
+            include(result, at(tag));
+        }
         return result;
     }
 private:
@@ -136,19 +139,23 @@ Layout inspect(const RenderedChat& rendered, std::span<const ChatMessage> messag
             const auto close = find_control(out, kThinkClose, position, block.bytes.end);
             if (close != absent && (open || close == position))
                 layout.execution.push_back(close + kThinkClose.size());
-            for (auto span : enclosed(out, block.bytes, kToolCallOpen, kToolCallClose))
+            for (auto span : enclosed(out, block.bytes, kToolCallOpen, kToolCallClose)) {
                 layout.semantic.push_back(span.end);
+            }
         } else if (block.role == ChatRole::Tool) {
-            for (auto span : enclosed(out, block.bytes, kResponseOpen, kResponseClose))
+            for (auto span : enclosed(out, block.bytes, kResponseOpen, kResponseClose)) {
                 layout.semantic.push_back(span.end);
+            }
         }
     }
     // Each declaration is the serialized function object the template emitted for its tool.
     std::vector<Span> lists;
-    for (const auto& block : layout.blocks)
+    for (const auto& block : layout.blocks) {
         if (block.role == ChatRole::System)
-            for (auto list : enclosed(out, block.bytes, kToolsOpen, kToolsClose))
+            for (auto list : enclosed(out, block.bytes, kToolsOpen, kToolsClose)) {
                 lists.push_back(list);
+            }
+    }
     for (std::size_t t = 0; t < rendered.tools.size(); ++t) {
         const auto extent = sources.at(rendered.tools[t]);
         if (extent && std::any_of(lists.begin(), lists.end(),
@@ -180,11 +187,13 @@ std::optional<std::size_t> message_end(const Layout& layout, std::size_t count) 
 
 std::optional<std::size_t> tool_end(const Layout& layout, std::size_t count) {
     std::optional<std::size_t> end;
-    for (std::size_t i = 0; i < count; ++i)
+    for (std::size_t i = 0; i < count; ++i) {
         if (layout.tools[i]) end = std::max(end.value_or(0), layout.tools[i]->end);
+    }
     if (end)
-        for (std::size_t i = count; i < layout.tools.size(); ++i)
+        for (std::size_t i = count; i < layout.tools.size(); ++i) {
             if (layout.tools[i] && layout.tools[i]->begin < *end) return {};
+        }
     return end;
 }
 
@@ -252,14 +261,16 @@ PromptBoundaries resolve_prompt_boundaries(const RenderedChat& rendered,
     PromptBoundaries result;
     result.semantic  = layout.semantic;
     result.execution = layout.execution;
-    for (const auto& marker : markers)
+    for (const auto& marker : markers) {
         result.markers.push_back(
             resolve_marker(rendered, layout, messages, continuation, marker, probes));
+    }
     if (const auto end = tool_end(layout, layout.tools.size())) result.structural.push_back(*end);
     std::size_t leading = 0;
     while (leading < messages.size() && (messages[leading].role == ChatRole::System ||
-                                         messages[leading].role == ChatRole::Developer))
+                                         messages[leading].role == ChatRole::Developer)) {
         ++leading;
+    }
     if (const auto end = message_end(layout, leading)) result.structural.push_back(*end);
     if (!layout.blocks.empty()) {
         auto frontier = layout.blocks.back().bytes.begin;
@@ -269,13 +280,15 @@ PromptBoundaries resolve_prompt_boundaries(const RenderedChat& rendered,
         if (next_turn && !next_turn->retains_response) {
             kind              = models::frontend::RewriteCheckpointKind::TurnClosure;
             std::size_t first = 0;
-            for (std::size_t i = 0; i < messages.size(); ++i)
+            for (std::size_t i = 0; i < messages.size(); ++i) {
                 if (messages[i].role == ChatRole::User) first = i + 1;
-            for (auto i = first; i < messages.size(); ++i)
+            }
+            for (auto i = first; i < messages.size(); ++i) {
                 if (messages[i].role == ChatRole::Assistant && layout.messages[i]) {
                     frontier = layout.messages[i]->begin;
                     break;
                 }
+            }
         }
         if (frontier && (!next_turn || models::frontend::same_prefix(rendered.output,
                                                                      next_turn->output, frontier)))

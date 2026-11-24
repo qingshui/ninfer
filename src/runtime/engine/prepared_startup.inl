@@ -13,10 +13,11 @@ build_prepared_local_model(const artifact::Reader& reader, EngineOptions& option
     std::unique_ptr<artifact::Reader> rank_reader;
     if (options.deployment && options.deployment->ranks.size() == 1) {
         const auto& node = options.deployment->nodes.front();
-        for (const auto& [key, value] : node.environment)
+        for (const auto& [key, value] : node.environment) {
             if (::setenv(key.c_str(), value.c_str(), 1))
                 throw std::system_error(errno, std::generic_category(),
                                         "set local rank environment");
+        }
         rank_reader = std::make_unique<artifact::Reader>(node.artifact);
     }
     const auto& local_reader = rank_reader ? *rank_reader : reader;
@@ -139,9 +140,11 @@ build_prepared_local_model(const artifact::Reader& reader, EngineOptions& option
     load.cuda_sync_mode         = device->sync_mode();
     load.context_cost           = std::move(cost.summary);
     std::set<std::string> formats;
-    for (const auto& weight : setup.definition()->weight_data())
-        for (const auto& part : weight.view.parts)
+    for (const auto& weight : setup.definition()->weight_data()) {
+        for (const auto& part : weight.view.parts) {
             formats.emplace(artifact::format_name(part.parent->geometry.format));
+        }
+    }
     load.weight_formats.assign(formats.begin(), formats.end());
     load.load_seconds =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();

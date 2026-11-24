@@ -19,8 +19,9 @@ const std::array kShapes{
 const Nvfp4LinearShape& resolve_shape(std::int32_t n, std::int32_t k, LinearPolicy policy) {
     if (!valid_linear_policy(policy))
         throw std::invalid_argument("nvfp4 linear: unsupported policy");
-    for (const auto* shape : kShapes)
+    for (const auto* shape : kShapes) {
         if (shape->n == n && shape->k == k) return *shape;
+    }
     throw std::invalid_argument("nvfp4 linear: unsupported shape n=" + std::to_string(n) +
                                 " k=" + std::to_string(k));
 }

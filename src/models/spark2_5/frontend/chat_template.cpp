@@ -28,8 +28,9 @@ std::string_view supported_effort(std::string_view name) {
 
 Json template_parameters(const PromptOptions& options, const Json& tokens) {
     auto context = models::frontend::template_context(options.chat_template_kwargs_json, tokens);
-    for (const char* key : {"enable_thinking", "reasoning_effort"})
+    for (const char* key : {"enable_thinking", "reasoning_effort"}) {
         if (context.contains(key) && context[key].is_null()) context.erase(key);
+    }
     if (options.enable_thinking)
         models::frontend::merge_template_option(context, "enable_thinking",
                                                 *options.enable_thinking);
@@ -149,7 +150,9 @@ struct TemplateInput {
 void truncate(text::TemplateOutput& output, std::size_t end) {
     output.text.resize(end);
     std::erase_if(output.regions, [&](const auto& region) { return region.begin > end; });
-    for (auto& region : output.regions) region.end = std::min(region.end, end);
+    for (auto& region : output.regions) {
+        region.end = std::min(region.end, end);
+    }
     std::erase_if(output.literal_spans, [&](auto span) { return span.begin >= end; });
     if (!output.literal_spans.empty())
         output.literal_spans.back().end = std::min(output.literal_spans.back().end, end);
@@ -188,8 +191,9 @@ RenderedChat render_input(const TemplateInput& input,
                           const models::frontend::ChatTemplate& compiled, bool continuation,
                           const PreparationControl& control) {
     std::vector<std::string> control_variables;
-    for (const auto& item : compiled.special_tokens.items())
+    for (const auto& item : compiled.special_tokens.items()) {
         control_variables.push_back(item.key());
+    }
     const text::TemplateRenderOptions execution{
         .checkpoint =
             [&] { models::frontend::check_preparation_control(control, "Spark2_5 chat template"); },
@@ -223,10 +227,11 @@ std::size_t find_control(const text::TemplateOutput& output, std::string_view ma
                          std::size_t begin, std::size_t end) {
     end = std::min(end, output.text.size());
     for (auto pos = output.text.find(marker, begin); pos != std::string::npos && pos < end;
-         pos      = output.text.find(marker, pos + 1))
+         pos      = output.text.find(marker, pos + 1)) {
         if (pos + marker.size() <= end &&
             !text::overlaps(output.literal_spans, pos, pos + marker.size()))
             return pos;
+    }
     return std::string::npos;
 }
 
@@ -289,7 +294,9 @@ RenderedChat CompiledChatTemplate::render_impl(std::span<const ChatMessage> mess
     input.context["messages"]               = Json::array();
     input.context["add_generation_prompt"]  = !continuation;
     input.context["continue_final_message"] = continuation;
-    for (const auto& message : messages) input.append_message(message);
+    for (const auto& message : messages) {
+        input.append_message(message);
+    }
     input.context["tools"] = Json::array();
     for (const auto& source : options.tool_jsons) {
         auto tool = Json::parse(source);

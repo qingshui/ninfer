@@ -99,7 +99,9 @@ void write(wire::Encoder& out, const T& v) {
                              v.begin();
                          }) {
         out.u64(v.size());
-        for (const auto& item : v) write(out, item);
+        for (const auto& item : v) {
+            write(out, item);
+        }
     } else
         std::apply([&](const auto&... values) { (write(out, values), ...); }, fields(v));
 }
@@ -122,13 +124,17 @@ void read(wire::Decoder& in, T& v) {
             v.reset();
     } else if constexpr (requires { v.resize(0); }) {
         v.resize(in.count(8));
-        for (auto& item : v) read(in, item);
+        for (auto& item : v) {
+            read(in, item);
+        }
     } else if constexpr (requires {
                              v.size();
                              v.begin();
                          }) {
         if (in.count(8) != v.size()) throw std::logic_error("observation array extent differs");
-        for (auto& item : v) read(in, item);
+        for (auto& item : v) {
+            read(in, item);
+        }
     } else
         std::apply([&](auto&... values) { (read(in, values), ...); }, fields(v));
 }
@@ -154,7 +160,9 @@ void encode(wire::Encoder& out, const RankExecutionObservation& value) { write(o
 
 std::size_t rank_execution_observation_capacity() {
     RankExecutionObservation value;
-    for (const auto field : kGpuIntervalFields) value.gpu.*field = 0;
+    for (const auto field : kGpuIntervalFields) {
+        value.gpu.*field = 0;
+    }
     value.attention.emplace();
     wire::Encoder out;
     encode(out, value);

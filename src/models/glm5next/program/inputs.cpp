@@ -133,10 +133,11 @@ void RankProgramImpl::prepare_inputs(std::span<const WorkRow> rows, const BatchP
             upload_region(layout.sampling->region, b * sizeof(ops::SamplingConfig));
     }
     std::uint32_t local_visible = 0;
-    for (std::uint32_t j = own.begin; j < own.begin + own.size; ++j)
+    for (std::uint32_t j = own.begin; j < own.begin + own.size; ++j) {
         if (i32(io.valid_columns)[j])
             local_visible = std::max(local_visible, std::uint32_t(i32(global.base_positions)[j] +
                                                                   i32(io.valid_columns)[j]));
+    }
     f.batch = f.sequence ? batch(io, t, b, c, local_visible, rows.front().attention_rank)
                          : decode_batch(t, b, c, local_visible);
 }
@@ -177,8 +178,9 @@ void RankProgramImpl::fill_local_metadata(const BatchLayout& layout, int t, int 
     for (int row = 0; row < c; ++row) {
         const auto source = mapping[row];
         local_valid[row]  = source < 0 ? 0 : valid[source];
-        for (int i = 0; i < t; ++i)
+        for (int i = 0; i < t; ++i) {
             local_positions[row * t + i] = source < 0 ? 0 : positions[source * t + i];
+        }
     }
 }
 
@@ -205,8 +207,9 @@ void RankProgramImpl::request_decision() {
                 f.physical.members.begin();
             const auto* drafts =
                 static_cast<const TokenId*>(output(resources.plan.frame.mtp->drafts).data);
-            for (std::uint32_t step = 0; step < mtp->draft_extents[i]; ++step)
+            for (std::uint32_t step = 0; step < mtp->draft_extents[i]; ++step) {
                 input.drafts.push_back(drafts[step * shape.max_concurrency + physical]);
+            }
         }
         request.rows.push_back(std::move(input));
     }

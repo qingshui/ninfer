@@ -24,8 +24,9 @@ Nvfp4MulRoute select_nvfp4_mul_route(int rows, int k, int tokens, LinearPolicy p
         Shape{20480, 4096, select_nvfp4_mul_n20480_k4096},
         Shape{4096, 10240, select_nvfp4_mul_n4096_k10240},
     };
-    for (const auto& shape : shapes)
+    for (const auto& shape : shapes) {
         if (shape.rows == rows && shape.k == k) return shape.select(tokens);
+    }
 #endif
     throw std::invalid_argument("NVFP4_MUL linear: unsupported weight geometry");
 }

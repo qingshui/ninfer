@@ -29,9 +29,11 @@ void rmsnorm_rope_2d(const Tensor& positions, const Tensor& q_weight, const Tens
     if (!tokens) return;
     operand::tensor(positions, DType::I32, {tokens, 2}, 4, op, "positions", execution.device());
     operand::disjoint(operand::range(q, op), operand::range(k, op), op);
-    for (const auto* output : {&q, &k})
-        for (const auto* input : {&positions, &q_weight, &k_weight})
+    for (const auto* output : {&q, &k}) {
+        for (const auto* input : {&positions, &q_weight, &k_weight}) {
             operand::disjoint(operand::range(*output, op), operand::range(*input, op), op);
+        }
+    }
     const detail::AxialRope64Arguments a{static_cast<const int*>(positions.data),
                                          static_cast<const __nv_bfloat16*>(q_weight.data),
                                          static_cast<const __nv_bfloat16*>(k_weight.data),

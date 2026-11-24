@@ -8,7 +8,9 @@ ModelShard::ModelShard(std::shared_ptr<const ModelDefinition> definition, RankPl
 
 std::size_t ModelShard::metadata_bytes() const {
     std::size_t bytes = 0;
-    for (const auto& bank : experts_) bytes += bank.bytes();
+    for (const auto& bank : experts_) {
+        bytes += bank.bytes();
+    }
     return bytes;
 }
 

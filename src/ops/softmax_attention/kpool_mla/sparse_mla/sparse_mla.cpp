@@ -39,8 +39,9 @@ KpoolGraphProfile kpool_sparse_mla_graph_profile(const KpoolSparseMlaProfile& pr
         for (const auto word :
              {std::uint64_t(p.factor), std::uint64_t(p.attention), std::uint64_t(p.splits),
               std::uint64_t(p.tile), std::uint64_t(p.direct), std::uint64_t(p.merge_value),
-              std::uint64_t(p.fp8_query), std::uint64_t(p.bytes)})
+              std::uint64_t(p.fp8_query), std::uint64_t(p.bytes)}) {
             key.words_[at++] = word;
+        }
     };
     const auto columns = std::int64_t(tokens) * batch;
     if (columns >= kMlaWindow) append(kMlaWindow);
@@ -75,9 +76,11 @@ void kpool_sparse_mla(const Tensor& query, const KpoolMlaFactors& factors,
         inputs[n++] = operand::range(t, kOperation);
     };
     input(query, DType::BF16, {256, 64, T, B}, 16, "MLA query");
-    for (const auto* factor : {&factors.key_up, &factors.value_up})
-        for (const auto plane : weight_operands(*factor, 16384, 512, device))
+    for (const auto* factor : {&factors.key_up, &factors.value_up}) {
+        for (const auto plane : weight_operands(*factor, 16384, 512, device)) {
             if (plane.begin != plane.end) inputs[n++] = plane;
+        }
+    }
     input(batch.positions, DType::I32, {T, B}, 4, "positions");
     input(batch.valid_columns, DType::I32, {B}, 4, "valid columns");
     input(batch.table_rows, DType::I32, {B}, 4, "table rows");
@@ -92,7 +95,9 @@ void kpool_sparse_mla(const Tensor& query, const KpoolMlaFactors& factors,
     const auto table_blocks = operand::blocks(table, kOperation);
     operand::tensor(out, DType::BF16, {256, 64, T, B}, 16, kOperation, "MLA output", device);
     const auto output = operand::range(out, kOperation);
-    for (int i = 0; i < n; ++i) operand::disjoint(output, inputs[i], kOperation);
+    for (int i = 0; i < n; ++i) {
+        operand::disjoint(output, inputs[i], kOperation);
+    }
     require(!operand::overlaps(table_blocks, output), "output overlaps page table");
     operand::device(workspace.device(), device, kOperation, "workspace");
     SparseMlaArguments a{};
@@ -128,7 +133,9 @@ void kpool_sparse_mla(const Tensor& query, const KpoolMlaFactors& factors,
     if (bytes) {
         scratch          = workspace.alloc_bytes(bytes, 256);
         const auto range = operand::range(scratch.data, scratch.bytes, kOperation);
-        for (int i = 0; i < n; ++i) operand::disjoint(range, inputs[i], kOperation);
+        for (int i = 0; i < n; ++i) {
+            operand::disjoint(range, inputs[i], kOperation);
+        }
         operand::disjoint(range, output, kOperation);
         require(!operand::overlaps(table_blocks, range), "workspace overlaps page table");
     }

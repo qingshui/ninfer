@@ -53,9 +53,13 @@ bool valid_demotion(const SessionImpl& session, const Demotion& plan) {
     std::unordered_set<std::uint32_t> images;
     std::array<std::unordered_set<std::uint32_t>, 2> pages;
     for (const auto& group : facts.groups) {
-        for (const auto image : group.states) images.insert(image.index);
+        for (const auto image : group.states) {
+            images.insert(image.index);
+        }
         for (std::uint16_t pool = 0; pool < session.directory.pool_count(); ++pool) {
-            for (const auto& page : group.pages[pool]) pages[pool].insert(page.handle.index);
+            for (const auto& page : group.pages[pool]) {
+                pages[pool].insert(page.handle.index);
+            }
         }
     }
     const auto& states = session.directory.states();
@@ -208,7 +212,9 @@ ContextReleaseSet SessionImpl::footprint(std::span<const CheckpointHandle> input
         auto probe       = selected.probe(input);
         return selected.released();
     }
-    for (const auto image : checkpoint_images(input)) result.merge(directory.state_release(image));
+    for (const auto image : checkpoint_images(input)) {
+        result.merge(directory.state_release(image));
+    }
     for (std::uint16_t pool = 0; pool < directory.pool_count(); ++pool) {
         for (const auto page : checkpoint_pages(input, pool)) {
             const auto facts = directory.page_release(page);
@@ -280,14 +286,16 @@ ContextDemotion SessionImpl::combine_demotions(std::span<const ContextDemotion> 
         if (!quote.impl || quote.impl->owner != this)
             throw std::invalid_argument("demotion quote belongs to another session");
         const auto& part = *quote.impl;
-        for (const auto source : part.records) append_unique(plan->records, source);
+        for (const auto source : part.records) {
+            append_unique(plan->records, source);
+        }
         for (std::size_t i = 0; i < part.images.size(); ++i) {
             if (!images.insert(part.images[i].index).second)
                 throw std::invalid_argument("demotion batch contains overlapping State records");
             plan->images.push_back(part.images[i]);
             plan->image_epochs.push_back(part.image_epochs[i]);
         }
-        for (std::uint32_t pool = 0; pool < directory.pool_count(); ++pool)
+        for (std::uint32_t pool = 0; pool < directory.pool_count(); ++pool) {
             for (std::size_t i = 0; i < part.pages[pool].size(); ++i) {
                 const auto page = part.pages[pool][i];
                 if (!pages[pool].insert(page.index).second)
@@ -295,6 +303,7 @@ ContextDemotion SessionImpl::combine_demotions(std::span<const ContextDemotion> 
                 plan->pages[pool].push_back(page);
                 plan->page_versions[pool].push_back(part.page_versions[pool][i]);
             }
+        }
         result.host_bytes += quote.host_bytes;
         result.released.merge(quote.released);
     }
@@ -306,8 +315,9 @@ ContextDemotion SessionImpl::combine_demotions(std::span<const ContextDemotion> 
 context::HostWriteRequirements SessionImpl::host_requirements(const Demotion& plan) const {
     context::HostWriteRequirements write;
     write.kv_pages.resize(directory.pool_count());
-    for (const auto image : plan.images)
+    for (const auto image : plan.images) {
         write.state_images += !directory.states().host_resident(image);
+    }
     for (std::uint16_t pool = 0; pool < directory.pool_count(); ++pool) {
         for (const auto page : plan.pages[pool]) {
             write.kv_pages[pool] += !directory.pool(pool).pages().host_replica_current(page);
@@ -430,7 +440,9 @@ runtime::ContextStart SessionImpl::start_demote(const ContextDemotion& quote,
     if (!execution) return runtime::ContextStart::Deferred;
     DemoteOperation action{quote.impl, {}, target_ids};
     action.sources.reserve(quote.sources.size());
-    for (const auto source : quote.sources) action.sources.push_back(checkpoints.lease(source));
+    for (const auto source : quote.sources) {
+        action.sources.push_back(checkpoints.lease(source));
+    }
     for (const auto victim : victims) {
         if (!checkpoints.erase(victim))
             throw std::logic_error("Prepared Host victim changed before demotion");

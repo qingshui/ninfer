@@ -11,14 +11,16 @@ void hash_tokens(std::span<const std::int32_t> ids, std::array<std::int32_t, 2> 
     if (output.size() / kHeads != ids.size() || output.size() % kHeads || eos < 0 || tail[0] < 0 ||
         tail[1] < 0)
         throw std::invalid_argument("invalid PLE hash operands");
-    for (auto id : ids)
+    for (auto id : ids) {
         if (id < 0) throw std::invalid_argument("negative PLE token ID");
-    for (std::size_t h = 0; h < kHeads; ++h)
+    }
+    for (std::size_t h = 0; h < kHeads; ++h) {
         if (controls.vocab_sizes[h] <= 0 || controls.offsets[h] < 0 ||
             std::uint64_t(controls.offsets[h]) > std::numeric_limits<std::uint32_t>::max() ||
             std::uint64_t(controls.vocab_sizes[h] - 1) >
                 std::numeric_limits<std::uint32_t>::max() - std::uint64_t(controls.offsets[h]))
             throw std::invalid_argument("PLE hash head exceeds U32 rows");
+    }
     for (std::size_t t = 0; t < ids.size(); ++t) {
         const auto older = tail[1] == eos ? eos : tail[0];
         const auto pair  = std::uint64_t(ids[t]) * std::uint64_t(controls.multipliers[0]) ^

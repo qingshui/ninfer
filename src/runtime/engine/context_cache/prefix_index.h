@@ -59,7 +59,9 @@ public:
         std::vector<Handle> result;
         const Node* current = &root_;
         while (current) {
-            for (const auto& entry : current->checkpoints) result.push_back(entry.handle);
+            for (const auto& entry : current->checkpoints) {
+                result.push_back(entry.handle);
+            }
             const Node* next = nullptr;
             for (const auto& child : current->children) {
                 if (child->frontier > base.summary().prompt_tokens) { continue; }
@@ -135,8 +137,9 @@ private:
     }
 
     void relocate(Handle handle, const Node* from, Node* to) {
-        for (auto& location : locations_[handle.index])
+        for (auto& location : locations_[handle.index]) {
             if (location.handle == handle && location.node == from) location.node = to;
+        }
     }
 
     bool insert_at(Session& session, Node& node, Handle handle, std::uint32_t frontier,
@@ -207,9 +210,12 @@ private:
                     const auto child = std::move(node->children.front());
                     *node            = std::move(*child);
                     node->parent     = parent;
-                    for (const auto& entry : node->checkpoints)
+                    for (const auto& entry : node->checkpoints) {
                         relocate(entry.handle, child.get(), node);
-                    for (const auto& grandchild : node->children) grandchild->parent = node;
+                    }
+                    for (const auto& grandchild : node->children) {
+                        grandchild->parent = node;
+                    }
                 }
                 node->representative = !node->checkpoints.empty()
                                            ? node->checkpoints.front().handle

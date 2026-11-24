@@ -75,9 +75,10 @@ RankPlan rank_plan(const ModelDefinition& definition, std::uint32_t size, std::u
             const auto width = c.kda.width();
             const auto local = width / size;
             conv.shape       = {c.kda.conv_width, 3 * local};
-            for (std::uint64_t field = 0; field < 3; ++field)
+            for (std::uint64_t field = 0; field < 3; ++field) {
                 conv.slices.push_back({k->convolution, 0, field * width + rank * local,
                                        c.kda.conv_width, local, 0, field * local});
+            }
             conv.bindings.push_back(
                 {k->convolution, conv.shape, 0, std::uint64_t(c.kda.conv_width) * 3 * local});
             p.assemblies.push_back(std::move(conv));
@@ -112,8 +113,9 @@ ParallelPlan plan_parallel(const ModelDefinition& definition, const DeploymentOp
     for (const auto& r : deployment.ranks) {
         out.ranks.push_back(rank_plan(definition, size, r.rank, o.ep));
         std::uint32_t local = 0;
-        for (const auto& other : deployment.ranks)
+        for (const auto& other : deployment.ranks) {
             if (other.node == r.node && other.rank < r.rank) ++local;
+        }
         out.topology.ranks.push_back({r.rank,
                                       r.node,
                                       local,
@@ -135,7 +137,9 @@ ParallelPlan plan_parallel(const ModelDefinition& definition, const DeploymentOp
             identity *= 1099511628211ULL;
         }
     };
-    for (const auto byte : definition.artifact_id()) mix(std::to_integer<unsigned>(byte));
+    for (const auto byte : definition.artifact_id()) {
+        mix(std::to_integer<unsigned>(byte));
+    }
     mix(size);
     mix(o.ep);
     mix(definition.options().vision);
@@ -147,7 +151,9 @@ ParallelPlan plan_parallel(const ModelDefinition& definition, const DeploymentOp
         for (const auto& bank : rank.experts) {
             mix(bank.intermediate.begin);
             mix(bank.intermediate.size);
-            for (auto expert : bank.ids) mix(expert);
+            for (auto expert : bank.ids) {
+                mix(expert);
+            }
         }
     }
     out.topology.plan = identity ? identity : 1;

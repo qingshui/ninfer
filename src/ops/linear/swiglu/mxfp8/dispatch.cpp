@@ -16,8 +16,9 @@ std::span<const Mxfp8SwiGluRoute> select_routes(int rows, int k, LinearPolicy po
         throw std::invalid_argument("MXFP8 linear_swiglu: invalid policy");
 #if NINFER_TARGET_SPARK
     const std::array shapes{&kMxfp8SwiGluN12288K4096, &kMxfp8SwiGluN2048K4096};
-    for (const auto* shape : shapes)
+    for (const auto* shape : shapes) {
         if (rows == shape->rows && k == shape->k) return allows_a8(policy) ? shape->a8 : shape->a16;
+    }
 #endif
     throw std::invalid_argument("MXFP8 linear_swiglu: unsupported weight geometry");
 }
@@ -26,8 +27,9 @@ std::span<const Mxfp8SwiGluRoute> select_routes(int rows, int k, LinearPolicy po
 
 Mxfp8SwiGluRoute select_mxfp8_swiglu_route(int rows, int k, int tokens, LinearPolicy policy) {
     if (tokens <= 0) throw std::invalid_argument("MXFP8 linear_swiglu: tokens must be positive");
-    for (const auto& route : select_routes(rows, k, policy))
+    for (const auto& route : select_routes(rows, k, policy)) {
         if (tokens <= route.last_tokens) return route;
+    }
     throw std::invalid_argument("MXFP8 linear_swiglu: unsupported token count");
 }
 

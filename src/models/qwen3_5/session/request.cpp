@@ -149,8 +149,9 @@ RequestBasePlan SessionImpl::plan_request(qwen::PreparedPromptData&& prompt,
             }
             std::sort(base->checkpoint_candidates.begin(), base->checkpoint_candidates.end(),
                       [](const auto& a, const auto& b) { return a.frontier < b.frontier; });
-            for (const auto& candidate : base->checkpoint_candidates)
+            for (const auto& candidate : base->checkpoint_candidates) {
                 base->checkpoint_frontiers.push_back(candidate.frontier);
+            }
         }
     }
     return RequestBasePlan(std::move(base));

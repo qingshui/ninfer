@@ -61,9 +61,10 @@ RequestBasePlan Session::plan_request(qwen::PreparedPrompt&& prompt,
     if (input.media_payloads.size() != input.vision_items.size())
         throw std::invalid_argument("prepared prompt media payload is incomplete");
     if (input.has_media()) plan->vision = p.plan_vision(input);
-    for (const auto id : input.token_ids)
+    for (const auto id : input.token_ids) {
         if (id < 0 || std::uint32_t(id) >= p.definition->resources().text.public_token_count)
             throw std::invalid_argument("prompt token is outside the public vocabulary");
+    }
     std::uint32_t previous = 0;
     for (const auto f : input.identity.rewrite_execution_frontiers) {
         if (f <= previous || f > count) throw std::invalid_argument("invalid execution frontier");
@@ -106,12 +107,13 @@ RequestBasePlan Session::plan_request(qwen::PreparedPrompt&& prompt,
         add(input.identity.rewrite_checkpoint ? input.identity.rewrite_checkpoint->recovery_frontier
                                               : count,
             runtime::CheckpointRole::InputReplay);
-        for (const auto& o : input.context_cache.opportunities)
+        for (const auto& o : input.context_cache.opportunities) {
             add(o.frontier,
                 o.kind == PromptCacheMarkerKind::PrivateLongAnchor
                     ? runtime::CheckpointRole::LongAnchor
                     : runtime::CheckpointRole::SharedPrefix,
                 o.evidence);
+        }
         std::sort(plan->captures.begin(), plan->captures.end(),
                   [](const auto& a, const auto& b) { return a.frontier < b.frontier; });
     }

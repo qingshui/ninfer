@@ -14,8 +14,9 @@ const std::array kFp32ScaleShapes{&kFp8RowFp32N3072K2048,   &kFp8RowFp32N8K2048,
 
 template <class Shapes>
 const Fp8LinearShape& find_shape(const Shapes& shapes, std::int32_t n, std::int32_t k) {
-    for (const auto* shape : shapes)
+    for (const auto* shape : shapes) {
         if (shape->n == n && shape->k == k) return *shape;
+    }
     throw std::invalid_argument("fp8 linear: unsupported shape");
 }
 

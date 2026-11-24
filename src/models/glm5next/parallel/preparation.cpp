@@ -11,8 +11,9 @@ context::ContextDirectorySpec plan_group_context(const ParallelPlan& parallel,
     context::ContextDirectorySpec out;
     out.state.logical_capacity = UINT32_MAX;
     out.state.layouts.resize(ranks.size());
-    for (std::size_t owner = 0; owner < ranks.size(); ++owner)
+    for (std::size_t owner = 0; owner < ranks.size(); ++owner) {
         out.state.layouts[owner].variant = static_cast<std::uint32_t>(owner);
+    }
     out.pools.resize(ranks.front().context.pools.size());
     for (std::size_t rank = 0; rank < ranks.size(); ++rank) {
         const auto& r = ranks[rank];
@@ -54,9 +55,10 @@ context::ContextDirectorySpec plan_group_context(const ParallelPlan& parallel,
             target.parts.push_back(source.parts[0]);
         }
     }
-    for (auto& pool : out.pools)
+    for (auto& pool : out.pools) {
         pool.histories =
             context::HistoryDirectory::capacity_for_metadata(out.metadata_budget_bytes);
+    }
     return out;
 }
 

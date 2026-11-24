@@ -28,8 +28,9 @@ __global__ void prepare_ragged_prefix_kernel(
         (static_cast<std::int64_t>(batch) * width + column) * vectors_per_column;
     const uint4 zero{};
     for (int vector = feature_tile * kRaggedPrefixVectorsPerBlock + threadIdx.x;
-         vector < vectors_per_column; vector += gridDim.z * kRaggedPrefixVectorsPerBlock)
+         vector < vectors_per_column; vector += gridDim.z * kRaggedPrefixVectorsPerBlock) {
         destination[destination_base + vector] = live ? source[source_base + vector] : zero;
+    }
     if (feature_tile == 0 && threadIdx.x == 0) {
         positions[column + width * batch] = starts[batch] + (live ? column : max(count - 1, 0));
         if (column == 0) { counts[batch] = count; }

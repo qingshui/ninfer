@@ -41,8 +41,9 @@ void SessionImpl::finish_result(ComputeResult result) {
         batch.decode_    = tx.kind != Kind::Prefill;
         batch.stride_    = 1;
         batch.execution_ = tx.observed_result;
-        for (const auto& row : tx.result->rows)
+        for (const auto& row : tx.result->rows) {
             batch.stride_ = std::max<std::uint32_t>(batch.stride_, row.tokens.size());
+        }
         batch.tokens_.resize(batch.stride_ * tx.members.size());
         batch.counts_.resize(tx.members.size());
         for (std::size_t b = 0; b < tx.members.size(); ++b) {
@@ -248,9 +249,13 @@ CommitResult Session::commit(PendingBatch&& batch,
             else
                 ++stats.fallback_steps;
             stats.drafted_tokens += drafted;
-            for (std::uint32_t i = 0; i < drafted; ++i) ++stats.attempted_per_position[i];
+            for (std::uint32_t i = 0; i < drafted; ++i) {
+                ++stats.attempted_per_position[i];
+            }
             stats.accepted_tokens += accepted;
-            for (std::uint32_t i = 0; i < accepted; ++i) ++stats.accepted_per_position[i];
+            for (std::uint32_t i = 0; i < accepted; ++i) {
+                ++stats.accepted_per_position[i];
+            }
         }
         row.speculative = s.speculative;
 

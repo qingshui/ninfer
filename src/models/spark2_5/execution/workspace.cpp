@@ -32,7 +32,9 @@ BlockProfile describe_block(const BlockParameters& b) {
 std::size_t text_workspace_bytes(const Parameters& p, const TextWorkspaceShape& s) {
     std::vector<BlockProfile> layers;
     layers.reserve(p.layers.size());
-    for (const auto& layer : p.layers) layers.push_back(describe_block(layer));
+    for (const auto& layer : p.layers) {
+        layers.push_back(describe_block(layer));
+    }
     return text_workspace_bytes(p.config, layers, s);
 }
 
@@ -51,7 +53,9 @@ std::size_t text_workspace_bytes(const TextConfig& c, std::span<const BlockProfi
     };
     (void)workspace::roots(a, c, last);
     bool sliding = false, full = false;
-    for (const auto& layer : c.layers) (layer.kind == LayerKind::Full ? full : sliding) = true;
+    for (const auto& layer : c.layers) {
+        (layer.kind == LayerKind::Full ? full : sliding) = true;
+    }
     for (const auto& layer : layers) {
         auto scope = a.scope();
         {

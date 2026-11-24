@@ -331,7 +331,9 @@ public:
 
     Json output_snapshot() const {
         Json output = Json::array();
-        for (int i = 0; i < next_output_index; ++i) output.push_back(nullptr);
+        for (int i = 0; i < next_output_index; ++i) {
+            output.push_back(nullptr);
+        }
         if (reasoning_started)
             output[reasoning_index] =
                 reasoning_item(ids.reasoning, reasoning_done ? reasoning_status : "incomplete",

@@ -39,14 +39,17 @@ __device__ void assign(const Field& f, int block) {
                                                     selected * f.column_stride);
         destination = reinterpret_cast<Word*>(f.destination + f.offsets[row]);
     }
-    for (int d = tile * blockDim.x + threadIdx.x; d < f.features; d += f.tiles * blockDim.x)
+    for (int d = tile * blockDim.x + threadIdx.x; d < f.features; d += f.tiles * blockDim.x) {
         destination[d] = live ? source[d] : Word{};
+    }
 }
 
 template <bool Gather>
 __global__ void assign_fields(const __grid_constant__ Fields fields) {
     int index = 0, begin = 0;
-    while (int(blockIdx.x) >= fields.values[index].end) begin = fields.values[index++].end;
+    while (int(blockIdx.x) >= fields.values[index].end) {
+        begin = fields.values[index++].end;
+    }
     const auto& field = fields.values[index];
     if (field.word_bytes == 2)
         assign<std::uint16_t, Gather>(field, int(blockIdx.x) - begin);

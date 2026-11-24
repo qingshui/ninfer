@@ -37,7 +37,9 @@ void send(Sender& transport, std::uint64_t epoch, std::span<const RankId> ranks,
           wire::Bytes payload = {}) {
     auto message = std::make_shared<wire::Message>(wire::Message{kind, epoch, std::move(payload)});
     std::vector<OutgoingMessage> messages;
-    for (auto rank : ranks) messages.push_back({rank, message});
+    for (auto rank : ranks) {
+        messages.push_back({rank, message});
+    }
     if (!transport.try_send(messages, Traffic::Continuation))
         throw std::runtime_error("control continuation capacity exhausted");
 }
@@ -50,13 +52,17 @@ struct ExecutionGroup::Impl {
         : options(std::move(options)), topology(std::move(topology)), observer(std::move(observer)),
           sink(std::move(sink)), epoch(new_epoch()) {
         this->topology.validate(this->options);
-        for (const auto& r : this->topology.ranks) ranks.push_back(r.rank);
+        for (const auto& r : this->topology.ranks) {
+            ranks.push_back(r.rank);
+        }
     }
 
     ~Impl() {
         if (!closed) fail("coordinator execution group released");
         transport.close();
-        for (auto& process : processes) process.terminate();
+        for (auto& process : processes) {
+            process.terminate();
+        }
     }
 
     struct PeerState {
@@ -73,8 +79,9 @@ struct ExecutionGroup::Impl {
         if (!event) {
             const auto it = peers.find(rank);
             if (it != peers.end() && !it->second.ready)
-                for (const auto& phase : it->second.phases)
+                for (const auto& phase : it->second.phases) {
                     if (phase && (!event || phase->invocation > event->invocation)) event = phase;
+                }
         }
         if (event)
             result += ", " + std::string(startup_phase_name(event->phase)) + ", attempt " +
@@ -203,7 +210,9 @@ struct ExecutionGroup::Impl {
             if (!event) {
                 if (std::chrono::steady_clock::now() >= until) {
                     std::string error = "distributed startup timed out waiting for";
-                    for (auto rank : pending) error += " [" + context(rank) + "]";
+                    for (auto rank : pending) {
+                        error += " [" + context(rank) + "]";
+                    }
                     throw std::runtime_error(error);
                 }
                 std::this_thread::yield();
@@ -247,8 +256,9 @@ struct ExecutionGroup::Impl {
             progress();
             if (std::chrono::steady_clock::now() >= until) {
                 std::string error = "worker registration timed out waiting for";
-                for (auto rank : ranks)
+                for (auto rank : ranks) {
                     if (!joined.contains(rank)) error += " [" + context(rank) + "]";
+                }
                 throw std::runtime_error(error);
             }
             std::array<pollfd, 2> listeners{
@@ -324,8 +334,9 @@ struct ExecutionGroup::Impl {
             }
             const auto until = deadline(1000);
             while (transport.sending() && transport.failure().empty() &&
-                   std::chrono::steady_clock::now() < until)
+                   std::chrono::steady_clock::now() < until) {
                 std::this_thread::yield();
+            }
         } catch (...) {}
         transport.close();
         const auto until = deadline(1000);
@@ -550,8 +561,9 @@ void WorkerConnection::shutdown() {
     const auto until = deadline(bootstrap_.shutdown_timeout_ms);
     communication_->close(until);
     send(wire::Kind::Stopped);
-    while (transport_->sending() && std::chrono::steady_clock::now() < until)
+    while (transport_->sending() && std::chrono::steady_clock::now() < until) {
         std::this_thread::yield();
+    }
     transport_->close();
     closed_ = true;
 }
@@ -564,8 +576,9 @@ void WorkerConnection::fail(std::string_view message) noexcept {
              encode_failure({std::string(message), startup_.failure_context()}));
         const auto until = deadline(1000);
         while (transport_->sending() && transport_->failure().empty() &&
-               std::chrono::steady_clock::now() < until)
+               std::chrono::steady_clock::now() < until) {
             std::this_thread::yield();
+        }
     } catch (...) {}
     transport_->close();
     startup_.close();

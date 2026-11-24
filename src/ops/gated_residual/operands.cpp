@@ -25,8 +25,9 @@ common::operand::Range check(const Tensor& t, DType dtype, int a, int b, int c, 
 
 bool same_view(const Tensor& a, const Tensor& b) {
     if (a.data != b.data || a.dtype != b.dtype) return false;
-    for (int d = 0; d < 4; ++d)
+    for (int d = 0; d < 4; ++d) {
         if (a.ne[d] != b.ne[d] || a.nb[d] != b.nb[d]) return false;
+    }
     return true;
 }
 } // namespace
@@ -52,13 +53,16 @@ Operands validate(Form form, const Tensor& input, const Tensor* block, const Ten
     if (residual) {
         const auto output =
             check(*residual, DType::BF16, kWidth, kStreams, m, execution.device(), op);
-        for (int i = alias ? 1 : 0; i < count; ++i)
+        for (int i = alias ? 1 : 0; i < count; ++i) {
             common::operand::disjoint(output, inputs[i], op);
+        }
     }
     if (normalized) {
         const auto output =
             check(*normalized, DType::BF16, kWidth, kStreams, m, execution.device(), op);
-        for (int i = 0; i < count; ++i) common::operand::disjoint(output, inputs[i], op);
+        for (int i = 0; i < count; ++i) {
+            common::operand::disjoint(output, inputs[i], op);
+        }
         if (residual)
             common::operand::disjoint(
                 output, common::operand::range(residual->data, residual->bytes(), op), op);

@@ -110,7 +110,9 @@ TemplateOutput JinjaTemplate::render(const nlohmann::ordered_json& input,
             };
         }
         std::unordered_map<std::string, std::uint32_t> tags;
-        for (const auto& region : options.regions) tags.emplace(region.pointer, region.tag);
+        for (const auto& region : options.regions) {
+            tags.emplace(region.pointer, region.tag);
+        }
         for (const auto& item : input.items()) {
             const bool literal =
                 std::find(options.control_variables.begin(), options.control_variables.end(),

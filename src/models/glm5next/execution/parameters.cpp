@@ -8,13 +8,17 @@ public:
 
     LinearParameters linear(std::initializer_list<WeightId> ids) const {
         std::vector<ops::WeightInput> inputs;
-        for (const auto id : ids) inputs.push_back(model_.input(id));
+        for (const auto id : ids) {
+            inputs.push_back(model_.input(id));
+        }
         return ops::prepare_linear_weight(inputs);
     }
 
     ops::ProjectionWeights projection(std::initializer_list<WeightId> ids) const {
         std::vector<ops::WeightInput> inputs;
-        for (const auto id : ids) inputs.push_back(model_.input(id));
+        for (const auto id : ids) {
+            inputs.push_back(model_.input(id));
+        }
         return ops::prepare_projection_weights(inputs);
     }
 
@@ -128,13 +132,14 @@ public:
                              tensor(w.merger_norm_weight),
                              tensor(w.merger_norm_bias),
                              {}};
-        for (const auto& l : w.layers)
+        for (const auto& l : w.layers) {
             out.layers.push_back(
                 {tensor(l.input_norm), tensor(l.post_attention_norm), tensor(l.query_norm),
                  tensor(l.key_norm), linear({l.query, l.key, l.value}), linear({l.output}),
                  linear({l.mlp.gate, l.mlp.up}), linear({l.mlp.down}),
                  bias({l.query_bias, l.key_bias, l.value_bias}), tensor(l.output_bias),
                  bias({l.gate_bias, l.up_bias}), tensor(l.down_bias)});
+        }
         return out;
     }
 private:
@@ -153,8 +158,9 @@ Parameters::Parameters(const ModelShard& model, std::shared_ptr<const ModelProfi
     text.embedding  = native_weight(model.weight(w.text.embedding).view);
     text.head       = p.linear({w.text.head});
     text.final_norm = p.tensor(w.text.final_norm);
-    for (std::size_t i = 0; i < w.text.layers.size(); ++i)
+    for (std::size_t i = 0; i < w.text.layers.size(); ++i) {
         text.layers.push_back(p.block(w.text.layers[i]));
+    }
     if (w.mtp) {
         const auto& m = *w.mtp;
         mtp           = {native_weight(model.weight(m.embedding).view),

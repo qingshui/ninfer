@@ -31,8 +31,12 @@ void require_shape(const Tensor& value, DType dtype, std::initializer_list<std::
                    const char* name) {
     bool matches     = value.dtype == dtype && value.data && value.is_contiguous();
     std::size_t axis = 0;
-    for (const auto extent : shape) matches &= value.ne[axis++] == extent;
-    for (; axis < 4; ++axis) matches &= value.ne[axis] == 1;
+    for (const auto extent : shape) {
+        matches &= value.ne[axis++] == extent;
+    }
+    for (; axis < 4; ++axis) {
+        matches &= value.ne[axis] == 1;
+    }
     if (!matches) throw std::invalid_argument(std::string(name) + " has invalid shape or layout");
 }
 
@@ -154,9 +158,10 @@ TextRun::TextRun(TextExecutionView execution, TextInputs inputs, TextStateUpdate
         // Every segment is an independent B=1 entry planned for the keys it sees. The decode rows
         // are the [W,B] tail of the token axis and attend with their own envelope.
         mixed_groups_.reserve(mixed->segments.size() + 1);
-        for (const auto& segment : mixed->segments)
+        for (const auto& segment : mixed->segments) {
             mixed_groups_.push_back({segment.token_offset, segment.tokens, 1, segment.row,
                                      {segment.keys, segment.keys}});
+        }
         mixed_groups_.push_back(
             {steps.token_offset, steps.width, steps.rows, steps.row_offset, steps.envelope});
         if (config.gdn) validate_segment_table(mixed->table, mixed->segments.size());
@@ -208,9 +213,10 @@ TextRun::TextRun(TextExecutionView execution, TextInputs inputs, TextStateUpdate
                  !features->positions.is_contiguous()))
                 throw std::invalid_argument("Main feature position sink has invalid capacity");
         }
-        for (const auto layer : features->layers)
+        for (const auto layer : features->layers) {
             if (layer >= view_.parameters.text.layers.size())
                 throw std::invalid_argument("Main feature layer is outside the model");
+        }
         features_ = *features;
     }
     residual_ = view_.workspace.alloc(DType::BF16, {channels, columns});

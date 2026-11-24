@@ -70,8 +70,9 @@ DirectReadQueue::DirectReadQueue(std::span<const FileView> files,
         if (buffer.device != Device::cpu() || !buffer.bytes ||
             buffer.bytes > std::numeric_limits<unsigned>::max())
             throw std::invalid_argument("read queue requires nonempty Host buffers");
-        for (const auto file : files)
+        for (const auto file : files) {
             validate_direct_read(file, 0, {static_cast<std::byte*>(buffer.data), buffer.bytes});
+        }
         const auto begin = reinterpret_cast<std::uintptr_t>(buffer.data);
         for (std::size_t j = 0; j < i; ++j) {
             const auto other = reinterpret_cast<std::uintptr_t>(buffers[j].data);
@@ -166,9 +167,10 @@ ReadWake DirectReadQueue::wait() {
         result = ::poll(descriptors.data(), descriptors.size(), -1);
     } while (result < 0 && errno == EINTR);
     if (result < 0) check(-errno, "wait for direct reads");
-    for (const auto& descriptor : descriptors)
+    for (const auto& descriptor : descriptors) {
         if (descriptor.revents & (POLLERR | POLLHUP | POLLNVAL))
             throw std::runtime_error("direct read wait descriptor failed");
+    }
     if (descriptors[1].revents & POLLIN) {
         std::uint64_t value;
         ssize_t n;
@@ -194,8 +196,9 @@ void DirectReadQueue::close() {
 void DirectReadQueue::drain() {
     submit();
     std::array<ReadCompletion, 128> completions;
-    while (impl_->pending)
+    while (impl_->pending) {
         if (!poll(completions)) (void)wait();
+    }
 }
 
 std::size_t DirectReadQueue::outstanding() const noexcept { return impl_->pending; }

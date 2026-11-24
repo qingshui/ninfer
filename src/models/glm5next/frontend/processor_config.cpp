@@ -39,12 +39,14 @@ MediaProcessorConfig media_config(const Json& json, std::uint32_t max_tokens) {
         out.max_tokens >
             std::numeric_limits<std::size_t>::max() / (out.temporal_patch_size * spatial * spatial))
         throw artifact::ArtifactError("GLM processor geometry exceeds its numeric representation");
-    for (int c = 0; c < 3; ++c)
+    for (int c = 0; c < 3; ++c) {
         if (!std::isfinite(out.mean[c]) || !std::isfinite(out.std[c]) || out.std[c] <= 0)
             throw artifact::ArtifactError("invalid GLM processor normalization");
-    for (const char* flag : {"do_resize", "do_rescale", "do_normalize", "do_convert_rgb"})
+    }
+    for (const char* flag : {"do_resize", "do_rescale", "do_normalize", "do_convert_rgb"}) {
         if (!json.value(flag, true))
             throw artifact::ArtifactError(std::string("GLM processor requires ") + flag);
+    }
     if (json.value("resize_mode", std::string("pad")) != "pad" || json.value("resample", 3) != 3 ||
         json.value("rescale_factor", 1.0 / 255.0) != 1.0 / 255.0)
         throw artifact::ArtifactError("GLM processor requires bicubic pad and 1/255 rescaling");

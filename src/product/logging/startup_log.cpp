@@ -220,10 +220,11 @@ struct StartupLogRenderer::Impl {
         std::vector<std::pair<const SourceProgress*, const PhaseProgress*>> active;
         for (const auto& [key, source] : sources) {
             const PhaseProgress* latest = nullptr;
-            for (const auto& phase : source.phases)
+            for (const auto& phase : source.phases) {
                 if (phase.event && phase.event->status <= StartupStatus::Progress &&
                     (!latest || phase.event->invocation > latest->event->invocation))
                     latest = &phase;
+            }
             if (latest) active.emplace_back(&source, latest);
         }
         if (active.size() > 1)

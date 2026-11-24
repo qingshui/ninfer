@@ -201,8 +201,9 @@ void DeviceGraphs::replay(std::uint32_t batch, std::span<const std::uint32_t> dr
     const auto main = bound(visible);
     if (main != round.installed_main) {
         const auto& selected = profiles.main[!draft_visible.empty()][main];
-        for (std::size_t i = 0; i < round.main.size(); ++i)
+        for (std::size_t i = 0; i < round.main.size(); ++i) {
             round.graph.executable.update_child(round.main[i], selected[i]);
+        }
         round.installed_main = main;
     }
     for (std::size_t step = 0; step < draft_visible.size(); ++step) {

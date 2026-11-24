@@ -462,7 +462,9 @@ std::vector<PreparedRequest> GenerationService::prepare_impl(
     is_cancelled = preparation_cancellation(std::move(is_cancelled));
     PreparedRequest prepared;
     prepared.constraint_param = request.constraint_param;
-    for (const auto& tool : request.tools) prepared.tool_schema_params.push_back(tool.schema_param);
+    for (const auto& tool : request.tools) {
+        prepared.tool_schema_params.push_back(tool.schema_param);
+    }
     const PromptOptionInputs semantics = collect_prompt_options(request, options_);
     ninfer::RequestOptions request_options =
         to_request_options(request, options_, cache_participation == CacheParticipation::ReadWrite,

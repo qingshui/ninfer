@@ -87,7 +87,9 @@ ContextReleaseSet SessionImpl::footprint(std::span<const CheckpointHandle> input
         auto probe       = selected.probe(input);
         return selected.released();
     }
-    for (const auto image : checkpoint_images(input)) result.merge(directory.state_release(image));
+    for (const auto image : checkpoint_images(input)) {
+        result.merge(directory.state_release(image));
+    }
     for (std::uint16_t pool = 0; pool < directory.pool_count(); ++pool) {
         for (const auto page : checkpoint_pages(input, pool)) {
             const auto facts = directory.page_release(page);

@@ -63,23 +63,27 @@ ContextPoolGeometry describe_context_pool(std::span<const RecordSpec> specs) {
     if (geometry.classes.empty()) return geometry;
     geometry.block_bytes =
         checked_add(geometry.block_bytes, geometry.alignment - 1) & ~(geometry.alignment - 1);
-    for (auto& record : geometry.classes)
+    for (auto& record : geometry.classes) {
         record.records_per_block = geometry.block_bytes / record.stride;
+    }
     return geometry;
 }
 
 std::size_t ContextPoolGeometry::required_bytes(std::span<const RecordRequest> demand) const {
     const auto counts  = count_requests(demand, classes.size());
     std::size_t blocks = 0;
-    for (std::size_t i = 0; i < classes.size(); ++i)
+    for (std::size_t i = 0; i < classes.size(); ++i) {
         blocks = checked_add(blocks, ceil_div(counts[i], classes[i].records_per_block));
+    }
     return checked_multiply(blocks, block_bytes);
 }
 
 std::size_t ContextPoolGeometry::record_limit(std::size_t capacity_bytes) const {
     if (classes.empty()) return 0;
     std::size_t largest = 0;
-    for (const auto& record : classes) largest = std::max(largest, record.records_per_block);
+    for (const auto& record : classes) {
+        largest = std::max(largest, record.records_per_block);
+    }
     return checked_multiply(capacity_bytes / block_bytes, largest);
 }
 
@@ -197,7 +201,9 @@ struct ContextPool::Impl {
         free_blocks.resize(count);
         std::iota(free_blocks.rbegin(), free_blocks.rend(), 0u);
         classes.resize(geometry.classes.size());
-        for (auto& record_class : classes) record_class.available.reserve(count);
+        for (auto& record_class : classes) {
+            record_class.available.reserve(count);
+        }
         segments.reserve(ceil_div(record_limit, segment_records));
     }
 
@@ -340,8 +346,9 @@ struct ContextPool::Impl {
             throw std::logic_error("ContextPool: descriptor capacity disagrees with packing");
         const auto segment_count = ceil_div(total, segment_records);
         free_entries.reserve(std::min(record_limit, segment_count * segment_records));
-        while (segments.size() < segment_count)
+        while (segments.size() < segment_count) {
             segments.push_back(std::make_unique<std::array<Entry, segment_records>>());
+        }
     }
 
     std::uint32_t make_entry(std::uint32_t c, std::uint32_t block, std::uint32_t slot,
@@ -463,7 +470,9 @@ struct ContextPool::Impl {
         auto empty = free_blocks.size();
         for (std::size_t begin = 0; begin < removed.size();) {
             auto end = begin + 1;
-            while (end < removed.size() && removed[end].first == removed[begin].first) ++end;
+            while (end < removed.size() && removed[end].first == removed[begin].first) {
+                ++end;
+            }
             const auto& block = blocks[removed[begin].first];
             released[block.record_class] += end - begin;
             if (end - begin == block.occupied()) {
@@ -500,7 +509,9 @@ struct ContextPool::Impl {
             return result;
         }
         result.blocks = blocks;
-        for (auto& block : result.blocks) block.free.reserve(block.slots.size());
+        for (auto& block : result.blocks) {
+            block.free.reserve(block.slots.size());
+        }
         std::vector<bool> removed(entry_count);
         for (const auto allocation : releases) {
             const auto& e = require(allocation);
@@ -620,8 +631,9 @@ struct ContextPool::Impl {
             return a.occupied < b.occupied || (a.occupied == b.occupied && a.block > b.block);
         };
         std::vector<std::uint32_t> empty_blocks;
-        for (std::uint32_t i = 0; i < result.blocks.size(); ++i)
+        for (std::uint32_t i = 0; i < result.blocks.size(); ++i) {
             if (result.blocks[i].record_class == absent) empty_blocks.push_back(i);
+        }
         for (std::uint32_t c = 0; c < classes.size(); ++c) {
             std::priority_queue<Hole, std::vector<Hole>, decltype(compare)> holes(compare);
             for (std::uint32_t i = 0; i < result.blocks.size(); ++i) {
@@ -662,7 +674,9 @@ struct ContextPool::Impl {
         data->owner = &owner;
         data->token = next_reservation;
         data->records.resize(counts.size());
-        for (std::size_t c = 0; c < counts.size(); ++c) data->records[c].reserve(counts[c]);
+        for (std::size_t c = 0; c < counts.size(); ++c) {
+            data->records[c].reserve(counts[c]);
+        }
         return data;
     }
 
@@ -685,8 +699,9 @@ struct ContextPool::Impl {
             }
             rebuild_indexes();
         } else {
-            for (const auto& move : plan->relocations)
+            for (const auto& move : plan->relocations) {
                 charge(geometry.classes[entry(move.entry).record_class].stride);
+            }
             maintenance = std::move(plan);
         }
     }
@@ -721,10 +736,12 @@ struct ContextPool::Impl {
             plan->owner_data->records.clear();
             plan->owner_data->token = 0;
         }
-        for (const auto& move : plan->relocations)
+        for (const auto& move : plan->relocations) {
             occupied_bytes -= geometry.classes[entry(move.entry).record_class].stride;
-        for (auto index : plan->new_entries)
+        }
+        for (auto index : plan->new_entries) {
             if (entry(index).state == State::Future) recycle_entry(index);
+        }
         discard_cancelled();
         ++revision;
         return std::move(plan->deferred);
@@ -815,9 +832,10 @@ ContextPoolOccupancy ContextPool::usage() const {
                             p.segments.size() * segment_records * sizeof(Impl::Entry);
     result.metadata_bytes += p.geometry.classes.capacity() * sizeof(RecordClassGeometry) +
                              p.geometry.spec_classes.capacity() * sizeof(RecordClassId);
-    for (const auto& block : p.blocks)
+    for (const auto& block : p.blocks) {
         result.metadata_bytes +=
             (block.slots.capacity() + block.free.capacity()) * sizeof(std::uint32_t);
+    }
     result.classes.reserve(p.classes.size());
     for (std::size_t i = 0; i < p.classes.size(); ++i) {
         const auto& c        = p.classes[i];
@@ -859,9 +877,10 @@ ContextPoolOccupancy ContextPool::usage() const {
                                  p.maintenance->moves.capacity() * sizeof(RecordMove) +
                                  p.maintenance->placements.capacity() * sizeof(Impl::Placement) +
                                  p.maintenance->new_entries.capacity() * sizeof(std::uint32_t);
-        for (const auto& block : p.maintenance->blocks)
+        for (const auto& block : p.maintenance->blocks) {
             result.metadata_bytes +=
                 (block.slots.capacity() + block.free.capacity()) * sizeof(std::uint32_t);
+        }
     }
     return result;
 }
@@ -967,8 +986,11 @@ PoolAssessment ContextPool::resize(PoolReservation& reservation,
     const auto counts = count_requests(demand, p.classes.size());
     std::vector<AllocationId> releases;
     releases.reserve(reservation.remaining());
-    for (const auto& records : reservation.data_->records)
-        for (auto index : records) releases.push_back(p.id(index));
+    for (const auto& records : reservation.data_->records) {
+        for (auto index : records) {
+            releases.push_back(p.id(index));
+        }
+    }
     auto plan       = std::make_unique<Impl::Plan>(p.plan(counts, releases));
     auto assessment = plan->assessment;
     if (!assessment.feasible()) return assessment;
@@ -976,7 +998,9 @@ PoolAssessment ContextPool::resize(PoolReservation& reservation,
     const auto total = std::accumulate(counts.begin(), counts.end(), std::size_t{0});
     plan->new_entries.reserve(total);
     p.prepare_entries(total > releases.size() ? total - releases.size() : 0);
-    for (const auto allocation : releases) p.erase_entry(allocation.index);
+    for (const auto allocation : releases) {
+        p.erase_entry(allocation.index);
+    }
     reservation.data_.reset();
     p.install_plan(std::move(plan), *data);
     reservation.data_ = std::move(data);
@@ -1193,11 +1217,13 @@ bool PoolReservation::ready() const noexcept {
     if (!valid()) return false;
     const auto& p = *data_->owner->impl_;
     if (p.maintenance) return false;
-    for (const auto& records : data_->records)
-        for (auto index : records)
+    for (const auto& records : data_->records) {
+        for (auto index : records) {
             if (p.entry(index).state != ContextPool::Impl::State::Reserved ||
                 p.entry(index).reservation != data_->token)
                 return false;
+        }
+    }
     return true;
 }
 
@@ -1208,7 +1234,9 @@ std::size_t PoolReservation::remaining(RecordClassId record_class) const {
 std::size_t PoolReservation::remaining() const noexcept {
     std::size_t total = 0;
     if (data_)
-        for (const auto& records : data_->records) total += records.size();
+        for (const auto& records : data_->records) {
+            total += records.size();
+        }
     return total;
 }
 

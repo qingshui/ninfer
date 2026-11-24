@@ -333,7 +333,9 @@ struct Transport::Impl {
         peer.write_failed = true;
         std::lock_guard lock(mutex);
         send_errors.try_emplace(peer.rank, reason);
-        for (const auto& write : peer.writes) complete_locked(write);
+        for (const auto& write : peer.writes) {
+            complete_locked(write);
+        }
         peer.writes.clear();
         std::erase_if(pending, [&](const auto& item) {
             if (item.peer != peer.rank) return false;
@@ -559,8 +561,9 @@ Transport::~Transport() = default;
 
 void Transport::add(RankId rank, Socket socket) {
     if (impl_->started || socket.fd() < 0) throw std::logic_error("cannot attach control socket");
-    for (const auto& peer : impl_->peers)
+    for (const auto& peer : impl_->peers) {
         if (peer.rank == rank) throw std::invalid_argument("duplicate control peer");
+    }
     impl_->peers.push_back({rank, std::move(socket)});
 }
 
@@ -616,11 +619,14 @@ bool Transport::try_send(std::span<const OutgoingMessage> messages, Traffic traf
     if (bytes > max_bytes - used_bytes || messages.size() > max_count - used_count) return false;
     const auto original_size = p.pending.size();
     try {
-        for (const auto& item : messages)
+        for (const auto& item : messages) {
             p.pending.push_back(
                 {item.peer, {item.message, wire::encode_header(*item.message), 0, traffic}});
+        }
     } catch (...) {
-        while (p.pending.size() != original_size) p.pending.pop_back();
+        while (p.pending.size() != original_size) {
+            p.pending.pop_back();
+        }
         throw;
     }
     used_bytes += bytes;

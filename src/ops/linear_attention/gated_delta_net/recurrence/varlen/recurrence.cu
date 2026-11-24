@@ -210,7 +210,9 @@ __global__ __launch_bounds__(256, kPrepareMinBlocks) void prepare_kernel(
             qk_ws + static_cast<std::int64_t>(qh) * chunk_capacity + chunk_id);
         const auto* data = reinterpret_cast<const uint4*>(&sm.qk);
 #pragma unroll
-        for (int i = tid; i < sizeof(QkChunk) / 16; i += 256) dst[i] = data[i];
+        for (int i = tid; i < sizeof(QkChunk) / 16; i += 256) {
+            dst[i] = data[i];
+        }
     }
     // Both products consume the same represented Q/K that recurrence will load.
     if (warp == 4 || warp == 5) {
@@ -238,9 +240,10 @@ __global__ __launch_bounds__(256, kPrepareMinBlocks) void prepare_kernel(
 #pragma unroll
         for (int n = 0; n < 2; ++n) {
 #pragma unroll
-            for (int i = 0; i < 4; ++i)
+            for (int i = 0; i < 4; ++i) {
                 gram[(lane / 4 + (i / 2) * 8) * kChunkSize + n * 8 + (lane & 3) * 2 + (i & 1)] =
                     acc[n][i];
+            }
         }
     }
     __syncthreads();
@@ -271,13 +274,17 @@ __global__ __launch_bounds__(256, kPrepareMinBlocks) void prepare_kernel(
     for (int r = 0; r < kChunkSize; ++r) {
         float value = r == c ? 1.0F : 0.0F;
 #pragma unroll
-        for (int j = 0; j < r; ++j) value = fmaf(-hs.lower[r * kChunkSize + j], x[j], value);
+        for (int j = 0; j < r; ++j) {
+            value = fmaf(-hs.lower[r * kChunkSize + j], x[j], value);
+        }
         x[r] = value;
     }
     const float beta_c = hs.beta[c];
     if (lane < kChunkSize) {
 #pragma unroll
-        for (int r = 0; r < kChunkSize; ++r) hs.control.solve[square_index(r, c)] = x[r] * beta_c;
+        for (int r = 0; r < kChunkSize; ++r) {
+            hs.control.solve[square_index(r, c)] = x[r] * beta_c;
+        }
     }
     __syncwarp();
 
@@ -285,7 +292,9 @@ __global__ __launch_bounds__(256, kPrepareMinBlocks) void prepare_kernel(
                                           static_cast<std::int64_t>(qh * group + warp) *
                                               chunk_capacity + chunk_id);
     const auto* src = reinterpret_cast<const uint4*>(&hs.control);
-    for (int i = lane; i < sizeof(ControlChunk) / 16; i += 32) ctrl[i] = src[i];
+    for (int i = lane; i < sizeof(ControlChunk) / 16; i += 32) {
+        ctrl[i] = src[i];
+    }
 }
 
 template <int Width>
@@ -350,14 +359,16 @@ load_stage(typename RecurrenceShared<DV>::Stage& stage, const Operands& ops, con
         ws.qk + static_cast<std::int64_t>(qh) * ws.chunk_capacity + chunk_id);
     auto* qk_dst = reinterpret_cast<uint4*>(&stage.qk);
 #pragma unroll
-    for (int i = tid; i < sizeof(QkChunk) / 16; i += kThreads<DV>)
+    for (int i = tid; i < sizeof(QkChunk) / 16; i += kThreads<DV>) {
         common::cp_async<16, Cache::cg>(qk_dst + i, qk_src + i);
+    }
     const auto* ctrl_src = reinterpret_cast<const uint4*>(
         ws.control + static_cast<std::int64_t>(head) * ws.chunk_capacity + chunk_id);
     auto* ctrl_dst = reinterpret_cast<uint4*>(&stage.control);
 #pragma unroll
-    for (int i = tid; i < sizeof(ControlChunk) / 16; i += kThreads<DV>)
+    for (int i = tid; i < sizeof(ControlChunk) / 16; i += kThreads<DV>) {
         common::cp_async<16, Cache::cg>(ctrl_dst + i, ctrl_src + i);
+    }
     constexpr int vectors = kChunkSize * DV / 8;
 #pragma unroll
     for (int i = tid; i < vectors; i += kThreads<DV>) {
@@ -714,14 +725,16 @@ __device__ __forceinline__ void load_register_stage(regs::Stage& stage, const Op
         ws.qk + static_cast<std::int64_t>(qh) * ws.chunk_capacity + chunk_id);
     auto* qk_dst = reinterpret_cast<uint4*>(&stage.qk);
 #pragma unroll
-    for (int i = tid; i < sizeof(QkChunk) / 16; i += regs::kThreads)
+    for (int i = tid; i < sizeof(QkChunk) / 16; i += regs::kThreads) {
         common::cp_async<16, Cache::cg>(qk_dst + i, qk_src + i);
+    }
     const auto* ctrl_src = reinterpret_cast<const uint4*>(
         ws.control + static_cast<std::int64_t>(head) * ws.chunk_capacity + chunk_id);
     auto* ctrl_dst = reinterpret_cast<uint4*>(&stage.control);
 #pragma unroll
-    for (int i = tid; i < sizeof(ControlChunk) / 16; i += regs::kThreads)
+    for (int i = tid; i < sizeof(ControlChunk) / 16; i += regs::kThreads) {
         common::cp_async<16, Cache::cg>(ctrl_dst + i, ctrl_src + i);
+    }
     constexpr int vectors = kChunkSize * regs::kValues / 8;
 #pragma unroll
     for (int i = tid; i < vectors; i += regs::kThreads) {
@@ -798,7 +811,9 @@ __device__ __forceinline__ void run_recurrent_rows(const Operands& ops, const Su
             for (int r = 0; r < kDvPerWarp; ++r) {
                 float partial = 0.0f;
 #pragma unroll
-                for (int c = 0; c < kQkPerLane; ++c) partial += state[j][r][c] * query.value[c];
+                for (int c = 0; c < kQkPerLane; ++c) {
+                    partial += state[j][r][c] * query.value[c];
+                }
                 partial = common::warp_sum<common::kWarpSize>(partial);
                 if (lane == r) attn_val = partial;
             }

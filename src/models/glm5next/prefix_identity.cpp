@@ -19,9 +19,10 @@ void validate(InputPrefixView input) {
                 throw std::invalid_argument("media identity spans are outside the ordered input");
             end = span.begin + span.count;
         }
-        for (const auto timestamp : media.item.timestamps)
+        for (const auto timestamp : media.item.timestamps) {
             if (!std::isfinite(timestamp))
                 throw std::invalid_argument("media identity timestamps must be finite");
+        }
     }
     std::uint32_t previous = 0;
     for (const auto frontier : input.execution_frontiers) {
@@ -67,11 +68,16 @@ void mix_media(Digest& digest, const MediaInputIdentity& media) {
     mix(digest, item.grid.width);
     mix(digest, item.patch_begin);
     mix(digest, item.patch_count);
-    for (auto byte : item.content_digest) mix(digest, byte);
-    for (auto byte : media.preparation_digest) mix(digest, byte);
+    for (auto byte : item.content_digest) {
+        mix(digest, byte);
+    }
+    for (auto byte : media.preparation_digest) {
+        mix(digest, byte);
+    }
     mix(digest, item.timestamps.size());
-    for (auto timestamp : item.timestamps)
+    for (auto timestamp : item.timestamps) {
         mix(digest, std::bit_cast<std::uint64_t>(timestamp == 0 ? 0.0 : timestamp));
+    }
     mix(digest, item.token_spans.size());
     for (auto span : item.token_spans) {
         mix(digest, span.begin);

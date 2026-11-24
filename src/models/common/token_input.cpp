@@ -9,7 +9,9 @@ namespace ninfer::models {
 void ControlTokens::copy(std::span<TokenId> destination, std::size_t offset) const {
     if (offset > size() || destination.size() > size() - offset)
         throw std::out_of_range("control output slice exceeds its input");
-    for (std::size_t i = 0; i < destination.size(); ++i) destination[i] = (*this)[offset + i];
+    for (std::size_t i = 0; i < destination.size(); ++i) {
+        destination[i] = (*this)[offset + i];
+    }
 }
 
 void TokenCounts::validate(std::uint32_t vocabulary, std::uint32_t max_tokens) const {
@@ -63,7 +65,9 @@ TokenCounts TokenCountBuilder::build(std::span<const TokenId> tokens, std::uint3
     counts_.resize(vocabulary, 0);
     touched_.reserve(std::min<std::size_t>(tokens.size(), vocabulary));
     const auto clear = [&] {
-        for (auto token : touched_) counts_[token] = 0;
+        for (auto token : touched_) {
+            counts_[token] = 0;
+        }
         touched_.clear();
     };
     try {
@@ -77,7 +81,9 @@ TokenCounts TokenCountBuilder::build(std::span<const TokenId> tokens, std::uint3
             std::sort(touched_.begin(), touched_.end());
             TokenCounts::Sparse values;
             values.reserve(touched_.size());
-            for (auto token : touched_) values.push_back({token, counts_[token]});
+            for (auto token : touched_) {
+                values.push_back({token, counts_[token]});
+            }
             result = TokenCounts(std::move(values));
         } else {
             result = TokenCounts(counts_);

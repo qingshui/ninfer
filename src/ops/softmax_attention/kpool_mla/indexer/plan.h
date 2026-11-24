@@ -123,8 +123,9 @@ inline std::size_t fp8_indexer_capacity(int lo, int hi, int batch,
     std::size_t result = 0;
     // Above one full prepared window, scratch repeats with the final window's residue.
     const auto end = std::min<std::int64_t>(hi, std::int64_t(lo) + 2 * kIndexPreparedQueries - 1);
-    for (std::int64_t t = lo; t <= end; ++t)
+    for (std::int64_t t = lo; t <= end; ++t) {
         result = std::max(result, fp8_indexer_plan(int(t), batch, envelope).bytes);
+    }
     return result;
 }
 

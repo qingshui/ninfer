@@ -45,8 +45,9 @@ RankProgramImpl::~RankProgramImpl() {
     graphs.reset();
     device_graphs.reset();
     commit_graphs.reset();
-    for (auto& resident : bindings)
+    for (auto& resident : bindings) {
         if (resident) retire_vision(*resident);
+    }
 }
 
 ResidentBinding& RankProgramImpl::binding(runtime::ResidencyId residency) {
@@ -88,19 +89,21 @@ void RankProgramImpl::validate_work(const Work& work, runtime::FrameKind kind) c
                 throw std::logic_error("Qwen4Exp release refers to a stale resident");
             released[lane] = true;
             if (compute)
-                for (const auto& row : work_rows(compute->request.work))
+                for (const auto& row : work_rows(compute->request.work)) {
                     if (row.member.residency == residency)
                         throw std::logic_error("Qwen4Exp resident still has live compute");
+                }
         }
         for (const auto& resident : context->bindings) {
             const auto lane = resident.member.residency.lane.value;
             if ((bindings[lane] && !released[lane]) ||
                 (bindings[lane] && bindings[lane]->member.residency == resident.member.residency))
                 throw std::logic_error("Qwen4Exp residency is already installed");
-            for (std::size_t i = 0; i < bindings.size(); ++i)
+            for (std::size_t i = 0; i < bindings.size(); ++i) {
                 if (bindings[i] && !released[i] &&
                     bindings[i]->member.sequence == resident.member.sequence)
                     throw std::logic_error("Qwen4Exp sequence is already resident");
+            }
         }
     }
     const auto& actions =
@@ -116,9 +119,10 @@ void RankProgramImpl::validate_decision(runtime::ExecutionTicket ticket,
         throw std::logic_error("Qwen4Exp decision does not match the active execution");
     const auto& frame = *compute;
     std::array<std::uint32_t, kMaximumSupportedConcurrency> positions{};
-    for (std::size_t b = 0; b < frame.rows.size(); ++b)
+    for (std::size_t b = 0; b < frame.rows.size(); ++b) {
         if (frame.rows[b].constrained)
             positions[b] = frame.verify ? frame.verify->extents[b] + 1 : 1;
+    }
     validate_decision_rows(input, 0, parameters.profile->public_tokens,
                            {positions.data(), frame.rows.size()});
 }
@@ -143,8 +147,9 @@ void RankProgramImpl::prepare_commit(runtime::ExecutionTicket ticket, const Comm
                  bool(parameters.vision),
                  parameters.profile->control_token_limit}
         .validate_commit(frame.request.work, frame.result.rows, commit);
-    for (const auto& row : commit.rows)
+    for (const auto& row : commit.rows) {
         check_selectors(row.states.at(parameters.profile->local.rank), resources.states->storage());
+    }
     resources.compute_actions->validate(
         local_actions(commit.actions, parameters.profile->local.rank));
 }

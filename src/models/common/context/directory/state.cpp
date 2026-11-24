@@ -125,7 +125,9 @@ std::vector<std::uint32_t> StateDirectory::Transfer::ranks() const {
     owner_->validate_transfer(*this);
     std::vector<std::uint32_t> result;
     result.reserve(records_.size());
-    for (const auto& record : records_) result.push_back(record.domain().rank);
+    for (const auto& record : records_) {
+        result.push_back(record.domain().rank);
+    }
     return result;
 }
 
@@ -369,7 +371,9 @@ std::vector<std::uint32_t> StateDirectory::ranks(std::uint32_t variant) const {
     std::vector<std::uint32_t> result;
     const auto& parts = layout_spec(variant).parts;
     result.reserve(parts.size());
-    for (const auto& part : parts) result.push_back(part.rank);
+    for (const auto& part : parts) {
+        result.push_back(part.rank);
+    }
     return result;
 }
 
@@ -400,7 +404,9 @@ std::optional<StateId> StateDirectory::reserve_destination(RecordReservation res
     }
     auto records = reservation.materialize();
     validate_records(records, ContextMemory::Device, variant);
-    for (auto& record : records) records_->classify(record, state_record_layout(variant));
+    for (auto& record : records) {
+        records_->classify(record, state_record_layout(variant));
+    }
     const auto index = reservation.take_metadata(*this);
     return allocate(index, StateRole::ReservedDestination, variant, std::move(records));
 }
@@ -616,7 +622,9 @@ void StateDirectory::make_mutable(StateId handle) {
         throw std::logic_error("StateImage checkpoint is not movable");
     }
     if (host_resident(handle)) --host_images_;
-    for (auto& part : object.parts) part.host.reset();
+    for (auto& part : object.parts) {
+        part.host.reset();
+    }
     object.role = StateRole::ActiveMutable;
     refresh_usage(object);
 }
@@ -631,7 +639,9 @@ void StateDirectory::consume_checkpoint(StateId handle) {
     object.checkpoint_references = 0;
     object.release_pending       = false;
     if (host_resident(handle)) --host_images_;
-    for (auto& part : object.parts) part.host.reset();
+    for (auto& part : object.parts) {
+        part.host.reset();
+    }
     object.role = StateRole::ActiveMutable;
     refresh_usage(object);
 }
@@ -643,7 +653,9 @@ bool StateDirectory::drop_device_replica(StateId handle) noexcept {
         !host_resident(handle) || object.source_pins || object.destination_pinned ||
         has_pending_replica(object))
         return false;
-    for (auto& part : object.parts) part.device.reset();
+    for (auto& part : object.parts) {
+        part.device.reset();
+    }
     --device_images_;
     return true;
 }
@@ -655,7 +667,9 @@ bool StateDirectory::drop_host_replica(StateId handle) noexcept {
         !host_resident(handle) || object.source_pins || object.destination_pinned ||
         has_pending_replica(object))
         return false;
-    for (auto& part : object.parts) part.host.reset();
+    for (auto& part : object.parts) {
+        part.host.reset();
+    }
     --host_images_;
     return true;
 }
@@ -791,10 +805,14 @@ StateDirectory::reserve_device_to_host(StateId source, RecordReservation reserve
     if (!reserved.ready()) return std::nullopt;
     auto targets = reserved.materialize();
     validate_records(targets, ContextMemory::Host, object.variant);
-    for (auto& record : targets) records_->classify(record, state_record_layout(object.variant));
+    for (auto& record : targets) {
+        records_->classify(record, state_record_layout(object.variant));
+    }
     const auto id  = next_transfer();
     const auto use = object.request_references[1] ? ContextUse::Request : ContextUse::Cache;
-    for (auto& record : targets) record.set_use(use);
+    for (auto& record : targets) {
+        record.set_use(use);
+    }
     Transfer transfer(*this, id, StateCopyDirection::DeviceToHost,
                       read(source, ContextMemory::Device, use), source);
     transfer.records_ = std::move(targets);
@@ -829,7 +847,9 @@ StateDirectory::reserve_host_to_device(StateId source, StateId destination,
     if (!reserved.ready()) return std::nullopt;
     auto targets = reserved.materialize();
     validate_records(targets, ContextMemory::Device, from.variant);
-    for (auto& record : targets) records_->classify(record, state_record_layout(from.variant));
+    for (auto& record : targets) {
+        records_->classify(record, state_record_layout(from.variant));
+    }
     const auto id = next_transfer();
     Transfer transfer(*this, id, StateCopyDirection::HostToDevice,
                       read(source, ContextMemory::Host), destination);
@@ -966,13 +986,16 @@ std::optional<StateId> StateDirectory::allocate(std::uint32_t index, StateRole r
     const auto& parts = layout_spec(variant).parts;
     auto& object      = objects_[index];
     object.parts.clear();
-    for (const auto& spec : parts) object.parts.push_back({spec.rank, {}, {}});
+    for (const auto& spec : parts) {
+        object.parts.push_back({spec.rank, {}, {}});
+    }
     object.role       = role;
     object.variant    = variant;
     object.generation = ++next_generation_;
     if (!records.empty()) ++device_images_;
-    for (auto& record : records)
+    for (auto& record : records) {
         part(object, record.domain().rank).device.emplace(std::move(record));
+    }
     return StateId{index, object.generation};
 }
 

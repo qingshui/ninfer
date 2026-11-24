@@ -126,9 +126,10 @@ __global__ __launch_bounds__(256,
         for (int r = 0; r < kChunkSize; ++r) {
             float value = r == c ? 1.0F : 0.0F;
 #pragma unroll
-            for (int j = 0; j < r; ++j)
+            for (int j = 0; j < r; ++j) {
                 value = fmaf(-sm.lower[r * kChunkSize + j], sm.control.solve[square_index(j, c)],
                              value);
+            }
             if (lane < 16) sm.control.solve[square_index(r, c)] = value;
             __syncwarp();
         }
@@ -149,7 +150,9 @@ __global__ __launch_bounds__(256,
             reinterpret_cast<uint4*>(qk_workspace + static_cast<std::int64_t>(qh) * chunks + chunk);
         const auto* data = reinterpret_cast<const uint4*>(&sm.qk);
 #pragma unroll
-        for (int i = tid; i < sizeof(QkChunk) / 16; i += 256) dst[i] = data[i];
+        for (int i = tid; i < sizeof(QkChunk) / 16; i += 256) {
+            dst[i] = data[i];
+        }
     }
 }
 } // namespace

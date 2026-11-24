@@ -30,8 +30,9 @@ void validate_schema_number_input(const text::ParsedJsonNumbers& parsed) {
     for (const auto& [path, param] :
          {std::pair{"/response_format/json_schema/schema", "response_format.json_schema.schema"},
           std::pair{"/text/format/schema", "text.format.schema"},
-          std::pair{"/output_config/format/schema", "output_config.format.schema"}})
+          std::pair{"/output_config/format/schema", "output_config.format.schema"}}) {
         check(path, param);
+    }
     const auto tools = [&](auto&& self, const RequestJson& list, const std::string& path) -> void {
         if (!list.is_array()) return;
         for (std::size_t i = 0; i < list.size(); ++i) {
@@ -122,10 +123,11 @@ void parse_structured_outputs(const RequestJson& body, GenerationRequest& reques
             bad_request("tool_constraints must be auto or basic", "tool_constraints");
     }
     if (request.tool_choice.allowed_names)
-        for (const auto& name : *request.tool_choice.allowed_names)
+        for (const auto& name : *request.tool_choice.allowed_names) {
             if (std::none_of(request.tools.begin(), request.tools.end(),
                              [&](const auto& tool) { return tool.name == name; }))
                 bad_request("tool choice refers to undeclared tool: " + name, "tool_choice");
+        }
     if (request.tool_choice.mode == ToolChoiceMode::Required && !request.uses_tools())
         bad_request("required tool choice has no callable tools", "tool_choice");
     for (const char* alias :

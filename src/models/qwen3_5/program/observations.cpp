@@ -10,15 +10,17 @@ namespace {
 // frame owns its arena, so the rank's workspace use is the sum and its peak the largest frame.
 std::size_t frames_peak_used(const Resources& resources) {
     std::size_t peak = 0;
-    for (std::uint32_t frame = 0; frame < resources.frame_count(); ++frame)
+    for (std::uint32_t frame = 0; frame < resources.frame_count(); ++frame) {
         peak = std::max(peak, resources.compute_frame(frame).work.peak_used());
+    }
     return peak;
 }
 
 std::size_t frames_used(const Resources& resources) {
     std::size_t used = 0;
-    for (std::uint32_t frame = 0; frame < resources.frame_count(); ++frame)
+    for (std::uint32_t frame = 0; frame < resources.frame_count(); ++frame) {
         used += resources.compute_frame(frame).work.used();
+    }
     return used;
 }
 
@@ -97,8 +99,9 @@ RankMemoryUsage RankProgramImpl::observe_resources() const {
 void RankProgramImpl::reset_measurement_peaks() noexcept {
     workspace_lifetime_peak =
         std::max({workspace_lifetime_peak, frames_peak_used(resources), workspace_peak});
-    for (std::uint32_t frame = 0; frame < resources.frame_count(); ++frame)
+    for (std::uint32_t frame = 0; frame < resources.frame_count(); ++frame) {
         resources.compute_frame(frame).work.reset_peak();
+    }
     workspace_peak = 0;
     if (resources.vision) resources.vision->reset_peaks();
 }

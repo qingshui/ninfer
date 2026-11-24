@@ -29,15 +29,19 @@ ResolvedLoadPlan resolve_load(const artifact::Reader& reader,
     std::vector<Device> banks(definition->expert_banks().size(), cuda);
     for (const auto& layer : definition->weights().text.layers) {
         const auto& w = layer.moe;
-        for (const auto id : {w.gate, w.up, w.down}) devices[id.index] = expert_device;
+        for (const auto id : {w.gate, w.up, w.down}) {
+            devices[id.index] = expert_device;
+        }
         banks[w.bank.index] = expert_device;
     }
     std::vector<artifact::PlacementRequest> requests;
-    for (std::size_t i = 0; i < devices.size(); ++i)
-        for (const auto& part : definition->parameter({i}).binding.parts)
+    for (std::size_t i = 0; i < devices.size(); ++i) {
+        for (const auto& part : definition->parameter({i}).binding.parts) {
             requests.push_back({part.object, devices[i],
                                 devices[i] == Device::cpu() ? artifact::HostAccess::CudaTransfer
                                                             : artifact::HostAccess::CpuOnly});
+        }
+    }
     auto storage = artifact::plan_materialization(reader, requests);
     if (!table)
         table = std::make_shared<const ple::disk::Table>(reader, definition->ple_parameters());
@@ -57,8 +61,9 @@ ResolvedLoadPlan resolve_rank_load(const artifact::Reader& reader,
     out.rank_      = std::move(rank);
     out.selection_ = std::move(selection);
     out.parents_.reserve(out.materialization_.tensors.size());
-    for (const auto& tensor : out.materialization_.tensors)
+    for (const auto& tensor : out.materialization_.tensors) {
         out.parents_.push_back({tensor.geometry, device, nullptr, {}});
+    }
     out.descriptions_ =
         bind_selected_weights(out.definition_->weight_data(), out.selection_->weights,
                               out.materialization_.requests, out.parents_);
@@ -78,8 +83,9 @@ std::unique_ptr<ModelShard> materialize_model(ResolvedLoadPlan&& plan, DeviceCon
             std::unique_ptr<ModelShard>(new ModelShard(definition, std::move(backing), {}, {}, {}));
         out->rank_ = std::move(plan.rank_);
         out->local_parents_.reserve(parent_count);
-        for (std::size_t i = 0; i < parent_count; ++i)
+        for (std::size_t i = 0; i < parent_count; ++i) {
             out->local_parents_.push_back(out->backing_.parent({i}, device.device()));
+        }
         out->bound_ = bind_selected_weights(definition->weight_data(), plan.selection_->weights,
                                             requests, out->local_parents_);
         const auto parent = [&](std::size_t request) -> const WeightParent& {

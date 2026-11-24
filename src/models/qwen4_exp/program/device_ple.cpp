@@ -11,8 +11,9 @@ void RankProgramImpl::prepare_device_ple(const execution::BatchView& batch) {
     const auto& table    = std::get<DevicePleTable>(parameters.model.ple_table());
     const auto& controls = parameters.model.definition().ple_parameters().hash;
     ops::NgramHashParameters hash;
-    for (std::size_t i = 0; i < hash.multipliers.size(); ++i)
+    for (std::size_t i = 0; i < hash.multipliers.size(); ++i) {
         hash.multipliers[i] = static_cast<std::uint64_t>(controls.multipliers[i]);
+    }
     for (std::size_t i = 0; i < hash.offsets.size(); ++i) {
         hash.vocab_sizes[i] = controls.vocab_sizes[i];
         hash.offsets[i]     = controls.offsets[i];

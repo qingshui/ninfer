@@ -10,8 +10,9 @@ ResolvedLoadPlan::ResolvedLoadPlan(const artifact::Reader& reader,
       selection_(std::move(selection)), materialization_(std::move(materialization)),
       device_(device) {
     parents_.reserve(materialization_.tensors.size());
-    for (const auto& tensor : materialization_.tensors)
+    for (const auto& tensor : materialization_.tensors) {
         parents_.push_back({tensor.geometry, device_, nullptr, {}});
+    }
     descriptions_ = bind_selected_weights(definition_->weight_data(), selection_,
                                           materialization_.requests, parents_);
 }
@@ -31,8 +32,9 @@ ResolvedLoadPlan resolve_rank_load(const artifact::Reader& reader,
                                     {w.gate, w.up, w.down},
                                     rank.experts[w.bank.index]};
     };
-    for (const auto& layer : definition->weights().text.layers)
+    for (const auto& layer : definition->weights().text.layers) {
         if (const auto* m = std::get_if<MoeWeights>(&layer.ffn)) append(*m);
+    }
     if (definition->weights().mtp) append(definition->weights().mtp->moe);
     auto selection = select_weights(reader, definition->parameters(), definition->weight_data(),
                                     rank.assemblies, experts, device);
@@ -55,8 +57,9 @@ std::unique_ptr<ModelShard> materialize_model(ResolvedLoadPlan&& plan, DeviceCon
     auto out                = std::unique_ptr<ModelShard>(
         new ModelShard(std::move(definition), std::move(plan.rank_), std::move(backing)));
     out->parents_.reserve(parent_count);
-    for (std::size_t i = 0; i < parent_count; ++i)
+    for (std::size_t i = 0; i < parent_count; ++i) {
         out->parents_.push_back(out->backing_.parent({i}, device.device()));
+    }
     out->weights_ = bind_selected_weights(out->definition_->weight_data(), plan.selection_,
                                           requests, out->parents_);
     out->experts_ =

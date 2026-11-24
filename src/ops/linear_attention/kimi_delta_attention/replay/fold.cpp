@@ -65,9 +65,10 @@ void validate_fold_states(const KdaReplayRecords& records,
         throw std::invalid_argument("kda_replay_fold: state fields require one record arena");
     for (std::uint32_t layer = 0; layer < state.layers; ++layer) {
         const auto conv = common::operand::range(states.conv.tensor(0, layer), op);
-        for (std::uint32_t other = 0; other < state.layers; ++other)
+        for (std::uint32_t other = 0; other < state.layers; ++other) {
             common::operand::disjoint(
                 conv, common::operand::range(states.recurrent.tensor(0, other), op), op);
+        }
     }
 }
 
@@ -99,14 +100,17 @@ validate_fold_rows(const KdaReplayRecords& records, LinearAttentionStateAllLayer
                              selected_field(states.recurrent, selected.source_offset)};
         destinations[row] = {selected_field(states.conv, selected.destination_offset),
                              selected_field(states.recurrent, selected.destination_offset)};
-        for (const auto& fields : {sources[row], destinations[row]})
-            for (const auto& field : fields)
+        for (const auto& fields : {sources[row], destinations[row]}) {
+            for (const auto& field : fields) {
                 for (const auto* record : {&records.conv, &records.key, &records.value,
-                                           &records.log_decay, &records.beta})
+                                           &records.log_decay, &records.beta}) {
                     if (common::operand::overlaps(
                             field, common::operand::range(*record, "kda_replay_fold")))
                         throw std::invalid_argument(
                             "kda_replay_fold: records overlap state fields");
+                }
+            }
+        }
     }
     for (std::size_t row = 0; row < rows.size(); ++row) {
         if (rows[row].commit_columns == 0) continue;
@@ -116,15 +120,17 @@ validate_fold_rows(const KdaReplayRecords& records, LinearAttentionStateAllLayer
                 row == other && rows[row].source_offset == rows[row].destination_offset;
             for (const auto& destination : destinations[row]) {
                 if (!in_place)
-                    for (const auto& source : sources[other])
+                    for (const auto& source : sources[other]) {
                         if (common::operand::overlaps(destination, source))
                             throw std::invalid_argument(
                                 "kda_replay_fold: destination overwrites an active source");
+                    }
                 if (other < row)
-                    for (const auto& previous : destinations[other])
+                    for (const auto& previous : destinations[other]) {
                         if (common::operand::overlaps(destination, previous))
                             throw std::invalid_argument(
                                 "kda_replay_fold: active destinations overlap");
+                    }
             }
         }
     }
@@ -163,16 +169,19 @@ void KdaReplayFoldPlan::execute(const Tensor& source_offsets, const Tensor& dest
     const auto batch = source_offsets.ne[0];
     if (batch < 1 || batch > records_.spec.record_capacity)
         throw std::invalid_argument("kda_replay_fold: active row count is out of range");
-    for (const auto* offsets : {&source_offsets, &destination_offsets})
+    for (const auto* offsets : {&source_offsets, &destination_offsets}) {
         common::operand::tensor(*offsets, DType::I64, {batch}, 8, op, "state offsets",
                                 execution.device());
+    }
     common::operand::tensor(commit_columns, DType::I32, {batch}, 4, op, "commit columns",
                             execution.device());
-    for (const auto* metadata : {&source_offsets, &destination_offsets, &commit_columns})
+    for (const auto* metadata : {&source_offsets, &destination_offsets, &commit_columns}) {
         for (const auto* record :
-             {&records_.conv, &records_.key, &records_.value, &records_.log_decay, &records_.beta})
+             {&records_.conv, &records_.key, &records_.value, &records_.log_decay, &records_.beta}) {
             common::operand::disjoint(common::operand::range(*metadata, op),
                                       common::operand::range(*record, op), op);
+        }
+    }
     detail::kimi_delta_attention::launch_replay_fold(
         records_, states_,
         detail::kimi_delta_attention::KdaReplayFoldDeviceRows{

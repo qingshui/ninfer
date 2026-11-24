@@ -17,13 +17,14 @@ GraphPreparationPlan describe_graph_preparation(const EngineOptions& options,
     out.kv_cache        = resolve_kv_cache(options);
     out.vision          = options.enable_vision;
     if (!plan) return out;
-    for (std::uint32_t batch = 1; batch <= options.max_concurrency; ++batch)
+    for (std::uint32_t batch = 1; batch <= options.max_concurrency; ++batch) {
         for (const auto& layer : plan->description().layers) {
             out.ordinary.push_back(plan->graph_plan(layer.bank, batch));
             if (options.speculative.backend == SpeculativeBackend::Mtp)
                 out.verify.push_back(
                     plan->graph_plan(layer.bank, batch * (options.speculative.draft_tokens + 1)));
         }
+    }
     return out;
 }
 

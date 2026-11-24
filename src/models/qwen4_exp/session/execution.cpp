@@ -198,9 +198,10 @@ Session::start_control(std::span<const SequenceHandle> members, std::span<const 
             (splits[b] && (!*splits[b] || *splits[b] > stride)))
             throw std::logic_error("forced control row is not executable");
     }
-    for (const auto id : tokens)
+    for (const auto id : tokens) {
         if (id < 0 || std::uint32_t(id) >= p.definition->resources().text.public_token_count)
             throw std::invalid_argument("forced token is outside vocabulary");
+    }
     auto reservation = p.executor->try_reserve(runtime::FrameKind::Compute);
     if (!reservation) return {};
     p.compute = std::make_unique<detail::ComputeTransaction>(Kind::Control, p.directory);
@@ -215,9 +216,10 @@ Session::start_control(std::span<const SequenceHandle> members, std::span<const 
             const auto forced      = tokens.subspan(b * stride, stride);
             row.control_last_token = forced.back();
             row.ids.insert(row.ids.end(), forced.begin(), forced.end() - 1);
-            for (const auto frontier : s.identity.positions.execution_frontiers())
+            for (const auto frontier : s.identity.positions.execution_frontiers()) {
                 if (frontier > row.main_frontier && frontier < row.main_frontier + stride)
                     row.window_ends.push_back(frontier - row.main_frontier);
+            }
             if (splits[b] && *splits[b] + 1 < stride) row.window_ends.push_back(*splits[b] + 1);
             std::sort(row.window_ends.begin(), row.window_ends.end());
             row.window_ends.erase(std::unique(row.window_ends.begin(), row.window_ends.end()),

@@ -65,8 +65,12 @@ void kpool_indexer(const Tensor& query, const Tensor& coefficients,
                                           operand::range(out.pool_counts, kOperation),
                                           operand::range(out.selection_end, kOperation)};
     for (int i = 0; i < 3; ++i) {
-        for (int j = 0; j < i; ++j) operand::disjoint(outputs[i], outputs[j], kOperation);
-        for (const auto& src : inputs) operand::disjoint(outputs[i], src, kOperation);
+        for (int j = 0; j < i; ++j) {
+            operand::disjoint(outputs[i], outputs[j], kOperation);
+        }
+        for (const auto& src : inputs) {
+            operand::disjoint(outputs[i], src, kOperation);
+        }
         require(!operand::overlaps(table_blocks, outputs[i]), "output overlaps page table");
     }
     operand::device(workspace.device(), device, kOperation, "workspace");
@@ -77,8 +81,12 @@ void kpool_indexer(const Tensor& query, const Tensor& coefficients,
     if (plan.bytes) {
         scratch          = workspace.alloc_bytes(plan.bytes, 256);
         const auto range = operand::range(scratch.data, scratch.bytes, kOperation);
-        for (const auto& src : inputs) operand::disjoint(range, src, kOperation);
-        for (const auto& dst : outputs) operand::disjoint(range, dst, kOperation);
+        for (const auto& src : inputs) {
+            operand::disjoint(range, src, kOperation);
+        }
+        for (const auto& dst : outputs) {
+            operand::disjoint(range, dst, kOperation);
+        }
         require(!operand::overlaps(table_blocks, range), "workspace overlaps page table");
     }
     IndexerArguments a{};

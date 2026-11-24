@@ -17,14 +17,17 @@ __global__ void indexer_all_kernel(const __grid_constant__ IndexerArguments a) {
             a.ends[column]   = end;
             a.counts[column] = count;
         }
-        for (int i = threadIdx.x; i < count; i += blockDim.x)
+        for (int i = threadIdx.x; i < count; i += blockDim.x) {
             a.ids[column * kIndexSelected + i] = i;
+        }
     }
 }
 
 void select_all(IndexerArguments a, int workers, cudaStream_t stream) {
     indexer_all_kernel<<<std::min(a.width * a.batch, workers), 128, 0, stream>>>(a);
-    for (int i = 0; i < 3; ++i) indexer_idle_kernel<<<1, 1, 0, stream>>>();
+    for (int i = 0; i < 3; ++i) {
+        indexer_idle_kernel<<<1, 1, 0, stream>>>();
+    }
 }
 
 template <int Q, int G, int Stages>
@@ -163,8 +166,11 @@ void launch_indexer(IndexerArguments a, int windows, int sms, cudaStream_t strea
     // Four nodes per fixed Graph slot, including when envelope growth changes
     // request grouping. The grouped route has T>=64, B>=3 and at most
     // B*ceil(windows/B) active slots, which fits this original slot budget.
-    for (int slot = submitted; slot < slots; ++slot)
-        for (int stage = 0; stage < 4; ++stage) indexer_idle_kernel<<<1, 1, 0, stream>>>();
+    for (int slot = submitted; slot < slots; ++slot) {
+        for (int stage = 0; stage < 4; ++stage) {
+            indexer_idle_kernel<<<1, 1, 0, stream>>>();
+        }
+    }
     CUDA_CHECK(cudaGetLastError());
 }
 
@@ -205,8 +211,11 @@ void launch_fp8_indexer(Fp8IndexerArguments f, int sms, cudaStream_t stream) {
         // Q preparation has one node per fixed outer window. Only the four score /
         // selection stages occupy the envelope-independent inner Graph slots.
         const int slots = (width + stride - 1) / stride;
-        for (int slot = submitted; slot < slots; ++slot)
-            for (int stage = 0; stage < 4; ++stage) indexer_idle_kernel<<<1, 1, 0, stream>>>();
+        for (int slot = submitted; slot < slots; ++slot) {
+            for (int stage = 0; stage < 4; ++stage) {
+                indexer_idle_kernel<<<1, 1, 0, stream>>>();
+            }
+        }
         begin += width;
     }
     CUDA_CHECK(cudaGetLastError());

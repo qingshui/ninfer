@@ -47,8 +47,12 @@ std::shared_ptr<const moe::Plan> describe_moe_plan(const execution::ModelProfile
         layers.push_back(std::move(layer));
     }
     std::vector<ExpertBankCacheSpec> banks;
-    for (const auto& bank : p.banks) banks.push_back({bank.gate_up, bank.down, true});
-    for (const auto& layer : layers) banks[layer.bank.index].resident = false;
+    for (const auto& bank : p.banks) {
+        banks.push_back({bank.gate_up, bank.down, true});
+    }
+    for (const auto& layer : layers) {
+        banks[layer.bank.index].resident = false;
+    }
     return moe::describe_plan(banks, layers);
 }
 
@@ -267,7 +271,9 @@ ExecutionPlan plan_graph_probe(std::shared_ptr<const execution::ModelProfile> pr
     auto budget         = capacity_plan(plan, o);
     const auto geometry = describe_context_pool(budget.records);
     std::vector<RecordRequest> records;
-    for (const auto id : geometry.spec_classes) records.push_back({id, o.max_concurrency});
+    for (const auto id : geometry.spec_classes) {
+        records.push_back({id, o.max_concurrency});
+    }
     plan.capacity.device_bytes              = backing == GraphProbeBacking::Inputs
                                                   ? geometry.required_bytes(records)
                                                   : budget.minimum_capacity().device_bytes;

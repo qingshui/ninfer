@@ -122,7 +122,9 @@ BindingPlan SessionImpl::plan_binding(const RequestBasePlan& base, runtime::Lane
         if (const auto* prefix = checkpoint(point).backend_prefix())
             retired_backend.push_back(prefix);
     };
-    for (auto point : candidate.retired_points) retire(point);
+    for (auto point : candidate.retired_points) {
+        retire(point);
+    }
     if (transaction.consume_source) retire(*source);
     const auto main = text_kv_histories->binding_demand(main_source, transaction.reuse_frontier,
                                                         coverage.main_frontier, retired_main);
@@ -471,10 +473,14 @@ void SessionImpl::complete_binding(BindOperation& tx, context::ContextTransactio
         kv.backend.emplace(backend->commit());
     }
     state.kv.emplace(std::move(kv));
-    for (const auto& [from, to] : tx.carried_clones) checkpoints.publish(to, checkpoint(from));
+    for (const auto& [from, to] : tx.carried_clones) {
+        checkpoints.publish(to, checkpoint(from));
+    }
     if (!tx.take_private) {
         tx.carried_points.clear();
-        for (const auto& [from, to] : tx.carried_clones) tx.carried_points.push_back(to);
+        for (const auto& [from, to] : tx.carried_clones) {
+            tx.carried_points.push_back(to);
+        }
     }
     out.private_points      = std::move(tx.carried_points);
     out.retired_checkpoints = std::move(tx.retired_points);

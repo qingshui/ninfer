@@ -20,9 +20,10 @@ runtime::ContextMetadataPlan session_metadata_plan(const context::ContextDirecto
         context::RecoveryIndex<>::metadata_bytes(1) - context::RecoveryIndex<>::metadata_bytes(0);
     const auto ranks         = schema.ranks.size();
     std::size_t history_cost = 0;
-    for (const auto& pool : schema.pools)
+    for (const auto& pool : schema.pools) {
         history_cost += context::HistoryDirectory::metadata_bytes(1, 0, pool.page_capacity, 1) -
                         context::HistoryDirectory::metadata_bytes(0, 0, pool.page_capacity, 1);
+    }
     for (std::size_t i = 0; i < geometry.classes.size(); ++i) {
         const auto state_class = std::any_of(
             schema.state.layouts.begin(), schema.state.layouts.end(), [&](const auto& layout) {
@@ -47,8 +48,9 @@ PreparedSession prepare_session(std::shared_ptr<const ModelDefinition> definitio
     plan.states              = std::move(prepared.states);
     plan.checkpoint_interval = interval;
     plan.vision_max_features = prepared.vision_max_features;
-    for (const auto& geometry : prepared.caches)
+    for (const auto& geometry : prepared.caches) {
         plan.caches.push_back(plan_kv_page_layout(geometry));
+    }
     return prepare_session(std::move(definition), std::move(plan), std::move(prepared.directory));
 }
 

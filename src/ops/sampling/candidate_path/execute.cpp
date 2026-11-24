@@ -26,10 +26,11 @@ void execute_candidate_path(const Tensor& candidate_ids, const Tensor& unary_sco
     for (const auto* work : {&scratch.edges}) {
         if (!work->data) continue;
         const auto range = common::operand::range(*work, "candidate_selector_path workspace");
-        for (const auto* tensor : live)
+        for (const auto* tensor : live) {
             common::operand::disjoint(range,
                                       common::operand::range(*tensor, "candidate_selector_path"),
                                       "candidate_selector_path workspace");
+        }
         common::operand::disjoint(
             range,
             common::operand::range(configs, candidate_ids.ne[2] * sizeof(SamplingConfig),

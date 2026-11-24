@@ -57,9 +57,10 @@ void kimi_delta_attention(const Tensor& q, const Tensor& k, const Tensor& v, con
         common::operand::tensor(*state, DType::FP32, {128, 128, p.value_heads}, 16, op, "State",
                                 execution.device());
         for (const auto* t :
-             {&q, &k, &v, &g, &beta, &a_log, &dt_bias, static_cast<const Tensor*>(&out)})
+             {&q, &k, &v, &g, &beta, &a_log, &dt_bias, static_cast<const Tensor*>(&out)}) {
             common::operand::disjoint(common::operand::range(*state, op),
                                       common::operand::range(*t, op), op);
+        }
     }
     if (state_in.data != state_out.data)
         common::operand::disjoint(common::operand::range(state_in, op),
@@ -77,9 +78,10 @@ void kimi_delta_attention(const Tensor& q, const Tensor& k, const Tensor& v, con
     auto* packets = static_cast<kda::Chunk*>(workspace.alloc_bytes(plan.workspace_bytes).data);
     for (const auto* tensor :
          {&q, &k, &v, &g, &beta, &a_log, &dt_bias, &state_in,
-          static_cast<const Tensor*>(&state_out), static_cast<const Tensor*>(&out)})
+          static_cast<const Tensor*>(&state_out), static_cast<const Tensor*>(&out)}) {
         common::operand::disjoint(common::operand::range(packets, plan.workspace_bytes, op),
                                   common::operand::range(*tensor, op), op);
+    }
     for (std::int64_t begin = 0; begin < p.tokens; begin += plan.window_tokens) {
         auto window   = args;
         window.tokens = std::min<std::int64_t>(plan.window_tokens, p.tokens - begin);
@@ -106,9 +108,10 @@ void kimi_delta_attention_batch_update(const Tensor& q, const Tensor& k, const T
         throw std::invalid_argument("kimi_delta_attention: batch update requires T=1");
     kda::validate_state(source, p, execution.device());
     kda::validate_state(destination, p, execution.device());
-    for (const auto* metadata : {&source.records.byte_offsets, &destination.records.byte_offsets})
+    for (const auto* metadata : {&source.records.byte_offsets, &destination.records.byte_offsets}) {
         common::operand::disjoint(common::operand::range(out, op),
                                   common::operand::range(*metadata, op), op);
+    }
     kda::launch_batch_update(
         arguments(q, k, v, g, beta, a_log, dt_bias, lower_bound, scale,
                   common::operand::state_field_base<const float>(source),
@@ -141,9 +144,10 @@ void kimi_delta_attention_replay_record(const Tensor& q, const Tensor& k, const 
     const Tensor* outputs[] = {&records.key, &records.value, &records.log_decay, &records.beta,
                                &out};
     for (std::size_t i = 0; i < std::size(outputs); ++i) {
-        for (std::size_t j = 0; j < i; ++j)
+        for (std::size_t j = 0; j < i; ++j) {
             common::operand::disjoint(common::operand::range(*outputs[i], op),
                                       common::operand::range(*outputs[j], op), op);
+        }
         for (const auto* input :
              {&q, &k, &v, &g, &beta, &a_log, &dt_bias,
               static_cast<const Tensor*>(&source.records.byte_offsets), &valid}) {

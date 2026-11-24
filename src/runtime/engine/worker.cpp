@@ -38,7 +38,9 @@ void run_rank(distributed::WorkerConnection& connection, std::unique_ptr<artifac
             ready.u32(*attempt);
             phase.complete();
             connection.send(wire::Kind::Ready, std::move(ready).take());
-            while (loop.advance()) std::this_thread::yield();
+            while (loop.advance()) {
+                std::this_thread::yield();
+            }
         }
         preparing.reset();
         instance.reset();

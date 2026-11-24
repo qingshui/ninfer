@@ -233,8 +233,9 @@ void RankProgramImpl::commit(runtime::ExecutionTicket ticket, runtime::CommandSe
                 device_tensor(io.batch.count_slots).slice(0, 0, batch), counts, cuda);
         }
     }
-    for (const auto& row : commit.rows)
+    for (const auto& row : commit.rows) {
         f.release_vision |= row.cancelled || row.failed || row.terminal;
+    }
     resources.compute_actions->submit(
         local_actions(commit.actions, parameters.profile->local.rank));
     gpu_timer.record_retirement();

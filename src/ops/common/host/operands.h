@@ -35,9 +35,10 @@ inline void dtype(const Tensor& tensor, DType expected, const char* op, const ch
 
 inline void shape(const Tensor& tensor, std::array<std::int32_t, 4> expected, const char* op,
                   const char* name) {
-    for (int d = 0; d < 4; ++d)
+    for (int d = 0; d < 4; ++d) {
         if (tensor.ne[d] != expected[d])
             throw std::invalid_argument(std::string(op) + ": invalid shape for " + name);
+    }
 }
 
 inline void contiguous_nonnull(const Tensor& tensor, const char* op, const char* name,
@@ -77,9 +78,10 @@ inline void tensor(const Tensor& value, DType dtype, std::initializer_list<std::
     const auto expected = Tensor::metadata(dtype, dimensions);
     if (value.dtype != dtype || !value.is_contiguous() || !aligned(value.data, alignment))
         throw std::invalid_argument(std::string(op) + ": invalid " + name);
-    for (int axis = 0; axis < 4; ++axis)
+    for (int axis = 0; axis < 4; ++axis) {
         if (value.ne[axis] != expected.ne[axis])
             throw std::invalid_argument(std::string(op) + ": invalid " + name);
+    }
     if (value.bytes() != expected.bytes())
         throw std::invalid_argument(std::string(op) + ": invalid " + name);
 }
@@ -194,8 +196,11 @@ inline void disjoint(Range a, Range b, const char* op) {
 }
 
 inline void disjoint(std::span<const Range> ranges, const char* op) {
-    for (std::size_t i = 0; i < ranges.size(); ++i)
-        for (std::size_t j = 0; j < i; ++j) disjoint(ranges[i], ranges[j], op);
+    for (std::size_t i = 0; i < ranges.size(); ++i) {
+        for (std::size_t j = 0; j < i; ++j) {
+            disjoint(ranges[i], ranges[j], op);
+        }
+    }
 }
 
 // Dense blocks separated by one explicit outer stride. Unlike a bounding interval, this
@@ -222,10 +227,11 @@ inline Blocks blocks(const Tensor& value, const char* op) {
     if (axis == 4) return {range(value.data, inner, op), inner, 1};
     if (value.nb[axis] < static_cast<std::int64_t>(inner))
         throw std::invalid_argument(std::string(op) + ": blocks overlap");
-    for (int outer = axis + 1; outer < 4; ++outer)
+    for (int outer = axis + 1; outer < 4; ++outer) {
         if (value.ne[outer] != 1)
             throw std::invalid_argument(std::string(op) +
                                         ": only one strided outer axis is allowed");
+    }
     const auto stride = static_cast<std::size_t>(value.nb[axis]);
     const auto extent = bytes(value.ne[axis] - 1, stride, op);
     const auto first  = range(value.data, inner, op);

@@ -61,13 +61,17 @@ ParallelStartup::Codec ParallelStartup::codec() const {
 
 std::vector<RankSnapshot> ParallelStartup::observations() const {
     std::vector<RankSnapshot> result;
-    for (const auto& rank : ranks_) result.push_back(rank.observation);
+    for (const auto& rank : ranks_) {
+        result.push_back(rank.observation);
+    }
     return result;
 }
 
 std::vector<RankMemoryBudget> ParallelStartup::memory_budgets() const {
     std::vector<RankMemoryBudget> result;
-    for (const auto& rank : ranks_) result.push_back(rank.budget);
+    for (const auto& rank : ranks_) {
+        result.push_back(rank.budget);
+    }
     return result;
 }
 

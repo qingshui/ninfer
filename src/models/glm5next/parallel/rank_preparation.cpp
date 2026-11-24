@@ -75,12 +75,14 @@ void RankPreparation::prepare_communication() {
     const auto batch  = std::size_t(shape.max_concurrency);
     const auto decode = batch * (shape.draft_tokens + 1);
     std::vector<distributed::CollectivePreparation> work;
-    for (const auto columns : {std::size_t(1), batch, decode, std::size_t(shape.prefill_chunk)})
+    for (const auto columns : {std::size_t(1), batch, decode, std::size_t(shape.prefill_chunk)}) {
         work.push_back({Collective::AllReduce, DType::BF16, hidden * columns});
+    }
     for (std::uint32_t root = 0; root < binding_.group->size(); ++root) {
-        for (const auto columns : {std::size_t(1), std::size_t(shape.prefill_chunk)})
+        for (const auto columns : {std::size_t(1), std::size_t(shape.prefill_chunk)}) {
             work.push_back(
                 {Collective::Broadcast, DType::BF16, hidden * columns, Reduction::Sum, root});
+        }
         if (plan_.workspace.vision)
             work.push_back({Collective::Broadcast, DType::BF16,
                             plan_.workspace.vision->output_bytes / dtype_size(DType::BF16),

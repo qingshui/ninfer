@@ -211,8 +211,9 @@ std::size_t codepoint_bytes(std::string_view input) {
 }
 
 std::size_t suffix_prefix(std::string_view value, std::string_view marker) {
-    for (auto n = std::min(value.size(), marker.size() - 1); n != 0; --n)
+    for (auto n = std::min(value.size(), marker.size() - 1); n != 0; --n) {
         if (value.substr(value.size() - n) == marker.substr(0, n)) return n;
+    }
     return 0;
 }
 
@@ -441,7 +442,9 @@ public:
                 return true;
             }
             auto count = input.size() - suffix_prefix(input, kToolOpen);
-            while (count && is_format_whitespace(input[count - 1])) --count;
+            while (count && is_format_whitespace(input[count - 1])) {
+                --count;
+            }
             // Preserve split UTF-8 without blocking preceding complete codepoints.
             std::size_t complete = 0;
             while (complete < count) {
@@ -709,8 +712,9 @@ void ToolCallOutputDecoder::initialize_continuation(std::string_view prefix) {
                     [](const auto& call) { return call.status == ToolCallStatus::Complete; }))
         throw RequestError(RequestErrorKind::InvalidToolConstraint,
                            "tool continuation must contain no completed or malformed calls");
-    for (auto& event : events)
+    for (auto& event : events) {
         if (!std::holds_alternative<OutputDelta>(event)) impl_->seed.push_back(std::move(event));
+    }
     if (impl_->calls.empty()) impl_->prefix_bytes = impl_->pending.size() + impl_->preamble.size();
 }
 
@@ -719,8 +723,9 @@ ParsedToolCallOutput parse_qwen_tool_call_output(const std::string& text, std::s
     ToolCallOutputDecoder decoder(std::make_shared<Contract>(contract), max_name);
     ParsedToolCallOutput result;
     const auto append = [&](const auto& events) {
-        for (const auto& event : events)
+        for (const auto& event : events) {
             if (const auto* delta = std::get_if<OutputDelta>(&event)) result.content += delta->text;
+        }
     };
     append(decoder.feed(text));
     append(decoder.finish());

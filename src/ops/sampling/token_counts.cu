@@ -15,8 +15,9 @@ __global__ void increment_prefix_counts_kernel(const int* ids, const int* length
     const int row = blockIdx.x, n = lengths[row];
     if (n == 0) return;
     auto* destination = counts + std::int64_t(slots[row]) * slot_stride;
-    for (int t = threadIdx.x; t < n; t += blockDim.x)
+    for (int t = threadIdx.x; t < n; t += blockDim.x) {
         atomicAdd(destination + ids[std::int64_t(row) * tokens + t], 1);
+    }
 }
 
 __global__ void increment_token_counts_kernel(const std::int32_t* token_ids, std::int32_t count,
@@ -73,9 +74,10 @@ void increment_token_counts_batch(const Tensor& token_ids, const Tensor& valid_c
     operand::tensor(slots, DType::I32, {b}, 4, op, "slots", execution.device());
     operand::slotted_tensor(token_counts, DType::I32, {v, s}, 1, 4, op, "counts",
                             execution.device());
-    for (const auto* input : {&token_ids, &valid_columns, &slots})
+    for (const auto* input : {&token_ids, &valid_columns, &slots}) {
         if (operand::overlaps(operand::blocks(token_counts, op), operand::range(*input, op)))
             throw std::invalid_argument("increment_token_counts_batch: input/output alias");
+    }
     increment_prefix_counts_kernel<<<b, 128, 0, execution.stream()>>>(
         static_cast<const int*>(token_ids.data), static_cast<const int*>(valid_columns.data),
         static_cast<const int*>(slots.data), static_cast<int*>(token_counts.data), t,

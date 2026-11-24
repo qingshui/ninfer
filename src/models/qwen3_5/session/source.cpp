@@ -108,7 +108,9 @@ SessionImpl::inspect_source(const RequestBasePlan& base, std::optional<Checkpoin
         if (const auto* prefix = checkpoint(point).backend_prefix())
             retired_backend.push_back(prefix);
     };
-    for (auto point : candidate.retired_points) retire(point);
+    for (auto point : candidate.retired_points) {
+        retire(point);
+    }
     if (consume_source && (!keep_source || (candidate.state_action == StateBindingAction::Move)))
         retire(*handle);
     const auto main_binding = text_kv_histories->binding_demand(

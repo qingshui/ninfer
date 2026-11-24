@@ -23,8 +23,9 @@ std::size_t minimum_bytes(const ContextCapacityPlan& plan, const ContextPoolGeom
     if (plan.working_sets.empty())
         throw std::invalid_argument("context capacity plan has no startup working set");
     std::size_t minimum = 0;
-    for (const auto& set : plan.working_sets)
+    for (const auto& set : plan.working_sets) {
         minimum = std::max(minimum, geometry.required_bytes(set.records));
+    }
     if (!minimum) throw std::invalid_argument("context startup working sets are empty");
     return minimum;
 }
@@ -35,9 +36,10 @@ std::size_t control_bytes(const ContextMetadataPlan& metadata, const ContextPool
         metadata.bytes_per_record.size() != geometry.classes.size())
         throw std::invalid_argument("context metadata classes differ from pool geometry");
     std::size_t class_bytes = 0;
-    for (std::size_t i = 0; i < metadata.bytes_per_record.size(); ++i)
+    for (std::size_t i = 0; i < metadata.bytes_per_record.size(); ++i) {
         class_bytes = std::max(class_bytes, checked_mul(geometry.classes[i].records_per_block,
                                                         metadata.bytes_per_record[i]));
+    }
     const auto per_block = checked_add(metadata.bytes_per_block, class_bytes);
     return checked_add(
         geometry.metadata_bytes(capacity),

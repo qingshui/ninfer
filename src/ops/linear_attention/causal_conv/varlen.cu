@@ -91,7 +91,9 @@ __device__ __forceinline__ void varlen_walk(const CausalConvVarlenOperands& ops,
             auto* destination  = out + static_cast<std::int64_t>(column) * Stride;
             __nv_bfloat162 current[kVarlenBatch];
 #pragma unroll
-            for (int i = 0; i < kVarlenBatch; ++i) current[i] = source[i * Pairs];
+            for (int i = 0; i < kVarlenBatch; ++i) {
+                current[i] = source[i * Pairs];
+            }
 #pragma unroll
             for (int i = 0; i < kVarlenBatch; ++i) {
                 const float2 x = __bfloat1622float2(current[i]);
@@ -164,13 +166,15 @@ __global__ void __launch_bounds__(kVarlenBlock) varlen_state_kernel(CausalConvVa
         if (offset < 0) continue;
         auto* record = reinterpret_cast<__nv_bfloat16*>(ops.checkpoint_base + offset);
         const std::int32_t column = ops.boundary_columns[i];
-        for (std::int32_t slot = 0; slot < 3; ++slot)
+        for (std::int32_t slot = 0; slot < 3; ++slot) {
             record[slot * channels + channel] = window(column, slot);
+        }
     }
     auto* destination =
         reinterpret_cast<__nv_bfloat16*>(ops.destination_base + ops.destination_offsets[row]);
-    for (std::int32_t slot = 0; slot < 3; ++slot)
+    for (std::int32_t slot = 0; slot < 3; ++slot) {
         destination[slot * channels + channel] = window(length, slot);
+    }
 }
 
 template <std::int32_t Rows0, std::int32_t Rows1, std::int32_t Rows2>

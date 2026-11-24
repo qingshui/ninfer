@@ -25,8 +25,9 @@ void TextGraph::prepare(execution::TextRun& run, const execution::Parameters& pa
         if (resident()) {
             std::get<Resident>(implementation_).main.executable.upload(cuda.stream());
         } else {
-            for (auto& layer : std::get<Offloaded>(implementation_).layers)
+            for (auto& layer : std::get<Offloaded>(implementation_).layers) {
                 layer->upload(cuda.stream());
+            }
         }
         device.synchronize();
     }
@@ -75,7 +76,9 @@ void TextGraph::prepare_resident(execution::TextRun& run, const execution::Param
         }
         capture_finish(run, p, output, logits, workspace, cuda);
     });
-    for (auto& bytes : workspace_bytes_) bytes = std::max(bytes, workspace.peak_used());
+    for (auto& bytes : workspace_bytes_) {
+        bytes = std::max(bytes, workspace.peak_used());
+    }
 }
 
 void TextGraph::prepare_offloaded(execution::TextRun& run, const execution::Parameters& p,
@@ -121,7 +124,9 @@ void TextGraph::prepare_offloaded(execution::TextRun& run, const execution::Para
         workspace_bytes_[graph.profiles.size() - 1] =
             std::max({fixed_workspace, workspace.peak_used(), workspace_bytes_.front()});
     }
-    for (const auto& layer : graph.profiles.front()) graph.layers.push_back(layer->instantiate());
+    for (const auto& layer : graph.profiles.front()) {
+        graph.layers.push_back(layer->instantiate());
+    }
 }
 
 void TextGraph::capture_finish(execution::TextRun& run, const execution::Parameters& p,
@@ -151,13 +156,15 @@ void TextGraph::select(std::uint32_t visible) {
     if (next == installed_) return;
     if (resident()) {
         auto& graph = std::get<Resident>(implementation_);
-        for (std::size_t i = 0; i < graph.mixers.size(); ++i)
+        for (std::size_t i = 0; i < graph.mixers.size(); ++i) {
             graph.main.executable.update_child(graph.mixers[i], graph.profiles[next][i]);
+        }
     } else {
         auto& graph = std::get<Offloaded>(implementation_);
-        for (std::size_t i = 0; i < graph.layers.size(); ++i)
+        for (std::size_t i = 0; i < graph.layers.size(); ++i) {
             if (graph.profiles[next][i] != graph.profiles[installed_][i])
                 graph.layers[i]->update(*graph.profiles[next][i]);
+        }
     }
     installed_ = next;
 }

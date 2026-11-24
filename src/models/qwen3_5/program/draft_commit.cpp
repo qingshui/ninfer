@@ -12,8 +12,9 @@ void RankProgramImpl::commit_draft_history(ComputeOperation& operation) {
     if (!resources.dflash) return;
     if (!operation.commit) throw std::logic_error("draft history commit has no accepted prefix");
     std::uint32_t maximum = 0;
-    for (const auto& row : operation.commit->rows)
+    for (const auto& row : operation.commit->rows) {
         if (row.terminal && !row.discarded) maximum = std::max(maximum, row.accepted_tokens);
+    }
     if (maximum == 0) return;
 
     auto& frame       = resources.frame();

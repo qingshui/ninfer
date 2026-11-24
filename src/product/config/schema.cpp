@@ -210,7 +210,9 @@ std::uint64_t quantity(const RawValue& value, bool bytes, bool positive) {
     const auto split  = input.find_first_not_of("0123456789.");
     const auto number = input.substr(0, split);
     auto unit         = split == input.npos ? std::string_view{} : input.substr(split);
-    while (!unit.empty() && unit.front() == ' ') unit.remove_prefix(1);
+    while (!unit.empty() && unit.front() == ' ') {
+        unit.remove_prefix(1);
+    }
     std::uint64_t multiplier = 1;
     if (bytes) {
         if (unit == "KiB")
@@ -233,7 +235,9 @@ std::uint64_t quantity(const RawValue& value, bool bytes, bool positive) {
     if (point != number.npos &&
         (fraction.empty() || fraction.find_first_not_of("0123456789") != fraction.npos))
         invalid("expected a nonnegative decimal quantity");
-    while (!fraction.empty() && fraction.back() == '0') fraction.remove_suffix(1);
+    while (!fraction.empty() && fraction.back() == '0') {
+        fraction.remove_suffix(1);
+    }
     if (fraction.size() > 30) invalid("quantity must resolve to whole bytes or milliseconds");
     unsigned __int128 numerator = 0;
     unsigned __int128 divisor   = 1;

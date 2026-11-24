@@ -73,13 +73,16 @@ PrepareArguments prepare_arguments(const QsaKvProjectionView& p,
     // Default model frequencies are constructed once on Host, with no Device allocation.
     static const auto default_frequency = [] {
         std::array<double, 32> result{};
-        for (int i = 0; i < 32; ++i) result[i] = std::pow(1e7, -double(i) / 32);
+        for (int i = 0; i < 32; ++i) {
+            result[i] = std::pow(1e7, -double(i) / 32);
+        }
         return result;
     }();
-    for (int i = 0; i < 32; ++i)
+    for (int i = 0; i < 32; ++i) {
         a.frequency[i] = params.rope_theta == 1e7F
                              ? default_frequency[i]
                              : std::pow(double(params.rope_theta), -double(i) / 32);
+    }
     return a;
 }
 

@@ -94,8 +94,9 @@ void qsa_sparse_gqa(const Tensor& query, const Tensor& gate,
                            &batch.table_rows,
                            &selected.block_ids,
                            &selected.block_counts};
-    for (const auto* input : inputs)
+    for (const auto* input : inputs) {
         if (input->data) v.require(!v.overlap(out, *input), "output/input overlap");
+    }
     const auto plan = detail::qsa::select_sparse_gqa_plan(
         cache.storage, tokens, rows, kv_heads, envelope, execution.multiprocessor_count());
     auto scope = workspace.scope();
@@ -104,8 +105,9 @@ void qsa_sparse_gqa(const Tensor& query, const Tensor& gate,
     for (const auto* work : {&scratch.numerator, &scratch.maximum, &scratch.sum}) {
         if (!work->data) continue;
         v.require(!v.overlap(*work, out), "workspace/output overlap");
-        for (const auto* input : inputs)
+        for (const auto* input : inputs) {
             if (input->data) v.require(!v.overlap(*work, *input), "workspace/input overlap");
+        }
     }
     detail::qsa::launch_sparse_gqa(query, gate, cache, batch, selected, plan, scratch, out,
                                    execution);

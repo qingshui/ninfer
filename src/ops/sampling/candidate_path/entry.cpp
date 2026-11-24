@@ -23,12 +23,13 @@ std::size_t candidate_selector_path_workspace_capacity_bytes(int min_steps, int 
         max_batch > 8 || max_batch < min_batch)
         throw std::invalid_argument("selector workspace: invalid K/B interval");
     WorkspaceLayoutBuilder layout;
-    for (int k = min_steps; k <= max_steps; ++k)
+    for (int k = min_steps; k <= max_steps; ++k) {
         for (int b = min_batch; b <= max_batch; ++b) {
             auto scope = layout.scope();
             (void)candidate_path_detail::allocate_selector_workspace(
                 layout, candidate_path_detail::select_candidate_path(k, b), k, b);
         }
+    }
     return layout.peak_bytes();
 }
 

@@ -31,8 +31,9 @@ void enter(dist::ExecutionGroup& group, const GroupPreparation& prepared, std::u
 std::vector<wire::Payload> receive(dist::ExecutionGroup& group, wire::Kind kind,
                                    std::chrono::milliseconds timeout) {
     std::vector<wire::Payload> result(group.topology().ranks.size());
-    for (auto& message : group.receive_all(kind, timeout))
+    for (auto& message : group.receive_all(kind, timeout)) {
         result.at(message.peer) = std::move(message.message.payload);
+    }
     return result;
 }
 } // namespace
@@ -68,7 +69,9 @@ void encode_preparation_report(wire::Encoder& out, const RankPreparationReport& 
     out.u64(plan.metadata.fixed_bytes);
     out.u64(plan.metadata.bytes_per_block);
     out.u32(plan.metadata.bytes_per_record.size());
-    for (const auto bytes : plan.metadata.bytes_per_record) out.u64(bytes);
+    for (const auto bytes : plan.metadata.bytes_per_record) {
+        out.u64(bytes);
+    }
     out.u32(plan.reference.tokens_per_request);
     out.u32(plan.reference.request_count);
     out.u64(plan.reference.device_bytes);
@@ -96,17 +99,23 @@ RankPreparationReport decode_preparation_report(wire::Decoder& in) {
     plan.fixed_device_bytes = in.u64();
     plan.fixed_host_bytes   = in.u64();
     plan.records.resize(in.u32());
-    for (auto& record : plan.records) record = {in.u64(), in.u64()};
+    for (auto& record : plan.records) {
+        record = {in.u64(), in.u64()};
+    }
     plan.working_sets.resize(in.u32());
     for (auto& set : plan.working_sets) {
         set.name = in.string();
         set.records.resize(in.u32());
-        for (auto& record : set.records) record = {{in.u32()}, in.u32()};
+        for (auto& record : set.records) {
+            record = {{in.u32()}, in.u32()};
+        }
     }
     plan.metadata.fixed_bytes     = in.u64();
     plan.metadata.bytes_per_block = in.u64();
     plan.metadata.bytes_per_record.resize(in.u32());
-    for (auto& bytes : plan.metadata.bytes_per_record) bytes = in.u64();
+    for (auto& bytes : plan.metadata.bytes_per_record) {
+        bytes = in.u64();
+    }
     plan.reference                    = {in.u32(), in.u32(), in.u64()};
     r.capacity.available_bytes        = in.u64();
     r.capacity.available_host_bytes   = in.u64();
@@ -202,7 +211,9 @@ prepare_execution_group(dist::ExecutionGroup& group, std::span<const wire::Bytes
                 reports();
             }
             std::vector<RankCapacityOffer> offers;
-            for (const auto& report : result.reports) offers.push_back(report.capacity);
+            for (const auto& report : result.reports) {
+                offers.push_back(report.capacity);
+            }
             std::optional<std::size_t> control_owner;
             for (std::size_t rank = 0; rank < result.reports.size(); ++rank) {
                 const auto& report = result.reports[rank];

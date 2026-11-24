@@ -29,24 +29,32 @@ struct ContextReleaseMeasure {
 
     void merge(const ContextReleaseMeasure& other) {
         if (bytes.size() < other.bytes.size()) bytes.resize(other.bytes.size());
-        for (std::size_t i = 0; i < other.bytes.size(); ++i) bytes[i] += other.bytes[i];
+        for (std::size_t i = 0; i < other.bytes.size(); ++i) {
+            bytes[i] += other.bytes[i];
+        }
         metadata_objects += other.metadata_objects;
     }
 
     void subtract(const ContextReleaseMeasure& other) {
-        for (std::size_t i = 0; i < other.bytes.size(); ++i) bytes[i] -= other.bytes[i];
+        for (std::size_t i = 0; i < other.bytes.size(); ++i) {
+            bytes[i] -= other.bytes[i];
+        }
         metadata_objects -= other.metadata_objects;
     }
 
     [[nodiscard]] std::uint64_t total_bytes() const noexcept {
         std::uint64_t total = 0;
-        for (const auto value : bytes) total += value;
+        for (const auto value : bytes) {
+            total += value;
+        }
         return total;
     }
 
     [[nodiscard]] std::uint64_t useful_bytes(std::span<const std::uint64_t> limits) const {
         std::uint64_t total = 0;
-        for (std::size_t i = 0; i < bytes.size(); ++i) total += std::min(bytes[i], limits[i]);
+        for (std::size_t i = 0; i < bytes.size(); ++i) {
+            total += std::min(bytes[i], limits[i]);
+        }
         return total;
     }
 };

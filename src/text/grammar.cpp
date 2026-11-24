@@ -103,7 +103,9 @@ xgrammar::Grammar reasoning_prefix(std::string_view delimiter) {
     if (!body) throw std::logic_error("invalid reasoning delimiter");
     const auto ends = body->GetEnds();
     int tail        = body->AddState();
-    for (int end : ends) body->GetFsm().AddEpsilonEdge(end, tail);
+    for (int end : ends) {
+        body->GetFsm().AddEpsilonEdge(end, tail);
+    }
     for (unsigned char byte : delimiter) {
         const int next = body->AddState();
         body->GetFsm().AddEdge(tail, next, byte, byte);
@@ -183,9 +185,10 @@ const std::vector<std::int32_t>& GrammarVocabulary::containing(unsigned char byt
     const auto found = impl_->indexes.find(byte);
     if (found != impl_->indexes.end()) return found->second;
     std::vector<std::int32_t> ids;
-    for (std::size_t i = 0; i < impl_->pieces.size(); ++i)
+    for (std::size_t i = 0; i < impl_->pieces.size(); ++i) {
         if (impl_->pieces[i].find(static_cast<char>(byte)) != std::string::npos)
             ids.push_back(static_cast<std::int32_t>(i));
+    }
     return impl_->indexes.emplace(byte, std::move(ids)).first->second;
 }
 
@@ -288,7 +291,9 @@ std::unique_ptr<GrammarSession> GrammarCompiler::compile(const OutputConstraint&
         std::string key = std::to_string(static_cast<int>(constraint.kind)) + ":" +
                           std::to_string(close.size()) + ":" + std::string(close) +
                           constraint.source;
-        for (const auto& value : choices) key += std::to_string(value.size()) + ":" + value;
+        for (const auto& value : choices) {
+            key += std::to_string(value.size()) + ":" + value;
+        }
         xgrammar::CompilationCacheAccess access;
         auto compiled = impl_->compiler.CompileCachedGrammar(
             key,

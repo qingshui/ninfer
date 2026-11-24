@@ -27,8 +27,9 @@ void prepare_peer_communication(const distributed::Group& group, std::size_t chu
     if (!chunk_bytes)
         throw std::invalid_argument("Context peer preparation has no transfer window");
     std::vector<distributed::PeerPreparation> peers;
-    for (std::uint32_t rank = 0; rank < group.size(); ++rank)
+    for (std::uint32_t rank = 0; rank < group.size(); ++rank) {
         if (rank != group.rank()) peers.push_back({rank, chunk_bytes});
+    }
     group.prepare({}, peers, execution);
 #else
     throw std::logic_error("distributed execution was not built");
@@ -61,10 +62,11 @@ ContextMigration::ContextMigration(DeviceContext& device, ContextStorage& storag
             peer_staging_.device != device.device() || peer_chunk_bytes_ == 0 ||
             peer_staging_.bytes < peer_chunk_bytes_)
             throw std::invalid_argument("Context peer binding has inconsistent startup resources");
-        for (std::size_t i = 0; i < peer_members_.size(); ++i)
+        for (std::size_t i = 0; i < peer_members_.size(); ++i) {
             if (std::find(peer_members_.begin(), peer_members_.begin() + i, peer_members_[i]) !=
                 peer_members_.begin() + i)
                 throw std::invalid_argument("Context peer group contains a duplicate rank");
+        }
 #else
         throw std::invalid_argument("Context peer transfer requires a distributed build");
 #endif
@@ -76,7 +78,9 @@ ContextMigration::ContextMigration(DeviceContext& device, ContextStorage& storag
     timers_.reserve(capacity);
     segments_.reserve(capacity);
     observations_.reserve(capacity);
-    for (std::size_t i = 0; i < capacity; ++i) timers_.emplace_back(device, execution.stream());
+    for (std::size_t i = 0; i < capacity; ++i) {
+        timers_.emplace_back(device, execution.stream());
+    }
 }
 
 ContextMigration::~ContextMigration() {
@@ -221,7 +225,9 @@ std::uint32_t ContextMigration::enqueue_peer(const PeerCopy& action, CudaExecuti
     const auto member = std::find(peer_members_.begin(), peer_members_.end(), action.peer);
     const auto peer   = static_cast<std::uint32_t>(member - peer_members_.begin());
     std::size_t total = 0;
-    for (const auto& range : action.ranges) total += range.bytes;
+    for (const auto& range : action.ranges) {
+        total += range.bytes;
+    }
     std::size_t index = 0, offset = 0;
     std::uint32_t operations = 0;
     while (total) {

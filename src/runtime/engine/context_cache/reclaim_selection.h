@@ -101,16 +101,21 @@ public:
                 else
                     first = node;
             };
-            for (const auto h : proof.points) join(h);
+            for (const auto h : proof.points) {
+                join(h);
+            }
             if (const auto* owner = policy.find_owner(proof.owner))
-                for (const auto& point : owner->points) join(point.handle);
+                for (const auto& point : owner->points) {
+                    join(point.handle);
+                }
         }
         const auto component = [&](Handle h) { return root(index_.component(h)); };
         groups_.resize(parents.size());
         for (const auto& proof : cursor.owners) {
             if (!proof.priority.reused()) continue;
-            for (const auto h : proof.points)
+            for (const auto h : proof.points) {
                 if (index_.contains(h)) groups_[component(h)].private_proof = true;
+            }
         }
         candidates_.reserve(releases.size());
         for (const auto& release : releases) {
@@ -131,9 +136,10 @@ public:
                         candidate.parts.push_back({group, {}});
                     candidate.parts.back().additions.push_back(h);
                 }
-                for (std::size_t i = 0; i < later_snapshots.size(); ++i)
+                for (std::size_t i = 0; i < later_snapshots.size(); ++i) {
                     if (Policy::contains(release.sources, later_snapshots[i]))
                         candidate.snapshot_order = i + 1;
+                }
             }
             candidates_.push_back(std::move(candidate));
         }
@@ -148,8 +154,9 @@ public:
             } else if (admission->checkpoint && index_.contains(*admission->checkpoint)) {
                 gain.sources = admission->sources;
                 if (gain.sources.empty()) gain.sources.push_back(*admission->checkpoint);
-                for (const auto h : gain.sources)
+                for (const auto h : gain.sources) {
                     if (index_.contains(h)) gain.groups.push_back(component(h));
+                }
                 std::sort(gain.groups.begin(), gain.groups.end());
                 gain.groups.erase(std::unique(gain.groups.begin(), gain.groups.end()),
                                   gain.groups.end());
@@ -203,8 +210,9 @@ public:
                         part.facts.loss = group.loss + (*part.facts.loss - part.prior_loss);
                     } else {
                         auto removed = group.removed;
-                        for (const auto h : part.additions)
+                        for (const auto h : part.additions) {
                             if (!committed_[h.index]) removed.push_back(h);
+                        }
                         part.facts = policy_.action_facts(session_, removed, cursor_, evaluation_);
                         part.facts.loss = index_.loss(removed);
                         if (!group.private_proof)
@@ -243,16 +251,18 @@ public:
         auto& candidate = candidates_[choice.index];
         auto chosen     = measured_.probe(releases_[choice.index].sources);
         chosen.commit();
-        for (const auto object : measured_.freed().subspan(materialized_objects_))
+        for (const auto object : measured_.freed().subspan(materialized_objects_)) {
             released_.merge(inventory_.objects()[object].released);
+        }
         materialized_objects_ = measured_.freed().size();
         for (const auto& part : candidate.parts) {
             auto& group = groups_[part.group];
-            for (const auto h : part.additions)
+            for (const auto h : part.additions) {
                 if (!committed_[h.index]) {
                     committed_[h.index] = true;
                     group.removed.push_back(h);
                 }
+            }
             group.loss = *part.facts.loss;
             ++group.version;
         }
@@ -272,17 +282,21 @@ private:
     measure(Session& session, const Assessment& assessment, const Inventory& inventory) {
         std::vector<ContextReleaseMeasure> values;
         values.reserve(inventory.objects().size());
-        for (const auto& object : inventory.objects())
+        for (const auto& object : inventory.objects()) {
             values.push_back(session.release_measure(object.released, assessment));
+        }
         return values;
     }
 
     std::uint64_t gain_after(Gain& gain, const Candidate& candidate) {
         if (gain.admission->base) {
-            while (gain.first < gain.matching.size() && committed_[gain.matching[gain.first].index])
+            while (gain.first < gain.matching.size() && committed_[gain.matching[gain.first].index]) {
                 ++gain.first;
+            }
             auto i = gain.first;
-            while (i < gain.matching.size() && measured_.contains(gain.matching[i])) ++i;
+            while (i < gain.matching.size() && measured_.contains(gain.matching[i])) {
+                ++i;
+            }
             const auto fallback = i == gain.matching.size() ? 0 : index_.frontier(gain.matching[i]);
             return gain.admission->frontier - fallback;
         }
@@ -290,10 +304,12 @@ private:
         for (const auto group : gain.groups) {
             const auto& removed = groups_[group].removed;
             unavailable.insert(unavailable.end(), removed.begin(), removed.end());
-            for (const auto& part : candidate.parts)
+            for (const auto& part : candidate.parts) {
                 if (part.group == group)
-                    for (const auto h : part.additions)
+                    for (const auto h : part.additions) {
                         if (!committed_[h.index]) unavailable.push_back(h);
+                    }
+            }
         }
         return index_.loss(gain.sources, unavailable);
     }

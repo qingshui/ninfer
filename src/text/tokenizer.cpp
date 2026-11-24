@@ -939,8 +939,9 @@ bool append_ordinary_text(BoundaryEncodedText& encoded, std::string_view text,
 
     std::vector<std::size_t> normalized_boundaries(boundaries.size());
     if (!pipeline.normalize_nfc) {
-        for (std::size_t i = 0; i < boundaries.size(); ++i)
+        for (std::size_t i = 0; i < boundaries.size(); ++i) {
             normalized_boundaries[i] = boundaries[i].offset - text_offset;
+        }
     } else {
         std::string independently_normalized;
         independently_normalized.reserve(normalized.size());
@@ -1035,10 +1036,11 @@ Tokenizer::Tokenizer(TokenizerResources resources) {
             added_token_candidates_[static_cast<unsigned char>(content.front())].push_back(index);
         }
     }
-    for (auto& candidates : added_token_candidates_)
+    for (auto& candidates : added_token_candidates_) {
         std::sort(candidates.begin(), candidates.end(), [&](std::size_t left, std::size_t right) {
             return added_tokens_[left].content.size() > added_tokens_[right].content.size();
         });
+    }
     if (valid_token_ids_.size() < decoded_token_bytes_.size()) {
         valid_token_ids_.resize(decoded_token_bytes_.size());
     }
@@ -1060,8 +1062,9 @@ Tokenizer::Tokenizer(TokenizerResources resources) {
     byte_token_ids_  = load_byte_token_ids(vocab_metadata.token_to_id);
     if (pipeline_.ignore_merges) {
         whole_token_ids_.reserve(vocab_metadata.occupied_ids.size());
-        for (const int id : vocab_metadata.occupied_ids)
+        for (const int id : vocab_metadata.occupied_ids) {
             whole_token_ids_.emplace(decoded_token_bytes_[static_cast<std::size_t>(id)], id);
+        }
     }
 }
 

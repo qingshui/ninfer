@@ -970,7 +970,9 @@ make_graph_probe_plan(std::shared_ptr<const execution::ModelProfile> profile, De
     const auto& records                      = planner->capacity_plan.records;
     const auto geometry                      = describe_context_pool(records);
     std::vector<RecordRequest> demand;
-    for (const auto id : geometry.spec_classes) demand.push_back({id, inputs.max_concurrency});
+    for (const auto id : geometry.spec_classes) {
+        demand.push_back({id, inputs.max_concurrency});
+    }
     const auto bytes  = backing == GraphProbeBacking::Inputs
                             ? geometry.required_bytes(demand)
                             : planner->capacity_plan.minimum_capacity().device_bytes;

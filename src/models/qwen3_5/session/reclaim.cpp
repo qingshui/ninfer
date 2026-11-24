@@ -96,28 +96,34 @@ SessionImpl::checkpoint_release_set(std::span<const CheckpointHandle> handles) c
         if (const auto* prefix = record.backend_prefix()) backend.push_back(prefix);
     }
     ContextReleaseSet result;
-    for (const auto handle : handles)
+    for (const auto handle : handles) {
         if (std::none_of(result.catalog.begin(), result.catalog.end(),
                          [&](const auto& item) { return item == checkpoints.retirement(handle); }))
             result.catalog.push_back(checkpoints.retirement(handle));
+    }
     result.histories = text_kv_histories->released_histories(main);
     if (backend_kv_histories) {
         const auto retired = backend_kv_histories->released_histories(backend);
         result.histories.insert(result.histories.end(), retired.begin(), retired.end());
     }
     const auto append = [&](ContextReleaseSet records) { result.merge(records); };
-    for (const auto& image : images)
+    for (const auto& image : images) {
         if (image.references == state_store->checkpoint_references(image.image) &&
             state_store->can_release_after_checkpoint_references(image.image, image.references))
             append(directory.state_release(image.image));
+    }
     const auto append_page = [&](context::PageId page) {
         const auto facts = directory.page_release(page);
         result.records.insert(result.records.end(), facts.records.begin(), facts.records.end());
         result.pages.push_back(page);
     };
-    for (const auto page : text_kv_histories->released_pages(main)) append_page(page);
+    for (const auto page : text_kv_histories->released_pages(main)) {
+        append_page(page);
+    }
     if (backend_kv_histories)
-        for (const auto page : backend_kv_histories->released_pages(backend)) append_page(page);
+        for (const auto page : backend_kv_histories->released_pages(backend)) {
+            append_page(page);
+        }
     result.normalize();
     return result;
 }
@@ -239,9 +245,10 @@ SessionImpl::plan_releases(std::span<const CheckpointHandle> allowed,
     context::ReleasePlan<ContextRelease, ContextReleaseSet> result{{}, evaluation->facts.inventory};
     if (has_context_operation()) return result;
     auto selection = result.inventory->select();
-    for (const auto& group : evaluation->facts.groups)
+    for (const auto& group : evaluation->facts.groups) {
         if (auto quote = quote_release(evaluation, group.sources, selection))
             result.releases.push_back(std::move(*quote));
+    }
     return result;
 }
 
@@ -252,9 +259,14 @@ SessionImpl::demotion_host_requirements(const ContextDemotion& quote) const {
     const auto& plan = *quote.impl;
     context::HostWriteRequirements write;
     write.kv_pages.resize(directory.pool_count());
-    for (const auto& state : plan.states) write.state_images += !state.host_resident;
-    for (std::uint32_t pool = 0; pool < directory.pool_count(); ++pool)
-        for (const auto& page : plan.pages[pool]) write.kv_pages[pool] += !page.host_covers_prefix;
+    for (const auto& state : plan.states) {
+        write.state_images += !state.host_resident;
+    }
+    for (std::uint32_t pool = 0; pool < directory.pool_count(); ++pool) {
+        for (const auto& page : plan.pages[pool]) {
+            write.kv_pages[pool] += !page.host_covers_prefix;
+        }
+    }
     return write;
 }
 
@@ -265,9 +277,10 @@ ContextDemotion SessionImpl::combine_demotions(std::span<const ContextDemotion> 
     std::unordered_set<std::uint32_t> states;
     std::array<std::unordered_set<std::uint32_t>, 2> pages;
     const auto append_sources = [](auto& target, const auto& values) {
-        for (const auto handle : values)
+        for (const auto handle : values) {
             if (std::find(target.begin(), target.end(), handle) == target.end())
                 target.push_back(handle);
+        }
     };
     for (const auto& quote : quotes) {
         if (!quote.impl || quote.impl->owner != this)
@@ -280,12 +293,13 @@ ContextDemotion SessionImpl::combine_demotions(std::span<const ContextDemotion> 
                 throw std::invalid_argument("demotion batch contains overlapping State records");
             plan->states.push_back(state);
         }
-        for (std::uint32_t pool = 0; pool < directory.pool_count(); ++pool)
+        for (std::uint32_t pool = 0; pool < directory.pool_count(); ++pool) {
             for (const auto& page : part.pages[pool]) {
                 if (!pages[pool].insert(page.handle.index).second)
                     throw std::invalid_argument("demotion batch contains overlapping KV records");
                 plan->pages[pool].push_back(page);
             }
+        }
         result.host_bytes += quote.host_bytes;
         result.released.merge(quote.released);
     }
@@ -300,18 +314,23 @@ runtime::ContextStart SessionImpl::start_demote(const ContextDemotion& quote,
         return runtime::ContextStart::Stale;
     const auto& plan = *quote.impl;
     if (quote.sources != plan.allowed) return runtime::ContextStart::Stale;
-    for (const auto source : plan.allowed)
+    for (const auto source : plan.allowed) {
         if (!can_release_checkpoint(source) ||
             std::find(plan.excluded.begin(), plan.excluded.end(), source) != plan.excluded.end())
             return runtime::ContextStart::Stale;
+    }
     const auto facts = physical_facts(*this, plan.allowed, plan.excluded);
     std::unordered_set<std::uint32_t> states;
     std::array<std::unordered_set<std::uint32_t>, 2> eligible_pages;
     for (const auto& group : facts.groups) {
-        for (const auto state : group.states) states.insert(state.index);
-        for (std::uint32_t pool = 0; pool < directory.pool_count(); ++pool)
-            for (const auto& page : group.pages[pool])
+        for (const auto state : group.states) {
+            states.insert(state.index);
+        }
+        for (std::uint32_t pool = 0; pool < directory.pool_count(); ++pool) {
+            for (const auto& page : group.pages[pool]) {
                 eligible_pages[pool].insert(page.handle.index);
+            }
+        }
     }
     ContextReleaseSet actual;
     std::size_t host_bytes = 0;
@@ -350,9 +369,10 @@ runtime::ContextStart SessionImpl::start_demote(const ContextDemotion& quote,
     }
     if (actual != quote.released || host_bytes != quote.host_bytes)
         return runtime::ContextStart::Stale;
-    for (const auto victim : host_victims)
+    for (const auto victim : host_victims) {
         if (std::find(plan.allowed.begin(), plan.allowed.end(), victim) != plan.allowed.end())
             return runtime::ContextStart::Stale;
+    }
     const auto released = checkpoint_release_set(host_victims);
     if (!released) return runtime::ContextStart::Stale;
     const auto write     = demotion_host_requirements(quote);
@@ -362,9 +382,10 @@ runtime::ContextStart SessionImpl::start_demote(const ContextDemotion& quote,
         return runtime::ContextStart::Deferred;
     auto frame = executor().try_reserve(runtime::FrameKind::Context);
     if (!frame) return runtime::ContextStart::Deferred;
-    for (const auto victim : host_victims)
+    for (const auto victim : host_victims) {
         if (!release_checkpoint(victim))
             throw std::logic_error("prepared Host victim changed before demotion");
+    }
     ContextDemand demand;
     auto target_ids = demand.add_host(write);
     auto reserved   = directory.reserve(demand);
@@ -420,13 +441,15 @@ runtime::ContextStart SessionImpl::submit_demotion(const ContextDemotion& quote,
     for (std::uint32_t pool = 0; pool < directory.pool_count(); ++pool) {
         auto& pages = directory.pool(pool).pages();
         std::vector<context::PageId> missing;
-        for (auto entry = plan.pages[pool].rbegin(); entry != plan.pages[pool].rend(); ++entry)
+        for (auto entry = plan.pages[pool].rbegin(); entry != plan.pages[pool].rend(); ++entry) {
             if (!entry->host_covers_prefix) missing.push_back(entry->handle);
+        }
         if (!missing.empty())
             migration.add_backups(pool, missing, targets.take(target_ids.histories.at(pool)), true);
-        for (const auto& page : plan.pages[pool])
+        for (const auto& page : plan.pages[pool]) {
             if (page.host_covers_prefix && !pages.drop_device_replica(page.handle))
                 throw std::logic_error("quoted redundant Device page changed during demotion");
+        }
     }
     if (quote.host_bytes == 0) return runtime::ContextStart::Started;
     context_operation_ = std::move(transaction);

@@ -193,15 +193,17 @@ void RankProgramImpl::retire_compute() {
                 });
             bool release = flight.cancelled && reads_window;
             if (const auto* forward = std::get_if<ForwardWork>(&flight.request.work.operation))
-                for (const auto& input : forward->inputs)
+                for (const auto& input : forward->inputs) {
                     if (input.visual && input.visual->window.id == active->id)
                         release |=
                             input.prompt_begin + input.tokens.size() >= active->plan->consume_end;
+                }
             if (flight.commit)
-                for (std::size_t i = 0; i < flight.commit->rows.size(); ++i)
+                for (std::size_t i = 0; i < flight.commit->rows.size(); ++i) {
                     if (flight.rows[i].member.residency == active->owner.residency)
                         release |= flight.commit->rows[i].terminal ||
                                    flight.commit->rows[i].discarded;
+                }
             if (release) resources.vision->release(active->id);
         }
     }

@@ -60,8 +60,9 @@ __global__ void extract_kernel(Extract a) {
             }
         }
 #pragma unroll
-        for (int r = 0; r < 3; ++r)
+        for (int r = 0; r < 3; ++r) {
             dst.data[dst.offsets[b] / 2 + l * dst.layer + r * dst.column + d] = words[r];
+        }
     }
 }
 } // namespace
@@ -80,8 +81,12 @@ void kpool_tail_extract(ConstKpoolTailStateView before, const KpoolRawRecordRead
                     device);
     strided(records.raw_keys, DType::BF16, {D, W, R, L}, device, "raw keys");
     strided(records.raw_gates, DType::BF16, {D, W, R, L}, device, "raw gates");
-    for (const auto* f : {&before.raw_keys, &before.raw_gates}) tail_field(*f, D, B, L, device);
-    for (const auto* f : {&after.raw_keys, &after.raw_gates}) tail_field(*f, D, B, L, device);
+    for (const auto* f : {&before.raw_keys, &before.raw_gates}) {
+        tail_field(*f, D, B, L, device);
+    }
+    for (const auto* f : {&after.raw_keys, &after.raw_gates}) {
+        tail_field(*f, D, B, L, device);
+    }
     Extract a{{tail(before.raw_keys), tail(before.raw_gates)},
               {tail(after.raw_keys), tail(after.raw_gates)},
               {raw(records.raw_keys), raw(records.raw_gates)},

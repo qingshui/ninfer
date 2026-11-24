@@ -59,8 +59,9 @@ LayerGraphExecutable::LayerGraphExecutable(const LayerGraphDefinition& source)
     instantiate(mixer_, source.mixer);
     instantiate(steady_, source.steady);
     instantiate(feature_, source.feature);
-    for (std::size_t kind = 0; kind < subsets_.size(); ++kind)
+    for (std::size_t kind = 0; kind < subsets_.size(); ++kind) {
         instantiate(subsets_[kind], source.moe->subsets[kind]);
+    }
 }
 
 void LayerGraphExecutable::update(const LayerGraphDefinition& source) {
@@ -76,7 +77,9 @@ void LayerGraphExecutable::upload(cudaStream_t stream) {
     offload::upload(mixer_, stream);
     offload::upload(steady_, stream);
     offload::upload(feature_, stream);
-    for (auto& subset : subsets_) offload::upload(subset, stream);
+    for (auto& subset : subsets_) {
+        offload::upload(subset, stream);
+    }
 }
 
 void capture_layer(LayerGraphDefinition& definition, Resources& resources, ExpertBankId bank,

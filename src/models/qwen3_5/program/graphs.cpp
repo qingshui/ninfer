@@ -47,8 +47,9 @@ public:
           pool_(0, resources.state_images.pool_bytes(), resources.context_records) {
         const auto batch = resources.frame().spec.batch_capacity;
         std::vector<RecordRequest> demand;
-        for (std::size_t i = 0; i < resources.context_records.size(); ++i)
+        for (std::size_t i = 0; i < resources.context_records.size(); ++i) {
             demand.push_back({pool_.record_class(i), batch});
+        }
         auto reserved = pool_.reserve(demand);
         if (!reserved.reservation || !reserved.reservation->ready())
             throw std::logic_error("Graph preparation Context records do not fit");
@@ -109,8 +110,9 @@ public:
         CUDA_CHECK(cudaMemcpyAsync(frame.commit.data, frame.host_commit_region.data,
                                    frame.commit.bytes, cudaMemcpyHostToDevice, cuda.stream()));
         CUDA_CHECK(cudaMemsetAsync(frame.egress.data, 0, frame.egress.bytes, cuda.stream()));
-        for (const auto offset : state_offsets_)
+        for (const auto offset : state_offsets_) {
             resources_.state_images.storage().clear(offset, cuda);
+        }
         if (resources_.token_counts.data) {
             CUDA_CHECK(cudaMemsetAsync(resources_.token_counts.data, 0,
                                        resources_.token_counts.bytes(), cuda.stream()));
@@ -169,8 +171,9 @@ public:
             host.residency_slots[row]           = row;
         }
         const auto total = static_cast<std::int32_t>(segments * chunk);
-        for (std::uint32_t row = 0; row <= segments; ++row)
+        for (std::uint32_t row = 0; row <= segments; ++row) {
             frame.host_ingress->segment_offsets[row] = static_cast<std::int32_t>(row * chunk);
+        }
         const auto host = frame.host_input_view(total, 1);
         std::fill_n(static_cast<std::int32_t*>(host.ids.data), total, 0);
         auto* positions = static_cast<std::int32_t*>(host.cache_positions.data);
@@ -179,8 +182,9 @@ public:
             for (std::uint32_t column = 0; column < chunk; ++column) {
                 const auto index = row * chunk + column;
                 positions[index] = static_cast<std::int32_t>(column);
-                for (std::uint32_t axis = 0; axis < 3; ++axis)
+                for (std::uint32_t axis = 0; axis < 3; ++axis) {
                     rope[axis * total + index] = static_cast<std::int32_t>(column);
+                }
             }
         }
         const auto input = frame.input_view(total, 1);
@@ -197,8 +201,9 @@ public:
 
     void finish() {
         const auto cuda = device_.execution_view();
-        for (const auto offset : state_offsets_)
+        for (const auto offset : state_offsets_) {
             resources_.state_images.storage().clear(offset, cuda);
+        }
         if (resources_.token_counts.data) {
             CUDA_CHECK(cudaMemsetAsync(resources_.token_counts.data, 0,
                                        resources_.token_counts.bytes(), cuda.stream()));
@@ -209,10 +214,13 @@ public:
         };
         clear_table(resources_.decoder.text_kv);
         if (auto* backend = resources_.backend_kv()) clear_table(*backend);
-        for (std::uint32_t row = 0; row < resources_.state_images.staging_rows(); ++row)
+        for (std::uint32_t row = 0; row < resources_.state_images.staging_rows(); ++row) {
             resources_.state_images.storage().clear(resources_.state_images.staging_row(row), cuda);
+        }
         device_.synchronize();
-        for (const auto record : records_) pool_.release(record);
+        for (const auto record : records_) {
+            pool_.release(record);
+        }
         records_.clear();
     }
 
@@ -273,7 +281,9 @@ std::vector<GraphProfile> draft_graph_profiles(const GraphSpec& spec) {
         constexpr std::array ends{96U,   127U,   511U,   1023U,  2047U,   4095U,
                                   8191U, 16383U, 32767U, 65536U, 131072U, 196608U};
         auto profiles = profiles_through(spec.capacity, ends);
-        for (auto& profile : profiles) profile.topology_class = profile.max > 96 ? 1 : 0;
+        for (auto& profile : profiles) {
+            profile.topology_class = profile.max > 96 ? 1 : 0;
+        }
         return profiles;
     }
     return {};
@@ -448,8 +458,9 @@ void Graphs::prepare(Resources& resources, const execution::Parameters& paramete
             inputs.prepare(invocation(GraphPhase::Verify, batch, spec_.draft_window + 1,
                                       {0, spec_.capacity - 1, 0}, spec_.capacity));
             auto& frame = resources.frame();
-            for (std::uint32_t row = 0; row < batch; ++row)
+            for (std::uint32_t row = 0; row < batch; ++row) {
                 frame.host_commit->accepted_columns[row] = spec_.draft_window + 1;
+            }
             CUDA_CHECK(cudaMemcpyAsync(frame.commit.data, frame.host_commit_region.data,
                                        frame.commit.bytes, cudaMemcpyHostToDevice, device.stream()));
             resources.work().reset_peak();
@@ -539,7 +550,9 @@ std::vector<std::uint32_t> PrefillPlanCache::bucket_widths(std::uint32_t prefill
                                                            std::uint32_t pack_tokens,
                                                            std::uint32_t lanes) {
     auto widths = prefill_plan_segment_counts(prefill_chunk, pack_tokens, lanes);
-    for (auto& value : widths) value *= prefill_chunk;
+    for (auto& value : widths) {
+        value *= prefill_chunk;
+    }
     return widths;
 }
 

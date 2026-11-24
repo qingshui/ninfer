@@ -119,9 +119,10 @@ void Group::prepare(std::span<const CollectivePreparation> collectives,
     try {
         CUDA_CHECK(cudaMemsetAsync(source.data(), 0, source.size(), execution.stream()));
         CUDA_CHECK(cudaMemsetAsync(destination.data(), 0, destination.size(), execution.stream()));
-        for (const auto& op : collectives)
+        for (const auto& op : collectives) {
             enqueue(op.operation, source.data(), destination.data(), op.count, op.dtype,
                     op.reduction, op.root, execution);
+        }
         std::vector<PeerTransfer> transfers;
         std::size_t offset = 0;
         for (const auto& peer : peers) {
@@ -184,7 +185,9 @@ void Group::replayed(const CommunicationWork& work) const noexcept {
 std::vector<CommunicationStatistics> CommunicationContext::statistics() const {
     std::vector<CommunicationStatistics> result;
     result.reserve(groups_.size());
-    for (const auto& group : groups_) result.push_back(group->statistics());
+    for (const auto& group : groups_) {
+        result.push_back(group->statistics());
+    }
     return result;
 }
 
@@ -256,9 +259,10 @@ void Group::exchange(std::span<const PeerTransfer> transfers, CudaExecutionView 
     for (const auto& item : transfers) {
         if (item.peer >= p.size || item.peer == p.rank)
             throw std::invalid_argument("point-to-point peer must be another group member");
-        for (auto memory : {item.send, static_cast<ConstMemorySpan>(item.receive)})
+        for (auto memory : {item.send, static_cast<ConstMemorySpan>(item.receive)}) {
             if (memory.bytes && (!memory.data || memory.device != p.device))
                 throw std::invalid_argument("point-to-point buffer is not on the group device");
+        }
     }
     if (transfers.empty()) return;
     check_nccl(ncclGroupStart(), "NCCL group start");
@@ -300,8 +304,9 @@ void CommunicationContext::connect(const GroupDescription& description, RankId r
                                    std::span<const std::byte> unique,
                                    std::chrono::steady_clock::time_point deadline) {
     if (stop_->load()) throw std::logic_error("communication context has stopped");
-    for (const auto& g : groups_)
+    for (const auto& g : groups_) {
         if (g->id() == description.id) throw std::invalid_argument("duplicate communicator");
+    }
     auto impl              = std::make_unique<Group::Impl>();
     impl->id               = description.id;
     impl->rank             = description.index(rank);
@@ -327,8 +332,9 @@ void CommunicationContext::connect(const GroupDescription& description, RankId r
 }
 
 const Group& CommunicationContext::group(GroupId id) const {
-    for (const auto& g : groups_)
+    for (const auto& g : groups_) {
         if (g->id() == id) return *g;
+    }
     throw std::invalid_argument("group is not present on this rank");
 }
 

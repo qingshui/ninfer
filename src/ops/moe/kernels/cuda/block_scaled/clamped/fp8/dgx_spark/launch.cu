@@ -25,8 +25,9 @@ __global__ void quantize_input(const __nv_bfloat16* input, std::uint8_t* codes, 
     if (!live) return;
     if (routed_sum) {
         const int local_tid = tid % (kHidden / 4);
-        for (int row = local_tid; row < kHidden; row += kHidden / 4)
+        for (int row = local_tid; row < kHidden; row += kHidden / 4) {
             routed_sum[std::int64_t(token) * kHidden + row] = 0;
+        }
     }
     if (group < tokens * (kHidden / 128)) {
         const auto bits = load_vec<uint2>(input + std::int64_t(group) * 128 + lane * 4);

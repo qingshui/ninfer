@@ -26,7 +26,9 @@ struct ViewValidation {
         require(t.dtype == dtype && t.is_contiguous() &&
                     common::operand::aligned(t.data, alignment),
                 label);
-        for (int d = 0; d < 4; ++d) require(t.ne[d] == shape[d] && shape[d] > 0, label);
+        for (int d = 0; d < 4; ++d) {
+            require(t.ne[d] == shape[d] && shape[d] > 0, label);
+        }
     }
 
     bool overlap(const Tensor& a, const Tensor& b) const {

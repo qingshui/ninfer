@@ -69,9 +69,10 @@ void execute(const Tensor& x, const SingleProjectionWeight& qkv, const Tensor& w
     common::operand::shape(source.records.byte_offsets, {batch, 1, 1, 1}, op, "source offsets");
     if (valid.data)
         common::operand::tensor(valid, DType::I32, {batch}, 4, op, "valid columns", cuda.device());
-    for (const auto* t : {&out.query, &out.key, &out.value})
+    for (const auto* t : {&out.query, &out.key, &out.value}) {
         common::operand::tensor(*t, DType::BF16, {hidden, width, batch}, 16, op, "output",
                                 cuda.device());
+    }
     if (records.data) {
         common::operand::tensor(records, DType::BF16, {channels, width, batch}, 16, op,
                                 "conv records", cuda.device());
@@ -89,12 +90,14 @@ void execute(const Tensor& x, const SingleProjectionWeight& qkv, const Tensor& w
     for (std::size_t i = 0; i < std::size(outputs); ++i) {
         if (!outputs[i]->data) continue;
         const auto range = common::operand::range(*outputs[i], op);
-        for (std::size_t j = 0; j < i; ++j)
+        for (std::size_t j = 0; j < i; ++j) {
             if (outputs[j]->data)
                 common::operand::disjoint(range, common::operand::range(*outputs[j], op), op);
-        for (const auto* input : inputs)
+        }
+        for (const auto* input : inputs) {
             if (input->data)
                 common::operand::disjoint(range, common::operand::range(*input, op), op);
+        }
         common::operand::disjoint(range, common::operand::range(w.qdata, code_bytes, op), op);
         common::operand::disjoint(range, common::operand::range(w.scales, scale_bytes, op), op);
     }
@@ -102,12 +105,14 @@ void execute(const Tensor& x, const SingleProjectionWeight& qkv, const Tensor& w
     void* scratch_data = bytes ? workspace.alloc_bytes(bytes).data : nullptr;
     if (scratch_data) {
         const auto scratch = common::operand::range(scratch_data, bytes, op);
-        for (const auto* tensor : inputs)
+        for (const auto* tensor : inputs) {
             if (tensor->data)
                 common::operand::disjoint(scratch, common::operand::range(*tensor, op), op);
-        for (const auto* tensor : outputs)
+        }
+        for (const auto* tensor : outputs) {
             if (tensor->data)
                 common::operand::disjoint(scratch, common::operand::range(*tensor, op), op);
+        }
         common::operand::disjoint(scratch, common::operand::range(w.qdata, code_bytes, op), op);
         common::operand::disjoint(scratch, common::operand::range(w.scales, scale_bytes, op), op);
     }

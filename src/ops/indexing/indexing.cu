@@ -25,8 +25,9 @@ __global__ void scatter_kernel(const Unit* source, const Index* indices, Unit* d
     const auto source_base = column * source_stride;
     const auto destination_base =
         destination_index<Index, Unit>(indices[column], destination_stride);
-    for (int unit = threadIdx.x; unit < units; unit += blockDim.x)
+    for (int unit = threadIdx.x; unit < units; unit += blockDim.x) {
         destination[destination_base + unit] = source[source_base + unit];
+    }
 }
 
 inline constexpr int kScatterBatchThreads = 128;

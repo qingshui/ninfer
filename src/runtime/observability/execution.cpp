@@ -16,20 +16,23 @@ void accumulate_context_transfer(GenerationTransferTiming& timing,
 void merge_host_observations(RankHostStatistics& into, const RankHostStatistics& from) noexcept {
     for (auto field : {&RankHostStatistics::submit_ns, &RankHostStatistics::progress_ns,
                        &RankHostStatistics::supply_ns, &RankHostStatistics::commit_ns,
-                       &RankHostStatistics::discard_ns})
+                       &RankHostStatistics::discard_ns}) {
         if (into.*field < from.*field) into.*field = from.*field;
+    }
 }
 
 void merge_gpu_intervals(GpuExecutionObservation& into,
                          const GpuExecutionObservation& from) noexcept {
-    for (auto field : kGpuIntervalFields)
+    for (auto field : kGpuIntervalFields) {
         if (from.*field && (!(into.*field) || *(from.*field) > *(into.*field)))
             into.*field = from.*field;
+    }
 }
 
 void accumulate_gpu(GpuIntervalCounters& totals, const GpuExecutionObservation& value) noexcept {
-    for (std::size_t i = 0; i < kGpuIntervalCount; ++i)
+    for (std::size_t i = 0; i < kGpuIntervalCount; ++i) {
         if (value.*kGpuIntervalFields[i]) totals[i].observe(*(value.*kGpuIntervalFields[i]));
+    }
 }
 
 void ExecutionClock::start(ExecutionWork work, std::uint64_t now) noexcept {

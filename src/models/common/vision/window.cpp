@@ -66,8 +66,9 @@ std::shared_ptr<const WindowPlan> plan_window(std::span<const Unit> units, std::
             if (placement.rank != rank) continue;
             const auto& unit        = out->units[placement.unit];
             placement.feature_begin = cursor;
-            for (std::uint32_t i = 0; i < unit.features; ++i)
+            for (std::uint32_t i = 0; i < unit.features; ++i) {
                 block.token_positions.push_back(static_cast<std::int32_t>(unit.token_begin + i));
+            }
             cursor += unit.features;
         }
         if (!block.token_positions.empty()) out->outputs.push_back(std::move(block));
@@ -87,7 +88,9 @@ std::vector<EmbeddingSlice> embedding_slices(const WindowPlan& plan, std::uint32
         EmbeddingSlice slice;
         slice.source_begin = block.feature_begin + (first - block.token_positions.begin());
         slice.destination_columns.reserve(last - first);
-        for (auto it = first; it != last; ++it) slice.destination_columns.push_back(*it - begin);
+        for (auto it = first; it != last; ++it) {
+            slice.destination_columns.push_back(*it - begin);
+        }
         result.push_back(std::move(slice));
     }
     return result;

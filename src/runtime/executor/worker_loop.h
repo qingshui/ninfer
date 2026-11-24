@@ -41,8 +41,9 @@ public:
 private:
     bool advance_impl() {
         connection_.communication().check();
-        while (auto event = observe_host_call(host_.progress_ns, [&] { return program_.poll(); }))
+        while (auto event = observe_host_call(host_.progress_ns, [&] { return program_.poll(); })) {
             consume(std::move(*event));
+        }
         while (commands_.size() < 64) {
             auto message = connection_.poll();
             if (!message) break;
@@ -176,9 +177,11 @@ private:
     }
 
     bool active() const {
-        for (const auto* flights : {&compute_, &context_})
-            for (const auto& f : *flights)
+        for (const auto* flights : {&compute_, &context_}) {
+            for (const auto& f : *flights) {
                 if (f.phase != Phase::Empty) return true;
+            }
+        }
         return false;
     }
 
@@ -301,7 +304,9 @@ private:
                         if (flight.envelope.command != value.command ||
                             (flight.phase != Phase::Retiring && flight.phase != Phase::Discarding))
                             throw std::logic_error("worker retired an unresolved frame");
-                        for (auto sequence : flight.commands) completed_.at(sequence) = true;
+                        for (auto sequence : flight.commands) {
+                            completed_.at(sequence) = true;
+                        }
                         flight = {};
                     }
                 }

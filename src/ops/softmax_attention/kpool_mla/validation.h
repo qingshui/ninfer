@@ -46,10 +46,11 @@ inline std::size_t strided(const Tensor& t, DType type, std::array<int, 4> shape
     require(t.dtype == type && operand::aligned(t.data, dtype_size(type)), name);
     std::array<int, 3> outer{1, 2, 3};
     std::sort(outer.begin(), outer.end(), [&](int a, int b) { return t.nb[a] < t.nb[b]; });
-    for (int axis = 0; axis < 4; ++axis)
+    for (int axis = 0; axis < 4; ++axis) {
         require(t.ne[axis] == shape[axis] && t.ne[axis] > 0 && t.nb[axis] > 0 &&
                     t.nb[axis] % dtype_size(type) == 0,
                 name);
+    }
     require(t.nb[0] == std::int64_t(dtype_size(type)), name);
     std::size_t span = operand::bytes(shape[0], dtype_size(type), kOperation);
     for (int axis : outer) {

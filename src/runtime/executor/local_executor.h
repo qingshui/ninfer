@@ -216,7 +216,7 @@ public:
     [[nodiscard]] bool has_pending_work() const noexcept override { return pool_.busy(); }
 
     void observe_in_flight(std::vector<ExecutionProgress>& out) const override {
-        for (const auto* flights : {&compute_, &context_})
+        for (const auto* flights : {&compute_, &context_}) {
             for (const auto& flight : *flights) {
                 if (flight.phase == Phase::Empty) continue;
                 const auto stage = flight.phase == Phase::Decision     ? ExecutionStage::Decision
@@ -226,6 +226,7 @@ public:
                                                                        : ExecutionStage::Submitted;
                 out.push_back(flight.clock.progress(flight.ticket.id, stage));
             }
+        }
     }
 
     void measure(MeasurementCommand command) override {

@@ -964,9 +964,10 @@ void apply_anthropic_prompt_cache_policy(const Json& body, GenerationRequest& re
         }
     }
     for (ChatTurn& turn : request.messages) {
-        for (auto& boundary : turn.content_boundaries)
+        for (auto& boundary : turn.content_boundaries) {
             if (boundary.cache_boundary_after)
                 explicit_boundaries.push_back(&boundary.cache_boundary_after);
+        }
         for (ContentPart& part : turn.content) {
             if (part.cache_boundary_after) {
                 explicit_boundaries.push_back(&part.cache_boundary_after);

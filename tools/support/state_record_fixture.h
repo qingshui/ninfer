@@ -37,8 +37,9 @@ public:
     record_offsets(std::span<const std::int32_t> records) const {
         std::vector<std::int64_t> result;
         result.reserve(records.size());
-        for (const auto record : records)
+        for (const auto record : records) {
             result.push_back(record < 0 ? kInvalidRecordOffset : byte_offset(record));
+        }
         return result;
     }
 

@@ -16,8 +16,9 @@ SessionImpl::SessionImpl(std::shared_ptr<const ModelDefinition> model, SessionPl
         count_builder.prepare(definition->resources().text.public_token_count);
     }
     releases.reserve(shape.max_concurrency);
-    for (std::uint16_t i = 0; i < pool_count(); ++i)
+    for (std::uint16_t i = 0; i < pool_count(); ++i) {
         pools.push_back({{i}, i == 0 ? "main" : "mtp"});
+    }
 }
 
 SessionImpl::~SessionImpl() { cleanup(); }
@@ -31,8 +32,9 @@ bool SessionImpl::valid(SequenceHandle handle) const noexcept {
 }
 
 Sequence& SessionImpl::sequence(SequenceHandle handle) const {
-    for (const auto& s : sequences)
+    for (const auto& s : sequences) {
         if (s && s->id == handle.value && s->epoch == handle.generation) return *s;
+    }
     throw std::logic_error("stale Qwen4Exp sequence");
 }
 
@@ -44,20 +46,22 @@ runtime::ExecutionMember SessionImpl::member(const Sequence& s) const {
 
 StateBindings SessionImpl::selectors(const Sequence& s) const {
     StateBindings bindings;
-    for (const auto rank : directory.states().ranks())
+    for (const auto rank : directory.states().ranks()) {
         bindings.emplace(rank, directory.states().selectors(s.continuation.image,
                                                             s.write_destination.valid()
                                                                 ? s.write_destination
                                                                 : s.continuation.image,
                                                             rank));
+    }
     return bindings;
 }
 
 ContextActions SessionImpl::actions(const context::ContextTransaction& transaction) const {
     ContextActions actions;
-    for (const auto& rank : plan.context.ranks)
+    for (const auto& rank : plan.context.ranks) {
         if (!transaction.actions(rank.rank).empty())
             actions.emplace(rank.rank, transaction.actions(rank.rank));
+    }
     return actions;
 }
 
@@ -108,7 +112,9 @@ void SessionImpl::clear(Sequence& s) noexcept {
     try {
         release_residency(member(s).residency);
         s.capture.reset();
-        for (auto& history : s.histories) history.reset();
+        for (auto& history : s.histories) {
+            history.reset();
+        }
         auto& states = directory.states();
         if (s.write_destination.valid()) {
             states.abort_write(s.continuation.image, s.write_destination);
@@ -155,11 +161,12 @@ void SessionImpl::cleanup() noexcept {
 std::uint32_t SessionImpl::window_end(const Sequence& s, std::uint32_t begin,
                                       std::uint32_t end) const {
     end = std::min(end, begin + shape.prefill_chunk);
-    for (const auto frontier : s.identity.positions.execution_frontiers())
+    for (const auto frontier : s.identity.positions.execution_frontiers()) {
         if (frontier > begin) {
             end = std::min(end, frontier);
             break;
         }
+    }
     if (s.capture && s.next_capture < s.captures.size())
         end = std::min(end, s.captures[s.next_capture].frontier);
     if (s.request->vision && begin < s.request->summary.prompt_tokens && begin < end)
@@ -235,14 +242,17 @@ WorkRow SessionImpl::work_row(const Sequence& s, std::uint32_t tokens) const {
     };
     for (std::uint32_t axis = 0; axis < 3; ++axis) {
         row.previous_rope[axis] = start ? position(start - 1, axis) : 0;
-        for (std::uint32_t j = 0; j < tokens; ++j)
+        for (std::uint32_t j = 0; j < tokens; ++j) {
             row.rope_positions[axis * tokens + j] = position(start + j, axis);
+        }
     }
     bool linear = true;
-    for (std::uint32_t axis = 0; axis < 3; ++axis)
-        for (std::uint32_t j = 0; j < tokens; ++j)
+    for (std::uint32_t axis = 0; axis < 3; ++axis) {
+        for (std::uint32_t j = 0; j < tokens; ++j) {
             linear &= row.rope_positions[axis * tokens + j] ==
                       static_cast<std::int32_t>(start + j) + m.rope_delta;
+        }
+    }
     if (linear) row.rope_positions.clear();
     return row;
 }
@@ -271,10 +281,11 @@ ContinuationMetadata SessionImpl::prepare_commit(Sequence& s, const WorkRow& row
         if (pool_count() > 1) metadata.mtp_frontier = mtp_history_frontier(metadata.main_frontier);
     }
     const auto peak = retain_recovery ? s.recovery_peak : 0;
-    for (std::uint32_t i = 0; i < pool_count(); ++i)
+    for (std::uint32_t i = 0; i < pool_count(); ++i) {
         directory.pool(i).histories().prepare_commit(
             s.histories[i], i ? *metadata.mtp_frontier : metadata.main_frontier,
             i ? mtp_history_frontier(peak) : peak, transaction);
+    }
     return metadata;
 }
 

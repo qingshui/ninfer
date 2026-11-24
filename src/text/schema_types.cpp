@@ -117,7 +117,9 @@ TypeDomain domain(const Json& node, const Json& document, std::set<const Json*> 
     if (node.contains("const")) result.intersect({value_type(node["const"]), true});
     if (node.contains("enum") && node["enum"].is_array()) {
         std::uint8_t values = 0;
-        for (const auto& item : node["enum"]) values |= value_type(item);
+        for (const auto& item : node["enum"]) {
+            values |= value_type(item);
+        }
         result.intersect({values, true});
     }
     for (const char* key : {"anyOf", "oneOf"}) {
@@ -131,7 +133,9 @@ TypeDomain domain(const Json& node, const Json& document, std::set<const Json*> 
         result.intersect(combined);
     }
     if (node.contains("allOf") && node["allOf"].is_array())
-        for (const auto& branch : node["allOf"]) result.intersect(domain(branch, document, seen));
+        for (const auto& branch : node["allOf"]) {
+            result.intersect(domain(branch, document, seen));
+        }
     return result;
 }
 

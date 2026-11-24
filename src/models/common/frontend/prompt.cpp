@@ -87,9 +87,10 @@ prepare_context_cache(const ContextCacheHints& hints,
         else if (kind == PromptCacheMarkerKind::SharedStablePrefix)
             same->evidence |= evidence;
     };
-    for (std::size_t i = 0; i < marker_frontiers.size(); ++i)
+    for (std::size_t i = 0; i < marker_frontiers.size(); ++i) {
         if (marker_frontiers[i])
             add(hints.markers[i].kind, hints.markers[i].evidence, *marker_frontiers[i], i);
+    }
     if (result.automatic_checkpoints) {
         result.semantic_boundaries.assign(semantic_frontiers.begin(), semantic_frontiers.end());
         std::erase(result.semantic_boundaries, 0);
@@ -98,9 +99,10 @@ prepare_context_cache(const ContextCacheHints& hints,
             std::unique(result.semantic_boundaries.begin(), result.semantic_boundaries.end()),
             result.semantic_boundaries.end());
         auto order = static_cast<std::uint32_t>(hints.markers.size());
-        for (const auto frontier : structural_frontiers)
+        for (const auto frontier : structural_frontiers) {
             add(PromptCacheMarkerKind::SharedStablePrefix,
                 SharedCandidateEvidence::EngineStructural, frontier, order++);
+        }
     }
     return result;
 }

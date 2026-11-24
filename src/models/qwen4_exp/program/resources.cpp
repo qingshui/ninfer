@@ -42,7 +42,9 @@ Resources::Resources(const execution::Parameters& p, ExecutionPlan input, Device
     if (plan.persistent.mtp)
         mtp = std::make_unique<QsaCache>(context_.span(), backing, *plan.persistent.mtp);
     std::vector<context::ContextTableStorage> pools;
-    for (std::uint32_t i = 0; i < pool_count(); ++i) pools.push_back({i, &pool(i).tables()});
+    for (std::uint32_t i = 0; i < pool_count(); ++i) {
+        pools.push_back({i, &pool(i).tables()});
+    }
     context = std::make_unique<context::ContextStorage>(context_.span(), host_context_.span(),
                                                         pools, p.profile->local.rank);
     const auto mapping_elements = plan.pinned_context_bytes() / 2 / sizeof(std::int64_t);
@@ -56,7 +58,9 @@ Resources::Resources(const execution::Parameters& p, ExecutionPlan input, Device
     }
     if (plan.moe) {
         std::vector<const moe::Parameters*> layers;
-        for (const auto& layer : p.text.layers) layers.push_back(&layer.moe);
+        for (const auto& layer : p.text.layers) {
+            layers.push_back(&layer.moe);
+        }
         experts = plan.moe->create(layers, p.model.expert_banks(), device,
                                    plan.graph_probe ? moe::ResourcePurpose::GraphCalibration
                                                     : moe::ResourcePurpose::Execution);
@@ -75,7 +79,9 @@ Resources::Resources(const execution::Parameters& p, ExecutionPlan input, Device
         const auto& qsa  = plan.profile->config.text.qsa;
         std::vector<std::int64_t> offsets(plan.shape.max_concurrency);
         const auto upload_offsets = [&](const TensorRegion& target, std::size_t stride) {
-            for (std::size_t row = 0; row < offsets.size(); ++row) offsets[row] = row * stride;
+            for (std::size_t row = 0; row < offsets.size(); ++row) {
+                offsets[row] = row * stride;
+            }
             copy_bytes(target.region.bind(backing),
                        {offsets.data(), offsets.size() * sizeof(offsets.front()), Device::cpu()},
                        device.execution_view());
@@ -89,7 +95,9 @@ Resources::Resources(const execution::Parameters& p, ExecutionPlan input, Device
             cudaMemsetAsync(counts->bind(backing).data, 0, counts->region.bytes, device.stream()));
     if (const auto& raw = plan.persistent.buffers.proposal_sampling) {
         std::vector<ops::SamplingConfig> configs(plan.shape.max_concurrency);
-        for (auto& config : configs) config.temperature = 0;
+        for (auto& config : configs) {
+            config.temperature = 0;
+        }
         copy_bytes(raw->region.bind(backing),
                    {configs.data(), configs.size() * sizeof(configs.front()), Device::cpu()},
                    device.execution_view());
@@ -147,7 +155,9 @@ Tensor Resources::tensor(const TensorRegion& region) { return region.bind(persis
 
 Tensor Resources::packed(const TensorRegion& region, std::initializer_list<std::int32_t> shape) {
     std::int32_t count = 1;
-    for (const auto n : shape) count *= n;
+    for (const auto n : shape) {
+        count *= n;
+    }
     auto value = tensor(region);
     return value.view({static_cast<std::int32_t>(value.numel())}).slice(0, 0, count).view(shape);
 }

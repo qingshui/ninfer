@@ -24,8 +24,9 @@ inline void validate_projection_operands(const Tensor& x, const Weight& w,
         operand::disjoint(range, operand::range(x, op), op);
         if (w.payload) operand::disjoint(range, operand::range(w.payload, w.payload_bytes, op), op);
         if (bias) operand::disjoint(range, operand::range(*bias, op), op);
-        for (std::size_t j = 0; j < i; ++j)
+        for (std::size_t j = 0; j < i; ++j) {
             operand::disjoint(range, operand::range(outputs[j], op), op);
+        }
     }
 }
 
@@ -40,9 +41,10 @@ inline void validate_bf16_projection(const Tensor& x, const Weight& w,
         !operand::aligned(w.qdata, 16))
         throw std::invalid_argument(std::string(op) + ": invalid contiguous BF16 weight");
     validate_projection_operands(x, w, outputs, bias, execution, op);
-    for (const auto& out : outputs)
+    for (const auto& out : outputs) {
         operand::disjoint(operand::range(out, op),
                           operand::range(w.qdata, std::size_t(w.n) * w.k * 2, op), op);
+    }
 }
 
 inline void validate_projection_scratch(const Tensor& x, const Weight& weight,
@@ -54,7 +56,9 @@ inline void validate_projection_scratch(const Tensor& x, const Weight& weight,
     operand::disjoint(range, operand::range(x, op), op);
     operand::disjoint(range, operand::range(weight.payload, weight.payload_bytes, op), op);
     if (bias) operand::disjoint(range, operand::range(*bias, op), op);
-    for (const auto& output : outputs) operand::disjoint(range, operand::range(output, op), op);
+    for (const auto& output : outputs) {
+        operand::disjoint(range, operand::range(output, op), op);
+    }
 }
 
 } // namespace ninfer::ops::detail

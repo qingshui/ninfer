@@ -118,7 +118,9 @@ void validate_cpu_affinity(const CpuTopologyInfo& topology, std::span<const std:
 void bind_current_thread(const CpuTopology& topology, std::span<const std::uint32_t> cpus) {
     validate_cpu_affinity(topology.info(), cpus);
     Bitmap requested;
-    for (const auto cpu : cpus) hwloc_bitmap_set(requested.value, cpu);
+    for (const auto cpu : cpus) {
+        hwloc_bitmap_set(requested.value, cpu);
+    }
     check(hwloc_set_cpubind(topology.impl_->topology, requested.value,
                             HWLOC_CPUBIND_THREAD | HWLOC_CPUBIND_STRICT),
           "bind CPU thread");
@@ -214,8 +216,9 @@ std::vector<std::thread> cpu_detail::start_workers(std::uint32_t count,
 }
 
 void cpu_detail::join_workers(std::span<std::thread> workers) noexcept {
-    for (auto& worker : workers)
+    for (auto& worker : workers) {
         if (worker.joinable()) worker.join();
+    }
 }
 
 } // namespace ninfer

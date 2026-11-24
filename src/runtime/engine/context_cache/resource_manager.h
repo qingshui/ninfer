@@ -1323,14 +1323,20 @@ private:
                                     : age > prior.age)))
                 prior = {handle, priority, age, prior.evidence, metadata.frontier};
         };
-        for (const auto& owner : owners_)
-            for (const auto& point : owner.points)
+        for (const auto& owner : owners_) {
+            for (const auto& point : owner.points) {
                 add(point.handle, owner.priority.at(request_epoch_), owner.retained_at);
-        for (const auto& shared : shared_)
+            }
+        }
+        for (const auto& shared : shared_) {
             add(shared.handle, shared.priority.at(request_epoch_), shared.retained_at,
                 shared.evidence);
-        for (const auto& waiting : waiting_)
-            for (const auto handle : waiting.held) add(handle, {}, waiting.request);
+        }
+        for (const auto& waiting : waiting_) {
+            for (const auto handle : waiting.held) {
+                add(handle, {}, waiting.request);
+            }
+        }
         std::stable_sort(ranked.begin(), ranked.end(), [](const auto& a, const auto& b) {
             if (a.priority.reused() != b.priority.reused()) return !a.priority.reused();
             return (a.priority.reused() ? a.priority.last_demand : a.age) <
@@ -1344,11 +1350,19 @@ private:
         const auto add = [&](Handle h) {
             if (session.valid_checkpoint(h)) result[h.index] = true;
         };
-        for (const auto& owner : owners_)
-            for (const auto& point : owner.points) add(point.handle);
-        for (const auto& shared : shared_) add(shared.handle);
-        for (const auto& waiting : waiting_)
-            for (const auto h : waiting.held) add(h);
+        for (const auto& owner : owners_) {
+            for (const auto& point : owner.points) {
+                add(point.handle);
+            }
+        }
+        for (const auto& shared : shared_) {
+            add(shared.handle);
+        }
+        for (const auto& waiting : waiting_) {
+            for (const auto h : waiting.held) {
+                add(h);
+            }
+        }
         return result;
     }
 
@@ -1368,7 +1382,9 @@ private:
                 {owner.token, owner.priority.at(request_epoch_), owner.proven_frontier, {}});
             auto& protection = cursor.owners.back();
             protection.points.reserve(owner.points.size());
-            for (const auto& point : owner.points) protection.points.push_back(point.handle);
+            for (const auto& point : owner.points) {
+                protection.points.push_back(point.handle);
+            }
         }
         return cursor;
     }
@@ -1513,7 +1529,9 @@ private:
                 entry.order = i;
             }
             std::unordered_map<OwnerToken, const Owner*> owners;
-            for (const auto& owner : owners_) owners.emplace(owner.token, &owner);
+            for (const auto& owner : owners_) {
+                owners.emplace(owner.token, &owner);
+            }
             for (std::uint32_t i = 0; i < cursor.owners.size(); ++i) {
                 const auto& proof = cursor.owners[i];
                 const auto found  = owners.find(proof.owner);
@@ -1655,10 +1673,11 @@ private:
             });
         if (found == evaluation.incoming.end()) {
             typename Evaluation::Incoming item{admission.base, admission.frontier, {}};
-            for (const auto handle : retained(session, evaluation))
+            for (const auto handle : retained(session, evaluation)) {
                 if (session.checkpoint_recovery_frontier(handle, *admission.base,
                                                          admission.frontier))
                     item.candidates.push_back(handle);
+            }
             auto& index = recovery(session, evaluation);
             std::sort(item.candidates.begin(), item.candidates.end(),
                       [&](auto a, auto b) { return index.frontier(a) > index.frontier(b); });

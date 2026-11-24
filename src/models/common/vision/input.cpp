@@ -83,7 +83,9 @@ void encode_window(distributed::wire::Encoder& out, const WindowUse& use) {
         out.u32(b.rank);
         out.u32(b.feature_begin);
         out.u64(b.token_positions.size());
-        for (auto p : b.token_positions) out.i32(p);
+        for (auto p : b.token_positions) {
+            out.i32(p);
+        }
     }
 }
 
@@ -106,13 +108,17 @@ WindowUse decode_window(distributed::wire::Decoder& in) {
         u.cost        = in.u64();
     }
     plan->placements.resize(in.count(12));
-    for (auto& p : plan->placements) p = {in.u32(), in.u32(), in.u32()};
+    for (auto& p : plan->placements) {
+        p = {in.u32(), in.u32(), in.u32()};
+    }
     plan->outputs.resize(in.count(16));
     for (auto& b : plan->outputs) {
         b.rank          = in.u32();
         b.feature_begin = in.u32();
         b.token_positions.resize(in.count(4));
-        for (auto& p : b.token_positions) p = in.i32();
+        for (auto& p : b.token_positions) {
+            p = in.i32();
+        }
     }
     use.plan    = std::move(plan);
     use.produce = true;

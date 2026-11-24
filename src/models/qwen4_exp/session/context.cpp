@@ -54,8 +54,9 @@ std::uint32_t Session::checkpoint_recovery_frontier(CheckpointHandle h, const Re
 
 std::vector<PlacementDescriptor> Session::placement_descriptions() const {
     PlacementDescriptor placement;
-    for (const auto& rank : impl_->plan.context.ranks)
+    for (const auto& rank : impl_->plan.context.ranks) {
         placement.attention_ranks.push_back(rank.rank);
+    }
     return {std::move(placement)};
 }
 
@@ -113,12 +114,13 @@ Session::inspect_source(const RequestBasePlan& base, std::optional<CheckpointHan
     if (out.reused_tokens > end) return {};
     out.remaining_work = runtime::make_prefill_work(out.reused_tokens, end - out.reused_tokens, 0,
                                                     0, p.shape.prefill_chunk);
-    for (const auto& item : base.plan_->prompt.vision_items)
+    for (const auto& item : base.plan_->prompt.vision_items) {
         if (item.token_spans.back().begin + item.token_spans.back().count > out.reused_tokens &&
             item.token_spans.front().begin < end) {
             ++out.remaining_work.vision_items;
             out.remaining_work.vision_patches += item.patch_count;
         }
+    }
     if (const auto& vision = base.plan_->vision) {
         out.remaining_work.chunks = 0;
         const vision::Window available;
@@ -142,12 +144,14 @@ Session::inspect_source(const RequestBasePlan& base, std::optional<CheckpointHan
                 return transfer.direction == runtime::ContextTransferDirection::HostToDevice;
             });
     }
-    for (const auto point : carried)
+    for (const auto point : carried) {
         if ((!h || point != *h || !out.consume_source) && p.source_matches(base, point, resume) &&
             p.checkpoints.at(point).frontier() <= out.reused_tokens)
             out.private_points.push_back(point);
-    for (const auto point : retired)
+    }
+    for (const auto point : retired) {
         if ((!h || point != *h) && valid_checkpoint(point)) out.retired_points.push_back(point);
+    }
     return out;
 }
 
@@ -205,12 +209,14 @@ detail::SessionImpl::plan_binding(const RequestBasePlan& base, runtime::LaneId l
             return plan;
         }
         plan.retired.push_back(point);
-        for (std::uint16_t pool = 0; pool < directory.pool_count(); ++pool)
+        for (std::uint16_t pool = 0; pool < directory.pool_count(); ++pool) {
             retired_prefixes[pool].push_back(&checkpoints.at(point).snapshot.prefix(pool));
+        }
     }
     if (consume)
-        for (std::uint16_t pool = 0; pool < directory.pool_count(); ++pool)
+        for (std::uint16_t pool = 0; pool < directory.pool_count(); ++pool) {
             retired_prefixes[pool].push_back(&checkpoint->snapshot.prefix(pool));
+        }
     auto& action          = plan.action;
     action.lane           = lane.value;
     action.frontier       = frontier;
@@ -378,8 +384,9 @@ ContextProgress detail::SessionImpl::complete_context() {
                     .target_frontier = tx->target,
                 };
             }
-            for (std::uint16_t pool = 0; pool < p.directory.pool_count(); ++pool)
+            for (std::uint16_t pool = 0; pool < p.directory.pool_count(); ++pool) {
                 s.histories[pool] = migration.binding(pool)->commit();
+            }
             using StateAction = detail::StateBindingAction;
             if (tx->state_action == StateAction::Move) {
                 const auto source    = *tx->source;
@@ -502,7 +509,7 @@ ResourceReservation detail::SessionImpl::reserve_units(std::span<const Execution
     }
     auto result = p.directory.reserve(demand);
     if (!result || !result.reservation->ready()) return {.assessment = result.assessment};
-    for (auto& need : needed)
+    for (auto& need : needed) {
         for (std::uint32_t pool = 0; pool < p.pool_count(); ++pool) {
             need.prepared[pool] = result.reservation->take(need.targets[pool]);
             if (need.additional[pool]) {
@@ -510,12 +517,14 @@ ResourceReservation detail::SessionImpl::reserve_units(std::span<const Execution
                     need.sequence->histories[pool].handle(), need.prepared[pool]);
             }
         }
+    }
     for (std::size_t i = 0; i < units.size(); ++i) {
         auto& sequence = *needed[i].sequence;
-        for (std::uint32_t pool = 0; pool < p.pool_count(); ++pool)
+        for (std::uint32_t pool = 0; pool < p.pool_count(); ++pool) {
             if (needed[i].additional[pool])
                 p.directory.pool(pool).histories().adopt_growth(
                     sequence.histories[pool].handle(), std::move(needed[i].prepared[pool]));
+        }
         sequence.permit             = units[i];
         sequence.permitted_frontier = needed[i].end;
     }
@@ -528,8 +537,9 @@ ResourceReservation Session::reserve_units(std::span<const ExecutionUnit> units)
 
 void Session::release_units(std::span<const SequenceHandle> handles) noexcept {
     try {
-        for (const auto h : handles)
+        for (const auto h : handles) {
             if (impl_->valid(h) && !execution_pending(h)) impl_->settle(impl_->sequence(h));
+        }
     } catch (...) { std::terminate(); }
 }
 

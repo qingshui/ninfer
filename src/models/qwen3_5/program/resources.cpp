@@ -59,8 +59,9 @@ ResourceLayout plan_resources(const ResourceSpec& spec) {
              dimension(spec.frame.batch_capacity)},
             kAlignment, "DFlash residency target features");
     }
-    for (std::uint32_t frame = 0; frame < spec.compute_frames; ++frame)
+    for (std::uint32_t frame = 0; frame < spec.compute_frames; ++frame) {
         out.frames.push_back(plan_frames(builder, spec.frame));
+    }
     if (!spec.frame.causal_scoring) {
         out.token_counts = builder.add_tensor(
             DType::I32, {spec.frame.public_tokens, dimension(spec.frame.batch_capacity)},
@@ -97,7 +98,9 @@ std::size_t ResourceLayout::pinned_bytes() const {
                                            sizeof(std::int32_t)
                                      : 0;
     std::size_t frame_bytes = 0;
-    for (const auto& frame : frames) frame_bytes += frame.host.bytes;
+    for (const auto& frame : frames) {
+        frame_bytes += frame.host.bytes;
+    }
     return frame_bytes + 2 * mapping + counts;
 }
 
@@ -150,9 +153,10 @@ Resources::Resources(DeviceContext& device, const ResourceLayout& layout,
     }
     // Every compute frame gets its own frame region and workspace: a flight reads and writes only
     // the frame of its ticket, so no table or plane is shared between flights in flight.
-    for (const auto& frame_layout : layout.frames)
+    for (const auto& frame_layout : layout.frames) {
         frames.push_back(std::make_unique<ComputeFrameResources>(
             device, persistent.span(), frame_layout, workspace, state_images.scratch_row()));
+    }
     if (layout.host_context_bytes) {
         StartupPhaseScope phase(observer, StartupPhase::HostContextPin, StartupProgressUnit::Bytes,
                                 layout.host_context_bytes);
@@ -160,8 +164,9 @@ Resources::Resources(DeviceContext& device, const ResourceLayout& layout,
         phase.complete(layout.host_context_bytes, layout.host_context_bytes);
     }
     if (workspace.vision) vision.emplace(device, *workspace.vision);
-    for (std::uint32_t row = 0; row < state_images.staging_rows(); ++row)
+    for (std::uint32_t row = 0; row < state_images.staging_rows(); ++row) {
         state_images.storage().clear(state_images.staging_row(row), device.execution_view());
+    }
     const auto backing = persistent.span();
     if (layout.replay_records) {
         replay_records.emplace(backing, *layout.replay_records);

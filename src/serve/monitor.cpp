@@ -27,9 +27,10 @@ void HttpServer::register_monitor_routes() {
         auto options            = options_;
         options.launch.engine   = service_->engine_options();
         // configuration_view owns normalized presentation and credential redaction.
-        for (const auto& item : product::configuration_view(options).items)
+        for (const auto& item : product::configuration_view(options).items) {
             out["configuration"][item.key] =
                 std::visit([](const auto& value) { return Json(value); }, item.value);
+        }
         out["model"] = {
             {"id", public_model_id_},
             {"architecture", description.architecture},
@@ -40,7 +41,7 @@ void HttpServer::register_monitor_routes() {
             {"kv_cache", kv_cache_profile_info(description.kv_cache).name},
             {"context_token_capacity_estimate", description.context_token_capacity_estimate}};
         out["ranks"] = Json::array();
-        for (const auto& r : description.ranks)
+        for (const auto& r : description.ranks) {
             out["ranks"].push_back({{"rank", r.rank},
                                     {"node", r.node},
                                     {"device", r.device},
@@ -51,9 +52,11 @@ void HttpServer::register_monitor_routes() {
                                     {"dp", coordinate(r.dp)},
                                     {"pp", coordinate(r.pp)},
                                     {"adp", coordinate(r.adp)}});
+        }
         out["placements"] = Json::array();
-        for (const auto& p : description.placements)
+        for (const auto& p : description.placements) {
             out["placements"].push_back({{"id", p.id}, {"attention_ranks", p.attention_ranks}});
+        }
         out["resources"] = product::startup_resources_json(description, service_->startup_report(),
                                                            service_->snapshot());
         res.set_header("Cache-Control", "no-store");

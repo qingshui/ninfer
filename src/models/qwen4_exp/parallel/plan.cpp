@@ -33,8 +33,9 @@ RankPlan rank_plan(const ModelDefinition& definition, std::uint32_t size, std::u
         } else {
             const auto priority = layer < w.text.layers.size() ? default_expert_priority(c, layer)
                                                                : std::span<const std::uint32_t>{};
-            for (std::uint32_t index = rank; index < c.moe.experts; index += ep_size)
+            for (std::uint32_t index = rank; index < c.moe.experts; index += ep_size) {
                 bank.ids.push_back(priority.empty() ? index : priority[index]);
+            }
             std::sort(bank.ids.begin(), bank.ids.end());
         }
     }
@@ -104,7 +105,9 @@ RankPlan rank_plan(const ModelDefinition& definition, std::uint32_t size, std::u
         rows({{m.shared_gate, true}, {m.shared_up, true}});
         columns(m.shared_down);
     };
-    for (const auto& b : w.text.layers) block(b, false);
+    for (const auto& b : w.text.layers) {
+        block(b, false);
+    }
     rows({{w.text.head, true}});
     if (w.mtp) {
         block(w.mtp->layer, true);
@@ -129,8 +132,9 @@ ParallelPlan plan_parallel(const ModelDefinition& definition, const DeploymentOp
     for (const auto& r : deployment.ranks) {
         out.ranks.push_back(rank_plan(definition, size, r.rank, o.ep));
         std::uint32_t local = 0;
-        for (const auto& other : deployment.ranks)
+        for (const auto& other : deployment.ranks) {
             if (other.node == r.node && other.rank < r.rank) ++local;
+        }
         out.topology.ranks.push_back({r.rank,
                                       r.node,
                                       local,
@@ -151,7 +155,9 @@ ParallelPlan plan_parallel(const ModelDefinition& definition, const DeploymentOp
             identity *= 1099511628211ULL;
         }
     };
-    for (const auto byte : definition.artifact_id()) mix(std::to_integer<unsigned>(byte));
+    for (const auto byte : definition.artifact_id()) {
+        mix(std::to_integer<unsigned>(byte));
+    }
     mix(size);
     mix(o.ep);
     mix(definition.options().vision);
@@ -164,10 +170,14 @@ ParallelPlan plan_parallel(const ModelDefinition& definition, const DeploymentOp
         for (const auto& bank : rank.experts) {
             mix(bank.intermediate.begin);
             mix(bank.intermediate.size);
-            for (auto expert : bank.ids) mix(expert);
+            for (auto expert : bank.ids) {
+                mix(expert);
+            }
         }
         for (const auto& a : rank.assemblies) {
-            for (auto dimension : a.shape) mix(dimension);
+            for (auto dimension : a.shape) {
+                mix(dimension);
+            }
             for (const auto& s : a.slices) {
                 mix(s.parameter.index);
                 mix(s.row);

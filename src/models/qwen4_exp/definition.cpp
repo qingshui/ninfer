@@ -86,9 +86,10 @@ std::shared_ptr<const ModelDefinition> read_definition(const artifact::Reader& r
         {c.ple.ngram_size, c.ple.heads_per_ngram});
     if (lookup.shards.size() != c.ple.shards)
         throw artifact::ArtifactError("PLE table shard count differs from config");
-    for (const auto& shard : lookup.shards)
+    for (const auto& shard : lookup.shards) {
         if (shard.geometry.shape[0] != c.ple.rows_per_shard)
             throw artifact::ArtifactError("PLE shard rows differ from config");
+    }
     out->ple        = std::move(lookup);
     const auto bank = [&](MoeWeights& w) {
         w.bank = {static_cast<std::uint32_t>(out->banks.size())};
@@ -96,7 +97,9 @@ std::shared_ptr<const ModelDefinition> read_definition(const artifact::Reader& r
             reader, moe::ExpertBinding{b.at(w.gate).reference, b.at(w.up).reference,
                                        b.at(w.down).reference}));
     };
-    for (auto& layer : out->weights.text.layers) bank(layer.moe);
+    for (auto& layer : out->weights.text.layers) {
+        bank(layer.moe);
+    }
     if (out->weights.mtp) bank(out->weights.mtp->layer.moe);
     auto pending            = std::move(b.weights);
     out->prepared_resources = std::move(binder).finish();
@@ -121,8 +124,9 @@ std::shared_ptr<const ModelDefinition> read_definition(const artifact::Reader& r
     stats.read_bytes               = out->prepared_resources.read_bytes;
     stats.owned_value_bytes        = out->prepared_resources.owned_value_bytes;
     stats.host_object_count        = out->prepared_resources.objects.size();
-    for (const auto& resource : out->prepared_resources.objects)
+    for (const auto& resource : out->prepared_resources.objects) {
         stats.retained_host_bytes += resource.data.size();
+    }
     stats.read_bytes += sizeof(float) * out->ple.shards.size();
     return std::shared_ptr<const ModelDefinition>(new ModelDefinition(std::move(out)));
 }

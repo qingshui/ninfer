@@ -91,13 +91,17 @@ void row(Encoder& out, const WorkRow& r, std::uint32_t rank) {
     out.u32(r.main_frontier);
     out.u32(r.mtp_frontier);
     out.i32(r.rope_delta);
-    for (auto value : r.ple_raw_tail) out.i32(value);
+    for (auto value : r.ple_raw_tail) {
+        out.i32(value);
+    }
     integers(out, r.ids);
     out.boolean(r.control_last_token.has_value());
     if (r.control_last_token) out.i32(*r.control_last_token);
     integers(out, r.window_ends);
     integers(out, r.rope_positions);
-    for (auto value : r.previous_rope) out.i32(value);
+    for (auto value : r.previous_rope) {
+        out.i32(value);
+    }
     sampling(out, r.sampling);
     out.u32(r.sampling_position);
     out.boolean(r.constrained);
@@ -112,12 +116,16 @@ WorkRow row(Decoder& in, std::uint32_t rank) {
     r.main_frontier = in.u32();
     r.mtp_frontier  = in.u32();
     r.rope_delta    = in.i32();
-    for (auto& value : r.ple_raw_tail) value = in.i32();
+    for (auto& value : r.ple_raw_tail) {
+        value = in.i32();
+    }
     r.ids = integers<TokenId>(in);
     if (in.boolean()) r.control_last_token = in.i32();
     r.window_ends    = integers<std::uint32_t>(in);
     r.rope_positions = integers<std::int32_t>(in);
-    for (auto& value : r.previous_rope) value = in.i32();
+    for (auto& value : r.previous_rope) {
+        value = in.i32();
+    }
     r.sampling          = sampling(in);
     r.sampling_position = in.u32();
     r.constrained       = in.boolean();
@@ -126,12 +134,16 @@ WorkRow row(Decoder& in, std::uint32_t rank) {
 
 void rows(Encoder& out, const std::vector<WorkRow>& values, std::uint32_t rank) {
     out.u64(values.size());
-    for (const auto& v : values) row(out, v, rank);
+    for (const auto& v : values) {
+        row(out, v, rank);
+    }
 }
 
 std::vector<WorkRow> rows(Decoder& in, std::uint32_t rank) {
     std::vector<WorkRow> result(in.count(149));
-    for (auto& value : result) value = row(in, rank);
+    for (auto& value : result) {
+        value = row(in, rank);
+    }
     return result;
 }
 
@@ -180,7 +192,9 @@ void encode_work(Encoder& out, const Work& work, const VisionInputBindings& inpu
                 if (v.prefetch) {
                     member(out, v.prefetch->member);
                     out.u32(v.prefetch->frontier);
-                    for (auto value : v.prefetch->raw_tail) out.i32(value);
+                    for (auto value : v.prefetch->raw_tail) {
+                        out.i32(value);
+                    }
                     integers(out, v.prefetch->ids);
                 }
             } else if constexpr (std::is_same_v<T, MtpWork>) {
@@ -196,7 +210,9 @@ void encode_work(Encoder& out, const Work& work, const VisionInputBindings& inpu
                     encode_token_counts(out, binding.counts);
                 }
                 out.u64(v.releases.size());
-                for (auto id : v.releases) residency(out, id);
+                for (auto id : v.releases) {
+                    residency(out, id);
+                }
             } else {
                 out.u8(4);
                 row(out, v.row, rank);
@@ -225,7 +241,9 @@ Work decode_work(Decoder& in, const VisionInputBindings& inputs) {
             v.prefetch.emplace();
             v.prefetch->member   = member(in);
             v.prefetch->frontier = in.u32();
-            for (auto& value : v.prefetch->raw_tail) value = in.i32();
+            for (auto& value : v.prefetch->raw_tail) {
+                value = in.i32();
+            }
             v.prefetch->ids = integers<TokenId>(in);
         }
         work.operation = std::move(v);
@@ -243,7 +261,9 @@ Work decode_work(Decoder& in, const VisionInputBindings& inputs) {
             binding.counts   = decode_token_counts(in);
         }
         v.releases.resize(in.count(12));
-        for (auto& id : v.releases) id = residency(in);
+        for (auto& id : v.releases) {
+            id = residency(in);
+        }
         work.operation = std::move(v);
         break;
     }
@@ -329,7 +349,9 @@ void encode_result(Encoder& out, const Result& result) {
                 out.u8(3);
                 out.u32(v.processed);
                 out.u64(v.logprobs.size());
-                for (auto value : v.logprobs) out.f32(value);
+                for (auto value : v.logprobs) {
+                    out.f32(value);
+                }
             }
         },
         result);
@@ -369,7 +391,9 @@ Result decode_result(Decoder& in) {
         ScoreResult v;
         v.processed = in.u32();
         v.logprobs.resize(in.count(4));
-        for (auto& value : v.logprobs) value = in.f32();
+        for (auto& value : v.logprobs) {
+            value = in.f32();
+        }
 
         return v;
     }

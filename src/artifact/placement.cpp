@@ -34,7 +34,9 @@ std::size_t tensor_hash(const EncodedTensor& t) {
         value ^= n + 0x9e3779b97f4a7c15ULL + (value << 6) + (value >> 2);
     };
     mix(static_cast<std::uint64_t>(t.geometry.layout));
-    for (const auto n : t.geometry.shape) mix(n);
+    for (const auto n : t.geometry.shape) {
+        mix(n);
+    }
     for (const auto& c : t.copies) {
         mix(c.object.index);
         mix(c.source);
@@ -69,8 +71,9 @@ MaterializationPlan plan_materialization(const Reader& reader,
                                          PreparedResources resources) {
     std::vector<TensorRequest> tensors;
     tensors.reserve(requests.size());
-    for (const auto& r : requests)
+    for (const auto& r : requests) {
         tensors.push_back({whole_tensor(reader, r.object), r.device, r.host_access});
+    }
     return plan_materialization(reader, tensors, std::move(resources));
 }
 
@@ -98,12 +101,13 @@ MaterializationPlan plan_materialization(const Reader& reader,
             tensor_hash(request.tensor) ^ std::hash<std::uint64_t>{}(request.storage_domain);
         const auto [begin, end] = catalog.equal_range(key);
         auto found              = end;
-        for (auto it = begin; it != end; ++it)
+        for (auto it = begin; it != end; ++it) {
             if (domains[it->second.index] == request.storage_domain &&
                 same_tensor(out.tensors[it->second.index], request.tensor)) {
                 found = it;
                 break;
             }
+        }
         StorageId id;
         if (found == end) {
             id = {out.tensors.size()};

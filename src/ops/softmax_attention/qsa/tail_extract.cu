@@ -75,7 +75,9 @@ __global__ void tail_extract_kernel(const __grid_constant__ TailArguments args) 
     }
     // Prepare all source words before writing, including exact in-place state updates.
 #pragma unroll
-    for (int j = 0; j < 3; ++j) *reinterpret_cast<Word*>(args.after_raw.at(c, j, b, l)) = values[j];
+    for (int j = 0; j < 3; ++j) {
+        *reinterpret_cast<Word*>(args.after_raw.at(c, j, b, l)) = values[j];
+    }
     if (threadIdx.x < 3) *args.after_rope.at(threadIdx.x, 0, b, l) = coordinate;
 }
 
@@ -88,8 +90,9 @@ bool pair_aligned(const ConstStateFieldView& view) {
 
 bool pair_aligned(const Tensor& t) {
     if (reinterpret_cast<std::uintptr_t>(t.data) % 4) return false;
-    for (int d = 1; d <= 3; ++d)
+    for (int d = 1; d <= 3; ++d) {
         if (t.ne[d] > 1 && t.nb[d] % 4) return false;
+    }
     return true;
 }
 

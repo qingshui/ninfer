@@ -191,11 +191,12 @@ public:
             if (!candidate.value && !candidate.reserved) return reserve_slot(i);
         }
         auto index = static_cast<std::uint32_t>(size());
-        for (std::uint32_t first = 0; first < size(); first += 256)
+        for (std::uint32_t first = 0; first < size(); first += 256) {
             if (!slots_->is_allocated(first)) {
                 index = first;
                 break;
             }
+        }
         const auto target =
             std::max<std::size_t>(size(), std::min(capacity(), std::size_t(index / 256 + 1) * 256));
         const auto index_bytes = index_ ? index_->metadata_requirement(target) : 0;
@@ -291,8 +292,9 @@ public:
         for (std::uint32_t first = 0; first < size(); first += 256) {
             if (!slots_->is_allocated(first)) continue;
             const auto end = std::min<std::size_t>(size(), std::size_t(first) + 256);
-            for (auto i = first; i < end; ++i)
+            for (auto i = first; i < end; ++i) {
                 if (slot(i).pins) std::terminate();
+            }
             slots_->release_segment(first);
         }
     }
@@ -309,8 +311,9 @@ private:
     void reclaim_segment(std::uint32_t index) noexcept {
         const auto first = index / 256 * 256;
         const auto end   = std::min<std::size_t>(size(), std::size_t(first) + 256);
-        for (auto i = first; i < end; ++i)
+        for (auto i = first; i < end; ++i) {
             if (slot(i).value || slot(i).reserved || slot(i).pins) return;
+        }
         slots_->release_segment(first);
     }
 

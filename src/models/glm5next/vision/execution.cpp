@@ -98,9 +98,10 @@ std::size_t encode(const VisionConfig& c, const execution::VisionParameters& p,
     const auto f = dimension(input.features), h = dimension(c.hidden);
     if (input.cu_seqlens.back() != n || input.positions.size() != 2ULL * n)
         throw std::invalid_argument("GLM Vision metadata does not cover its patches");
-    for (std::size_t i = 1; i < input.cu_seqlens.size(); ++i)
+    for (std::size_t i = 1; i < input.cu_seqlens.size(); ++i) {
         if (input.cu_seqlens[i] <= input.cu_seqlens[i - 1])
             throw std::invalid_argument("GLM Vision segments are not strictly ordered");
+    }
     if (output.dtype != DType::BF16 || output.ne[0] != dimension(c.output_hidden) ||
         output.ne[1] != f || output.ne[2] != 1 || output.ne[3] != 1 || !output.is_contiguous() ||
         output.device != cuda.device() || backing.device != cuda.device() ||
@@ -109,8 +110,9 @@ std::size_t encode(const VisionConfig& c, const execution::VisionParameters& p,
         throw std::invalid_argument("GLM Vision operands differ from the prepared geometry");
     const auto segment_length = input.cu_seqlens[1];
     bool equal_segments       = true;
-    for (std::size_t i = 2; i < input.cu_seqlens.size(); ++i)
+    for (std::size_t i = 2; i < input.cu_seqlens.size(); ++i) {
         equal_segments &= input.cu_seqlens[i] - input.cu_seqlens[i - 1] == segment_length;
+    }
     const auto lo  = reinterpret_cast<std::uintptr_t>(backing.data);
     const auto dst = reinterpret_cast<std::uintptr_t>(output.data);
     if (dst < lo + backing.bytes && lo < dst + output.bytes())
@@ -156,7 +158,9 @@ std::size_t encode(const VisionConfig& c, const execution::VisionParameters& p,
     for (std::size_t i = 0; i < p.layers.size(); ++i) {
         const auto& layer = p.layers[i];
         std::array<Tensor, 3> qkv;
-        for (int j = 0; j < 3; ++j) qkv[j] = z_matrix(std::uint64_t(j + 1) * h * n, h, n);
+        for (int j = 0; j < 3; ++j) {
+            qkv[j] = z_matrix(std::uint64_t(j + 1) * h * n, h, n);
+        }
         ops::linear_split(norm, layer.qkv.weight, layer.qkv_bias, qkv, layer.qkv.policy, scratch,
                           cuda);
         auto q = qkv[0].view({dimension(c.head_dim()), dimension(c.heads), n});

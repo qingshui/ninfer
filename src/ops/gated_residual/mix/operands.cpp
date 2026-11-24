@@ -66,10 +66,14 @@ Operands validate(Weights weights, const Tensor& normalized, Tensor& output, Ten
     (void)tensor(normalized, DType::BF16, kWidth, kStreams, m, execution.device());
     const auto out    = tensor(output, DType::BF16, kWidth, m, 1, execution.device());
     const auto inputs = input_ranges(weights, normalized);
-    for (const auto input : inputs) common::operand::disjoint(out, input, kOp);
+    for (const auto input : inputs) {
+        common::operand::disjoint(out, input, kOp);
+    }
     if (injection) {
         const auto j = tensor(*injection, DType::FP32, kStreams, m, 1, execution.device());
-        for (const auto input : inputs) common::operand::disjoint(j, input, kOp);
+        for (const auto input : inputs) {
+            common::operand::disjoint(j, input, kOp);
+        }
         common::operand::disjoint(out, j, kOp);
     }
     return {normalized.data,
@@ -84,8 +88,9 @@ void validate_scratch(Weights weights, const Tensor& normalized, const Tensor& o
                       const Tensor* injection, MemorySpan scratch) {
     common::operand::device(scratch.device, normalized.device, kOp, "scratch");
     const auto work = common::operand::range(scratch.data, scratch.bytes, kOp);
-    for (const auto input : input_ranges(weights, normalized))
+    for (const auto input : input_ranges(weights, normalized)) {
         common::operand::disjoint(work, input, kOp);
+    }
     common::operand::disjoint(work, common::operand::range(output.data, output.bytes(), kOp), kOp);
     if (injection)
         common::operand::disjoint(

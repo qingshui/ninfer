@@ -18,7 +18,9 @@ public:
 
     ops::LinearProfile linear(std::initializer_list<WeightId> ids) const {
         std::vector<ops::WeightInput> inputs;
-        for (const auto id : ids) inputs.push_back(input(id));
+        for (const auto id : ids) {
+            inputs.push_back(input(id));
+        }
         return ops::describe_linear_weight(inputs);
     }
 
@@ -32,7 +34,9 @@ public:
 
     ops::ProjectionProfile projection(std::initializer_list<WeightId> ids) const {
         std::vector<ops::WeightInput> inputs;
-        for (const auto id : ids) inputs.push_back(input(id));
+        for (const auto id : ids) {
+            inputs.push_back(input(id));
+        }
         return ops::describe_projection_weights(inputs);
     }
 
@@ -125,7 +129,9 @@ std::shared_ptr<const ModelProfile> describe(const ModelDefinition& source,
     out->control_token_limit   = source.resources().text.control_tokens->size();
     const Describe d(source, weights, experts);
     const auto& w = source.weights();
-    for (const auto& layer : w.text.layers) out->text.layers.push_back(d.block(layer, false));
+    for (const auto& layer : w.text.layers) {
+        out->text.layers.push_back(d.block(layer, false));
+    }
     out->text.final_hc = d.final_hc(w.text.final_hc);
     out->text.ple      = d.linear({w.text.ple.key, w.text.ple.value});
     out->text.head     = d.linear({w.text.head});
@@ -138,8 +144,9 @@ std::shared_ptr<const ModelProfile> describe(const ModelDefinition& source,
         out->vision = qwen::describe_vision(*w.vision,
                                             [&](WeightId id) { return weight_input(weights, id); });
     if (rank.size == 1)
-        for (const auto& b : source.expert_banks())
+        for (const auto& b : source.expert_banks()) {
             out->banks.push_back({b.gate_up.layout, b.down.layout});
+        }
     return out;
 }
 

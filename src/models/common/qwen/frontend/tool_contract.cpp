@@ -37,10 +37,11 @@ void prepare_strict_parameters(Contract::Tool& tool) {
         root["additionalProperties"] != false)
         fail("strict tool '" + tool.name + "' requires type object and additionalProperties=false",
              parameter_path(tool));
-    for (const char* assertion : {"const", "enum", "anyOf", "oneOf"})
+    for (const char* assertion : {"const", "enum", "anyOf", "oneOf"}) {
         if (root.contains(assertion))
             fail("tool '" + tool.name + "' requires a single declared object parameter list",
                  parameter_path(tool) + "/" + assertion);
+    }
     tool.parameters.clear();
     if (!root.contains("properties")) return;
     if (!root["properties"].is_object())
@@ -107,7 +108,9 @@ select_tool_call_contract(const std::shared_ptr<const ToolCallOutputContract>& d
     selected->parallel    = selection.parallel;
     selected->constrained = selection.constrained;
     selected->tools.reserve(selection.indices.size());
-    for (auto i : selection.indices) selected->tools.push_back(tools[i]);
+    for (auto i : selection.indices) {
+        selected->tools.push_back(tools[i]);
+    }
     if (selected->constrained) {
         for (auto& tool : selected->tools) {
             if (!tool.strict) continue;

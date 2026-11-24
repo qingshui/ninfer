@@ -17,9 +17,10 @@ ScheduleDescription describe(const Plan& plan) {
                             .window_count        = plan.window_count,
                             .cpu_workers =
                                 static_cast<std::uint32_t>(plan.team.worker_cpus.size())};
-    for (const auto& layer : plan.layers)
+    for (const auto& layer : plan.layers) {
         out.layers.push_back({layer.spec.bank, layer.hybrid_max_tokens, layer.fixed_experts,
                               layer.cache_experts, layer.spec.priority});
+    }
     return out;
 }
 

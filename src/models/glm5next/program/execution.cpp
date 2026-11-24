@@ -25,9 +25,10 @@ void RankProgramImpl::execute_round(const execution::BatchView& main,
         auto drafts   = draft_proposals(g);
         {
             nvtx::ScopedRange range(nvtx::Name::DecodeMtpDraft, nvtx::Category::Mtp);
-            for (std::uint32_t step = 0; step < draft_bounds.size(); ++step)
+            for (std::uint32_t step = 0; step < draft_bounds.size(); ++step) {
                 draft_forward(step, batch(m.draft_steps[step], 1, g, c, draft_bounds[step]),
                               submit);
+            }
         }
         const auto readback = [&] {
             copy_bytes_async(output(m.drafts), m.drafts.region.bind(resources.fixed()), cuda);
@@ -75,18 +76,21 @@ void RankProgramImpl::forward() {
         const auto& original = rows[f.control_row];
         auto end =
             std::min<std::uint32_t>(original.ids.size(), f.control_offset + shape.prefill_chunk);
-        for (auto boundary : original.window_ends)
+        for (auto boundary : original.window_ends) {
             if (boundary > f.control_offset) {
                 end = std::min(end, boundary);
                 break;
             }
+        }
         f.window = original;
         auto& w  = *f.window;
         w.ids.assign(original.ids.begin() + f.control_offset, original.ids.begin() + end);
         w.main_frontier += f.control_offset;
         w.mtp_frontier = mtp_history_frontier(w.main_frontier);
         if (f.control_offset)
-            for (auto& [rank, s] : w.states) s.source = s.destination;
+            for (auto& [rank, s] : w.states) {
+                s.source = s.destination;
+            }
         rows       = {&w, 1};
         f.physical = plan_batch(rows, parameters.profile->local.size);
     } else
@@ -98,8 +102,9 @@ void RankProgramImpl::forward() {
     const int h = dimension(parameters.profile->config.text.hidden), b = rows.size();
     f.hidden = f.sequence ? resources.tensor(io.prefill_hidden).slice(1, 0, std::max(1U, f.tokens))
                           : resources.packed(io.pending_hidden, {h, 1, b}).view({h, b});
-    for (std::size_t i = 0; i < rows.size(); ++i)
+    for (std::size_t i = 0; i < rows.size(); ++i) {
         f.result.rows[control ? f.control_row : i].processed += rows[i].ids.size();
+    }
     if (!f.sequence && f.tokens == 1) {
         const bool sample = forward && forward->sample != SampleKind::None;
         f.graph_round     = graphs != nullptr;
@@ -279,8 +284,9 @@ void RankProgramImpl::result() {
     const auto* forward = std::get_if<ForwardWork>(&f.request.work.operation);
     if (forward && forward->sample != SampleKind::None) {
         const auto* ids = static_cast<const TokenId*>(resources.egress().data);
-        for (std::size_t b = 0; b < f.physical.members.size(); ++b)
+        for (std::size_t b = 0; b < f.physical.members.size(); ++b) {
             f.result.rows[f.physical.members[b]].tokens = {ids[b]};
+        }
     }
     if (const auto* mtp = std::get_if<MtpWork>(&f.request.work.operation)) {
         const auto& io     = resources.plan.frame;

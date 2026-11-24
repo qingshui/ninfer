@@ -21,7 +21,9 @@ inline bool valid_parameter_name(std::string_view name) {
 inline bool match_tool_delimiter(std::string_view marker, std::size_t& matched, char byte) {
     while (matched && marker[matched] != byte) {
         auto next = matched - 1;
-        while (next && marker.substr(0, next) != marker.substr(matched - next, next)) --next;
+        while (next && marker.substr(0, next) != marker.substr(matched - next, next)) {
+            --next;
+        }
         matched = next;
     }
     if (marker[matched] == byte) ++matched;

@@ -207,8 +207,9 @@ void RankProgramImpl::begin_target(ComputeOperation& operation) {
     if (forward)
         operation.attention.valid_positions += width;
     else
-        for (int row = 0; row < batch; ++row)
+        for (int row = 0; row < batch; ++row) {
             operation.attention.valid_positions += frame.host_ingress->valid_columns[row];
+        }
     auto input = forward ? frame.input_view(width, batch) : frame.decode_view(width, batch);
     if (std::holds_alternative<ForwardWork>(operation.request.work.operation) && slot().graphs &&
         replay_prefill_plan(operation))
@@ -221,7 +222,9 @@ void RankProgramImpl::begin_target(ComputeOperation& operation) {
         // same rows without graph replay.
         if (slot().graphs->captured_batch(phase, operation.batch)) {
             std::uint32_t frontier = 0;
-            for (const auto& row : operation.rows) frontier = std::max(frontier, row.main_frontier);
+            for (const auto& row : operation.rows) {
+                frontier = std::max(frontier, row.main_frontier);
+            }
             operation.graph_started = true;
             operation.projected     = true;
             operation.row_finished =
@@ -293,8 +296,9 @@ bool RankProgramImpl::replay_prefill_plan(ComputeOperation& operation) {
     bool bucket_shaped = !operation.input_embeddings && !resources.dflash && segments != 0 &&
                          operation.boundaries == 0;
     if (packed) {
-        for (const auto& segment : operation.segments)
+        for (const auto& segment : operation.segments) {
             bucket_shaped = bucket_shaped && segment.tokens == prefill_chunk;
+        }
     } else {
         bucket_shaped = bucket_shaped && operation.width == prefill_chunk;
     }
@@ -326,8 +330,9 @@ bool RankProgramImpl::replay_prefill_plan(ComputeOperation& operation) {
     operation.row_finished =
         slot().graphs->start_prefill(width, static_cast<std::uint32_t>(frontier), cuda);
     if (!operation.row_finished) throw std::logic_error("resident prefill plan did not submit");
-    for (std::uint32_t index = 0; index < segments; ++index)
+    for (std::uint32_t index = 0; index < segments; ++index) {
         images.storage().copy(images.staging_row(index), state(index).second, cuda);
+    }
     return true;
 }
 

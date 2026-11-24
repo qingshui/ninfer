@@ -9,12 +9,16 @@ using distributed::wire::Decoder;
 
 void shape(Encoder& out, const artifact::Shape& v) {
     out.u64(v.size());
-    for (auto x : v) out.u64(x);
+    for (auto x : v) {
+        out.u64(x);
+    }
 }
 
 artifact::Shape shape(Decoder& in) {
     artifact::Shape v(in.count(8));
-    for (auto& x : v) x = in.u64();
+    for (auto& x : v) {
+        x = in.u64();
+    }
     return v;
 }
 } // namespace
@@ -30,7 +34,9 @@ void encode_token_counts(Encoder& out, const TokenCounts& counts) {
         }
     } else if (const auto* dense = std::get_if<TokenCounts::Dense>(&values)) {
         out.u64(dense->size());
-        for (auto count : *dense) out.i32(count);
+        for (auto count : *dense) {
+            out.i32(count);
+        }
     }
 }
 
@@ -40,12 +46,16 @@ TokenCounts decode_token_counts(Decoder& in) {
         return {};
     case 1: {
         TokenCounts::Sparse values(in.count(8));
-        for (auto& value : values) value = {in.i32(), in.i32()};
+        for (auto& value : values) {
+            value = {in.i32(), in.i32()};
+        }
         return TokenCounts(std::move(values));
     }
     case 2: {
         TokenCounts::Dense values(in.count(4));
-        for (auto& value : values) value = in.i32();
+        for (auto& value : values) {
+            value = in.i32();
+        }
         return TokenCounts(std::move(values));
     }
     default:
@@ -59,7 +69,9 @@ void encode_expert_partitions(Encoder& out, std::span<const ExpertPartition> par
         out.u32(bank.intermediate.begin);
         out.u32(bank.intermediate.size);
         out.u64(bank.ids.size());
-        for (auto id : bank.ids) out.u32(id);
+        for (auto id : bank.ids) {
+            out.u32(id);
+        }
     }
 }
 
@@ -68,7 +80,9 @@ std::vector<ExpertPartition> decode_expert_partitions(Decoder& in) {
     for (auto& bank : partitions) {
         bank.intermediate = {in.u32(), in.u32()};
         bank.ids.resize(in.count(4));
-        for (auto& id : bank.ids) id = in.u32();
+        for (auto& id : bank.ids) {
+            id = in.u32();
+        }
     }
     return partitions;
 }
@@ -103,8 +117,9 @@ std::vector<ParameterAssembly> decode_assemblies(Decoder& in) {
     for (auto& a : assemblies) {
         a.shape = shape(in);
         a.slices.resize(in.count(56));
-        for (auto& s : a.slices)
+        for (auto& s : a.slices) {
             s = {{in.u64()}, in.u64(), in.u64(), in.u64(), in.u64(), in.u64(), in.u64()};
+        }
         a.bindings.resize(in.count(32));
         for (auto& b : a.bindings) {
             b.parameter = {in.u64()};

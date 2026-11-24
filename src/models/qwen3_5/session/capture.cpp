@@ -25,25 +25,33 @@ void SessionImpl::initialize_checkpoint_plan(RequestControl& request, std::uint3
     request.reserved_checkpoints.clear();
     request.skipped_checkpoints = 0;
     std::vector<const CheckpointCandidate*> eligible;
-    for (const auto& candidate : request.base->checkpoint_candidates)
+    for (const auto& candidate : request.base->checkpoint_candidates) {
         if (candidate.frontier > from) eligible.push_back(&candidate);
+    }
     // The first candidate is the system prompt, the last one the last shared message.
     static_assert(kMaxFlightCheckpoints == 2);
     if (eligible.size() > kMaxFlightCheckpoints) eligible = {eligible.front(), eligible.back()};
-    for (const auto* candidate : eligible) request.checkpoint_plan.push_back(*candidate);
+    for (const auto* candidate : eligible) {
+        request.checkpoint_plan.push_back(*candidate);
+    }
 }
 
 bool SessionImpl::checkpoint_present(const PrefixShortlistKey& key) const {
-    for (const auto& slot : checkpoints)
+    for (const auto& slot : checkpoints) {
         if (slot.value && slot.value->key == key) return true;
-    for (const auto& request : requests)
-        for (const auto& reserved : request.reserved_checkpoints)
+    }
+    for (const auto& request : requests) {
+        for (const auto& reserved : request.reserved_checkpoints) {
             if (reserved.candidate.key == key) return true;
+        }
+    }
     for (const auto& slot : executions) {
         if (!slot) continue;
-        for (const auto& list : slot->checkpoints)
-            for (const auto& flight : list)
+        for (const auto& list : slot->checkpoints) {
+            for (const auto& flight : list) {
                 if (flight.candidate.key == key) return true;
+            }
+        }
     }
     return false;
 }
@@ -147,7 +155,9 @@ void SessionImpl::publish_flight_checkpoints(Execution& current,
             continue;
         }
         const auto l = lane(current.members[b]);
-        for (auto& flight : list) publish_flight_checkpoint(flight, sequences[l], requests[l]);
+        for (auto& flight : list) {
+            publish_flight_checkpoint(flight, sequences[l], requests[l]);
+        }
         list.clear();
     }
 }
@@ -194,7 +204,9 @@ void SessionImpl::publish_flight_checkpoint(FlightCheckpoint& flight, SequenceSt
 
 void SessionImpl::drop_lane_checkpoints(RequestControl& request) noexcept {
     request.reserved_checkpoints.clear();
-    for (const auto handle : request.unreported_checkpoints) (void)release_checkpoint(handle);
+    for (const auto handle : request.unreported_checkpoints) {
+        (void)release_checkpoint(handle);
+    }
     request.unreported_checkpoints.clear();
 }
 
@@ -214,11 +226,13 @@ std::vector<std::uint32_t> SessionImpl::window_splits(const SequenceState& state
     if (causal_scoring) return splits;
     const auto frontiers = state.prefix_identity.execution_frontiers();
     for (auto it = std::upper_bound(frontiers.begin(), frontiers.end(), begin);
-         it != frontiers.end() && *it < end; ++it)
+         it != frontiers.end() && *it < end; ++it) {
         splits.push_back(*it);
-    for (const auto& reserved : requests[state.lane].reserved_checkpoints)
+    }
+    for (const auto& reserved : requests[state.lane].reserved_checkpoints) {
         if (reserved.candidate.frontier > begin && reserved.candidate.frontier < end)
             splits.push_back(reserved.candidate.frontier);
+    }
     std::sort(splits.begin(), splits.end());
     splits.erase(std::unique(splits.begin(), splits.end()), splits.end());
     return splits;

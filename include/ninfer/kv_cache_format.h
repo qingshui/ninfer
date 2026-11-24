@@ -89,8 +89,9 @@ struct KvCacheProfileInfo {
 [[nodiscard]] constexpr KvCacheStorage kv_cache_storage_from_option(std::string_view option) {
     for (auto storage : {KvCacheStorage::BFloat16, KvCacheStorage::Int8Group64,
                          KvCacheStorage::Fp8E4m3fnGroup128Ue8m0, KvCacheStorage::Nvfp4Group16,
-                         KvCacheStorage::Fp8KeyNvfp4Value})
+                         KvCacheStorage::Fp8KeyNvfp4Value}) {
         if (option == kv_cache_profile_info(storage).name) return storage;
+    }
     throw std::invalid_argument("unknown KV-cache storage option");
 }
 

@@ -72,14 +72,17 @@ void prepare_causal_pairs(const CausalPairInputs& in, const CausalPairOutputs& o
     check_hidden(in.hidden, {d, w, b}, "hidden", cuda);
     check_hidden(in.previous_hidden, {d, b}, "previous hidden", cuda);
     check_hidden(out.hidden, {d, p, c}, "paired hidden", cuda);
-    for (const auto* value : {&in.ids, &in.positions})
+    for (const auto* value : {&in.ids, &in.positions}) {
         operand::strided_tensor(*value, DType::I32, {w, b}, 4, op, "input metadata", cuda.device());
-    for (const auto* value : {&in.prefix, &in.skip_first})
+    }
+    for (const auto* value : {&in.prefix, &in.skip_first}) {
         operand::tensor(*value, DType::I32, {b}, 4, op, "row metadata", cuda.device());
+    }
     if (in.rows.data) operand::tensor(in.rows, DType::I32, {c}, 4, op, "rows", cuda.device());
-    for (const auto* value : {&out.ids, &out.positions})
+    for (const auto* value : {&out.ids, &out.positions}) {
         operand::strided_tensor(*value, DType::I32, {p, c}, 4, op, "output metadata",
                                 cuda.device());
+    }
     operand::tensor(out.lengths, DType::I32, {c}, 4, op, "lengths", cuda.device());
     int axes = 0;
     if (in.rope.data || in.previous_rope.data || out.rope.data) {
@@ -96,12 +99,14 @@ void prepare_causal_pairs(const CausalPairInputs& in, const CausalPairOutputs& o
     for (std::size_t i = 0; i < outputs.size(); ++i) {
         if (!outputs[i]->data) continue;
         const auto range = operand::strided_range(*outputs[i], op);
-        for (std::size_t j = 0; j < i; ++j)
+        for (std::size_t j = 0; j < i; ++j) {
             if (outputs[j]->data)
                 operand::disjoint(range, operand::strided_range(*outputs[j], op), op);
+        }
         for (const auto* input : {&in.hidden, &in.previous_hidden, &in.ids, &in.positions, &in.rope,
-                                  &in.previous_rope, &in.prefix, &in.skip_first, &in.rows})
+                                  &in.previous_rope, &in.prefix, &in.skip_first, &in.rows}) {
             if (input->data) operand::disjoint(range, operand::strided_range(*input, op), op);
+        }
     }
     auto h = view<const uint4>(in.hidden), previous = view<const uint4>(in.previous_hidden);
     auto result = view<uint4>(out.hidden);

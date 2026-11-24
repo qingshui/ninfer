@@ -81,7 +81,9 @@ struct IterationPlan {
 
     [[nodiscard]] std::uint64_t prefill_token_total() const noexcept {
         std::uint64_t total = 0;
-        for (const auto tokens : prefill_tokens) total += tokens;
+        for (const auto tokens : prefill_tokens) {
+            total += tokens;
+        }
         return total;
     }
 };
@@ -352,7 +354,9 @@ public:
         std::rotate(younger.begin(), next, younger.end());
         const auto count = std::min<std::size_t>(concurrency, younger.size());
         candidates.reserve(1 + count);
-        for (std::size_t i = 0; i < count; ++i) candidates.push_back(fresh[younger[i].second]);
+        for (std::size_t i = 0; i < count; ++i) {
+            candidates.push_back(fresh[younger[i].second]);
+        }
         return candidates;
     }
 

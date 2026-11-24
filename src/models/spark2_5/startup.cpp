@@ -15,9 +15,11 @@ Startup::Startup(const artifact::Reader& definition_source, const artifact::Read
         throw std::invalid_argument("Spark2_5 does not support distributed generation");
     profile = describe_model(definition_);
     std::vector<artifact::PlacementRequest> requests;
-    for (const auto& parameter : definition_->parameters())
-        for (const auto& part : parameter.binding.parts)
+    for (const auto& parameter : definition_->parameters()) {
+        for (const auto& part : parameter.binding.parts) {
             requests.push_back({part.object, device, artifact::HostAccess::CpuOnly});
+        }
+    }
     const auto plan = artifact::plan_materialization(reader_, requests);
     placements_.push_back(
         {WeightPlacement::Resident, plan.device_capacity_bytes, plan.host_capacity_bytes});
@@ -74,17 +76,22 @@ std::string prefill_signature(const ModelDefinition& model, std::uint32_t chunk)
                {"attention", {c.heads, c.kv_heads, c.head_dim, c.sliding_window}},
                {"intermediate", c.intermediate}};
     auto& layers = facts["layers"] = Json::array();
-    for (const auto& layer : c.layers) layers.push_back(static_cast<int>(layer.kind));
+    for (const auto& layer : c.layers) {
+        layers.push_back(static_cast<int>(layer.kind));
+    }
     auto& weights = facts["weights"] = Json::array();
     for (const auto& w : model.weight_data()) {
         Json item{{"role", w.name},
                   {"shape", w.view.shape},
                   {"parts", Json::array()},
                   {"uses", Json::array()}};
-        for (const auto& part : w.view.parts)
+        for (const auto& part : w.view.parts) {
             item["parts"].push_back(
                 {part.parent->geometry.format, part.parent->geometry.layout, part.begin, part.end});
-        for (const auto& use : w.uses) item["uses"].push_back({use.input, use.policy});
+        }
+        for (const auto& use : w.uses) {
+            item["uses"].push_back({use.input, use.policy});
+        }
         weights.push_back(std::move(item));
     }
     return models::frontend::sha256_hex(models::frontend::sha256(facts.dump()));

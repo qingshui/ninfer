@@ -117,10 +117,11 @@ __global__ void gate_kernel(const __grid_constant__ GateArguments a) {
                     common::Bf16Vector<Width>::load(a.norm_conv + s * kFeatures + d);
                 common::Bf16Vector<Width> out;
 #pragma unroll
-                for (int v = 0; v < Width; ++v)
+                for (int v = 0; v < Width; ++v) {
                     out.word[v] =
                         __float2bfloat16_rn(__bfloat162float(values[i].word[v]) * inverse *
                                             (1.f + __bfloat162float(weight.word[v])));
+                }
                 out.store(records + d);
             }
         }
@@ -142,11 +143,13 @@ GateLaunch select_gate(const GateArguments& a, bool paired) {
     if (!paired) return launch_gate<256, 1>;
     bool wide = true;
     for (const auto* p : {a.key, a.value, a.norm_key, a.norm_query, a.norm_conv,
-                          static_cast<const __nv_bfloat16*>(a.records)})
+                          static_cast<const __nv_bfloat16*>(a.records)}) {
         wide &= reinterpret_cast<std::uintptr_t>(p) % 16 == 0;
+    }
     for (auto stride :
-         {a.key_token, a.key_batch, a.value_token, a.value_batch, a.record_token, a.record_batch})
+         {a.key_token, a.key_batch, a.value_token, a.value_batch, a.record_token, a.record_batch}) {
         wide &= stride % 8 == 0;
+    }
     // A stream fits exactly one 16-byte vector per thread in the aligned route.
     return wide ? launch_gate<320, 8> : launch_gate<256, 2>;
 }

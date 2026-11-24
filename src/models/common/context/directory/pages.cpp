@@ -9,7 +9,7 @@ PageAllocationIndex::PageAllocationIndex(RecordDomains& records, MetadataBudget&
     : records_(&records), metadata_(metadata) {
     metadata_.reserve(domains_, 2 * records.ranks().size());
     metadata_.acquire(2 * records.ranks().size() * sizeof(Domain));
-    for (const auto& rank : records.ranks())
+    for (const auto& rank : records.ranks()) {
         for (auto memory : {ContextMemory::Device, ContextMemory::Host}) {
             const ContextDomainId id{rank.rank, memory};
             const auto& pool = records.pool(id);
@@ -17,6 +17,7 @@ PageAllocationIndex::PageAllocationIndex(RecordDomains& records, MetadataBudget&
                 throw std::logic_error("allocation index domains are not contiguous");
             domains_.push_back(std::make_unique<Domain>(id, pool, metadata));
         }
+    }
 }
 
 std::size_t PageAllocationIndex::record_bytes() noexcept { return sizeof(Replica); }
@@ -46,13 +47,16 @@ std::size_t PageAllocationIndex::extent(const Domain& domain,
 std::size_t
 PageAllocationIndex::metadata_requirement(std::span<const RecordDemand> requests) const {
     std::size_t bytes = 0;
-    for (const auto& domain : domains_)
+    for (const auto& domain : domains_) {
         bytes += domain->entries.growth_bytes(extent(*domain, requests));
+    }
     return bytes;
 }
 
 void PageAllocationIndex::prepare(std::span<const RecordDemand> requests) {
-    for (auto& domain : domains_) domain->entries.grow(extent(*domain, requests));
+    for (auto& domain : domains_) {
+        domain->entries.grow(extent(*domain, requests));
+    }
 }
 
 PageAllocationIndex::Replica* PageAllocationIndex::emplace(RecordLease& record, PageId page,
@@ -340,7 +344,9 @@ void PageDirectory::reserve_metadata(std::uint32_t records, std::uint32_t parts)
         metadata_.reserve(free_, std::max<std::uint64_t>(pages_.size(), target));
         free_.resize(std::max<std::uint64_t>(pages_.size(), target));
         pages_.grow(needed);
-        while (initialized_ < pages_.size()) free_[free_count_++] = initialized_++;
+        while (initialized_ < pages_.size()) {
+            free_[free_count_++] = initialized_++;
+        }
     }
     for (auto i = free_count_ - records; i < free_count_; ++i) {
         const auto index = free_[i];
@@ -404,8 +410,9 @@ void PageDirectory::reclaim_metadata() noexcept {
         if (!pages_.is_allocated(first)) continue;
         const auto end = std::min<std::uint64_t>(pages_.size(), std::uint64_t(first) + 256);
         bool empty     = true;
-        for (auto index = first; index < end; ++index)
+        for (auto index = first; index < end; ++index) {
             empty &= !pages_[index].occupied && !pages_[index].reserved;
+        }
         if (!empty) continue;
         for (auto index = first; index < end; ++index) {
             metadata_.release(pages_[index].parts.capacity() * sizeof(Part));
@@ -497,8 +504,9 @@ std::uint32_t PageDirectory::update_coverage(Coverage& coverage, std::uint32_t b
     if (coverage.full) return kPagedKVPageSize;
     if (coverage.partial != UINT32_MAX) {
         const auto& counts = (*partial_coverage_)[coverage.partial].counts;
-        for (std::uint32_t i = counts.size(); i; --i)
+        for (std::uint32_t i = counts.size(); i; --i) {
             if (counts[i - 1]) return i;
+        }
     }
     return 0;
 }
@@ -559,8 +567,9 @@ PageId PageDirectory::create(RecordReservation& reservation, std::span<const std
             }
         }
     } catch (...) {
-        for (auto& local : page.parts)
+        for (auto& local : page.parts) {
             reservation.restore(allocation_pages_->extract(local.device));
+        }
         page.parts.clear();
         reservation.restore_metadata(*this, index);
         throw;
@@ -577,12 +586,14 @@ PageId PageDirectory::create(RecordReservation& reservation, std::span<const std
 
 void PageDirectory::materialize(RecordReservation& reservation, std::span<PageId> destinations,
                                 std::span<const std::uint32_t> ranks) {
-    for (auto destination : destinations)
+    for (auto destination : destinations) {
         if (destination.valid()) throw std::logic_error("KV destination is already populated");
+    }
     std::size_t created = 0;
     try {
-        for (; created < destinations.size(); ++created)
+        for (; created < destinations.size(); ++created) {
             destinations[created] = create(reservation, ranks);
+        }
     } catch (...) {
         for (std::size_t i = 0; i < created; ++i) {
             auto& page = require(destinations[i]);
@@ -604,7 +615,9 @@ PageId PageDirectory::materialize_transfer_destination(RecordReservation& reserv
     const auto handle      = create(reservation, ranks);
     auto& page             = require(handle);
     page.committed_columns = columns;
-    for (auto& local : page.parts) local.device->columns = columns;
+    for (auto& local : page.parts) {
+        local.device->columns = columns;
+    }
     page.references         = 0;
     page.destination_pinned = true;
     return handle;
@@ -667,7 +680,9 @@ std::uint32_t PageDirectory::descriptor_index(PageId handle) const {
 
 std::vector<std::uint32_t> PageDirectory::ranks(PageId handle) const {
     std::vector<std::uint32_t> result;
-    for (const auto& local : require(handle).parts) result.push_back(local.rank);
+    for (const auto& local : require(handle).parts) {
+        result.push_back(local.rank);
+    }
     return result;
 }
 
@@ -778,8 +793,9 @@ std::uint32_t PageDirectory::source_pins(PageId handle) const { return require(h
 std::uint32_t PageDirectory::required_references_above(PageId handle, std::uint32_t columns) const {
     const auto& page    = require(handle);
     std::uint32_t count = 0;
-    for (auto i = columns; i < page.required_columns; ++i)
+    for (auto i = columns; i < page.required_columns; ++i) {
         count += coverage_count(page.required, i + 1);
+    }
     return count;
 }
 
@@ -798,10 +814,11 @@ void PageDirectory::update_protection(PageId handle, std::uint32_t before, std::
 bool PageDirectory::can_write(PageId handle, std::uint64_t writer, std::uint32_t begin,
                               std::uint32_t own_coverage) const {
     const auto& page = require(handle);
-    for (auto i = begin; i < page.required_columns; ++i)
+    for (auto i = begin; i < page.required_columns; ++i) {
         if (coverage_count(page.required, i + 1) >
             static_cast<std::uint32_t>(own_coverage == i + 1))
             return false;
+    }
     return writer && device_covers(handle, begin) && page.protected_columns <= begin &&
            !page.readers() && !page.pending() &&
            (!page.writer_identity || page.writer_identity == writer);
@@ -835,7 +852,9 @@ void PageDirectory::commit_coverage(PageId handle, std::uint32_t columns) {
         columns > kPagedKVPageSize)
         throw std::invalid_argument("KV committed coverage is not monotonic");
     page.committed_columns = columns;
-    for (auto& local : page.parts) local.device->columns = columns;
+    for (auto& local : page.parts) {
+        local.device->columns = columns;
+    }
 }
 
 PageDirectory::Restore PageDirectory::reserve_device_replica(PageId handle, std::uint32_t rank,
@@ -899,8 +918,9 @@ bool PageDirectory::drop_device_replica(PageId handle, std::uint32_t rank) noexc
 bool PageDirectory::drop_device_replica(PageId handle) noexcept {
     if (!valid(handle)) return false;
     auto& page = pages_[handle.index];
-    for (const auto& local : page.parts)
+    for (const auto& local : page.parts) {
         if (local.device && !can_drop_device_replica(handle, local.rank)) return false;
+    }
     for (auto& local : page.parts) {
         if (local.device) allocation_pages_->erase(local.device->record.allocation());
         local.device = nullptr;
@@ -952,7 +972,9 @@ void PageDirectory::reuse_after_retirement(PageId handle, RecordReservation& res
     auto& page = require(handle);
     reservation.restore_metadata(*this, handle.index);
     page.retiring_metadata = true;
-    for (auto& local : page.parts) reservation.defer_return(local.device->record);
+    for (auto& local : page.parts) {
+        reservation.defer_return(local.device->record);
+    }
 }
 
 bool PageDirectory::can_pin_source(PageId handle) const noexcept {
@@ -966,9 +988,10 @@ void PageDirectory::pin_source(PageId handle) {
     auto& page = require(handle);
     if (page.parts.size() > UINT32_MAX - page.readers())
         throw std::overflow_error("KV source pin count overflow");
-    for (const auto& local : page.parts)
+    for (const auto& local : page.parts) {
         if (!local.device && !local.restoring)
             throw std::logic_error("KV source has no prepared Device replica");
+    }
     for (auto& local : page.parts) {
         auto& replica = *(local.device ? local.device : local.restoring);
         ++replica.readers;
@@ -979,10 +1002,11 @@ void PageDirectory::pin_source(PageId handle) {
 
 void PageDirectory::unpin_source(PageId handle) {
     auto& page = require(handle);
-    for (const auto& local : page.parts)
+    for (const auto& local : page.parts) {
         if (!(local.device ? local.device : local.restoring) ||
             !(local.device ? local.device : local.restoring)->readers)
             throw std::logic_error("KV Device source is not pinned");
+    }
     for (auto& local : page.parts) {
         auto& replica = *(local.device ? local.device : local.restoring);
         --replica.readers;

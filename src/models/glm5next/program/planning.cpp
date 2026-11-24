@@ -43,8 +43,9 @@ ExecutionShape shape(const execution::ModelProfile& p, const EngineOptions& o,
 context::ContextDirectorySpec schema(const ExecutionPlan& p, std::size_t capacity, bool global) {
     context::ContextDirectorySpec spec;
     const auto rank = p.profile->local.rank, size = p.profile->local.size;
-    for (std::uint32_t i = 0; i < size; ++i)
+    for (std::uint32_t i = 0; i < size; ++i) {
         if (global || i == rank) spec.ranks.push_back({i, i == rank ? capacity : 0, 0});
+    }
     spec.state.logical_capacity =
         count(capacity / p.state.common.image_bytes + 2ULL * p.shape.max_concurrency);
     for (std::uint32_t owner = 0; owner < size; ++owner) {
@@ -64,9 +65,10 @@ context::ContextDirectorySpec schema(const ExecutionPlan& p, std::size_t capacit
                                    3ULL * p.shape.max_concurrency + 2),
             .page_capacity = cache.tables.spec.logical_page_capacity,
             .table_rows    = static_cast<std::uint32_t>(cache.tables.spec.table_rows)};
-        for (const auto& part : spec.ranks)
+        for (const auto& part : spec.ranks) {
             pool.parts.push_back(
                 {part.rank, {cache.cache.page.page_bytes, cache.cache.page.alignment}});
+        }
         spec.pools.push_back(std::move(pool));
     };
     add(p.main);
@@ -113,8 +115,9 @@ ExecutionPlan plan_execution(std::shared_ptr<const execution::ModelProfile> prof
                              index_format);
     out.frame = plan_frame(b, *out.profile, out.shape);
     if (out.profile->local.size > 1)
-        for (auto& region : out.peer_staging)
+        for (auto& region : out.peer_staging) {
             region = b.add(16ULL << 20, 256, "Context peer chunk");
+        }
     out.fixed_bytes      = b.finish(256);
     out.mapping_elements = out.main.tables.page_offsets.region.bytes / sizeof(std::int64_t);
     if (out.mtp)
@@ -156,9 +159,10 @@ runtime::ContextCapacityPlan describe_execution_capacity(const ExecutionPlan& p)
                     pages(p.shape.max_context - 1) + suffix_pages);
     auto reference_records = maximum.records;
     // One full-context request per attention owner: remote owners still need this KDA shard.
-    for (std::uint32_t owner = 0; owner < size; ++owner)
+    for (std::uint32_t owner = 0; owner < size; ++owner) {
         if (owner != rank)
             reference_records.push_back({geometry.spec_classes[owner], state_copies});
+    }
     out.reference = {p.shape.max_context, size, geometry.required_bytes(reference_records)};
     out.working_sets.push_back(std::move(maximum));
     const auto concurrent   = p.shape.max_concurrency;
@@ -184,9 +188,10 @@ runtime::ContextCapacityPlan describe_execution_capacity(const ExecutionPlan& p)
 context::ContextDirectorySpec describe_context(const ExecutionPlan& p) {
     auto out                  = schema(p, p.capacity.device_bytes, false);
     out.metadata_budget_bytes = p.capacity.metadata_budget_bytes;
-    for (auto& pool : out.pools)
+    for (auto& pool : out.pools) {
         pool.histories =
             context::HistoryDirectory::capacity_for_metadata(out.metadata_budget_bytes);
+    }
     return out;
 }
 

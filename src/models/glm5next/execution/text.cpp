@@ -26,8 +26,9 @@ void TextRun::stem(std::optional<models::vision::EmbeddingView> visual) {
     ops::embedding(batch_.ids.view({batch_.tokens * batch_.rows}), parameters_.text.embedding,
                    roots_.output, cuda_);
     if (visual)
-        for (const auto& slice : visual->slices)
+        for (const auto& slice : visual->slices) {
             ops::scatter(slice.features, slice.columns, roots_.output, cuda_);
+        }
     ops::mhc_expand_pre(roots_.output, parameters_.text.layers.front().attention_hc,
                         parameters_.profile->text.mhc_parameters, roots_.residual,
                         {roots_.input, roots_.coefficients[coefficients_]}, execution_.workspace,

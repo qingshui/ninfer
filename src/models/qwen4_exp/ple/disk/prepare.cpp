@@ -36,8 +36,9 @@ PrepareOptions checked_options(PrepareOptions options, std::span<const MemorySpa
 }
 
 void check_ids(std::span<const std::int32_t> ids) {
-    for (auto id : ids)
+    for (auto id : ids) {
         if (id < 0) throw std::invalid_argument("negative PLE token ID");
+    }
 }
 
 } // namespace
@@ -173,8 +174,9 @@ struct PrepareService::Impl {
                     std::array<std::uint32_t, 32 * kHeads> rows;
                     hash_tokens({ids + start, count}, tail, eos, table.parameters().hash,
                                 std::span(rows).first(count * kHeads));
-                    for (std::size_t r = 0; r < count * kHeads; ++r)
+                    for (std::size_t r = 0; r < count * kHeads; ++r) {
                         reader.request(i, (b * w.tokens + start) * kHeads + r, rows[r]);
+                    }
                     w.planned[b] += count;
                     budget -= count;
                 }
@@ -193,8 +195,9 @@ struct PrepareService::Impl {
             }
             w.drained    = (!w.cancelled || w.cancel_applied) && (!w.bound || reader.drained(i));
             bool planned = true;
-            for (std::uint32_t b = 0; b < w.batch; ++b)
+            for (std::uint32_t b = 0; b < w.batch; ++b) {
                 planned &= w.planned[b] >= (w.sealed ? w.valid[b] : w.known[b]);
+            }
             if (!w.cancelled && w.sealed && planned && !reader.pending(i))
                 w.status = PrepareStatus::HostReady;
             if (!w.cancelled && !planned) more = true;
@@ -322,8 +325,9 @@ void PrepareService::seal(Ticket ticket, std::span<const std::uint32_t> valid) {
     auto& w = p.get(ticket);
     if (w.sealed || w.cancelled || w.status != PrepareStatus::Preparing || valid.size() != w.batch)
         throw std::invalid_argument("invalid PLE seal");
-    for (std::size_t b = 0; b < valid.size(); ++b)
+    for (std::size_t b = 0; b < valid.size(); ++b) {
         if (valid[b] > w.known[b]) throw std::invalid_argument("PLE seal exceeds known IDs");
+    }
     std::copy(valid.begin(), valid.end(), w.valid.begin());
     w.sealed = true;
     p.reader.wake();

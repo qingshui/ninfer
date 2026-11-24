@@ -18,7 +18,9 @@ struct Table::Impl {
     Impl(const artifact::Reader& reader, LookupParameters params) : parameters(std::move(params)) {
         std::vector<artifact::ObjectHandle> objects;
         objects.reserve(parameters.shards.size());
-        for (const auto& shard : parameters.shards) objects.push_back(shard.object);
+        for (const auto& shard : parameters.shards) {
+            objects.push_back(shard.object);
+        }
         backing = artifact::prepare_file_backing(reader, objects);
         shards.reserve(objects.size());
         for (const auto& shard : parameters.shards) {

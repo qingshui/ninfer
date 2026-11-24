@@ -8,8 +8,9 @@ namespace ninfer::models::qwen3_5::detail {
 
 GraphPreparationSample RankProgramImpl::initialize_graphs(GraphPreparationMode mode) {
     if (!use_cuda_graph || resources.compute_frame(0).frame.spec.causal_scoring) return {};
-    for (const auto& entry : slots)
+    for (const auto& entry : slots) {
         if (entry->graphs) throw std::logic_error("Qwen3.5 graphs are already initialized");
+    }
     if (mode == GraphPreparationMode::Complete) {
         initialize_graphs(GraphPreparationMode::Warmup);
         return initialize_graphs(GraphPreparationMode::Capture);
@@ -29,11 +30,14 @@ GraphPreparationSample RankProgramImpl::initialize_graphs(GraphPreparationMode m
         graph_memory->preparation_increment_bytes = result.increment_bytes;
         graph_memory->preparation_peak_bytes      = result.peak_bytes;
     } else {
-        for (auto& entry : slots) entry->graphs.reset();
+        for (auto& entry : slots) {
+            entry->graphs.reset();
+        }
         graph_memory->warmup_increment_bytes = result.increment_bytes;
     }
-    for (std::uint32_t frame = 0; frame < compute_frames; ++frame)
+    for (std::uint32_t frame = 0; frame < compute_frames; ++frame) {
         resources.compute_frame(frame).work.reset();
+    }
     reset_measurement_peaks();
     return result;
 }

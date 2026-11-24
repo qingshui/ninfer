@@ -33,8 +33,9 @@ __global__ void extract_kernel(const __grid_constant__ ExtractArguments a) {
         values[j] = *reinterpret_cast<const Word*>(p);
     }
 #pragma unroll
-    for (int j = 0; j < kHistory; ++j)
+    for (int j = 0; j < kHistory; ++j) {
         *reinterpret_cast<Word*>(after + j * a.after_column) = values[j];
+    }
 }
 
 template <class Word>

@@ -90,8 +90,9 @@ std::shared_ptr<const ModelDefinition> read_definition(const artifact::Reader& r
             moe::describe_bank(reader, {b.at(weights.gate).reference, b.at(weights.up).reference,
                                         b.at(weights.down).reference}));
     };
-    for (auto& layer : out->weights.text.layers)
+    for (auto& layer : out->weights.text.layers) {
         if (auto* weights = std::get_if<MoeWeights>(&layer.ffn)) bank(*weights);
+    }
     if (out->weights.mtp) bank(out->weights.mtp->moe);
 
     out->info.name = reader.directory().metadata.value("name", "Glm5NextForCausalLM");
@@ -116,8 +117,9 @@ std::shared_ptr<const ModelDefinition> read_definition(const artifact::Reader& r
     stats.read_bytes               = out->prepared_resources.read_bytes;
     stats.owned_value_bytes        = out->prepared_resources.owned_value_bytes;
     stats.host_object_count        = out->prepared_resources.objects.size();
-    for (const auto& resource : out->prepared_resources.objects)
+    for (const auto& resource : out->prepared_resources.objects) {
         stats.retained_host_bytes += resource.data.size();
+    }
     return std::shared_ptr<const ModelDefinition>(new ModelDefinition(std::move(out)));
 }
 

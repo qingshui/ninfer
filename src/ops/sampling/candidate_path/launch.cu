@@ -85,8 +85,9 @@ __device__ void score_row(const DeviceArgs& a, int column, SelectorShared& share
         const int c = warp;
         float sum   = 0;
 #pragma unroll
-        for (int r = lane; r < kRank; r += 32)
+        for (int r = lane; r < kRank; r += 32) {
             sum = fmaf(shared.product[r], __bfloat162float(shared.successors[c * kRank + r]), sum);
+        }
         sum = warp_reduce_sum(sum);
         if (lane == 0) shared.edge[c] = a.unary[column * kCandidates + c] + sum;
     }

@@ -10,14 +10,17 @@ namespace ninfer::ops::detail::linear_split {
 namespace {
 const SplitShape& match(std::span<const SplitShape* const> shapes, ProjectionProfile weights,
                         const auto& rows) {
-    for (const auto* shape : shapes)
+    for (const auto* shape : shapes) {
         if (shape->first_rows == weights.first.n && shape->input_rows == weights.first.k &&
             shape->second_rows == (weights.second ? weights.second->n : 0) &&
             (!weights.second || weights.second->k == shape->input_rows) &&
             std::ranges::equal(shape->segments, rows))
             return *shape;
+    }
     std::string segments;
-    for (const auto row : rows) segments += (segments.empty() ? "" : ",") + std::to_string(row);
+    for (const auto row : rows) {
+        segments += (segments.empty() ? "" : ",") + std::to_string(row);
+    }
     throw std::invalid_argument(
         "linear_split: unsupported parent geometry or output segmentation n=" +
         std::to_string(weights.first.n) + " k=" + std::to_string(weights.first.k) +

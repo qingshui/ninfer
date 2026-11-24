@@ -58,8 +58,9 @@ Arguments arguments(const Tensor& ids, const Tensor& valid, const NgramTokenTail
     operand::tensor(out, DType::BF16, {kHeads * kWidth, tokens, batch}, 16, kOp, "embedding",
                     device);
     const auto destination = operand::range(out, kOp);
-    for (const auto* input : {&ids, &valid, &before.token_ids.records.byte_offsets})
+    for (const auto* input : {&ids, &valid, &before.token_ids.records.byte_offsets}) {
         require(!operand::overlaps(operand::blocks(*input, kOp), destination), "output alias");
+    }
 
     Arguments a{};
     a.ids           = static_cast<const int*>(ids.data);

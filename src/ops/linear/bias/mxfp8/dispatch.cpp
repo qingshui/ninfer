@@ -24,8 +24,9 @@ std::span<const Mxfp8BiasRoute> select_routes(int rows, int k, LinearPolicy poli
 
 Mxfp8BiasRoute select_mxfp8_bias_route(int rows, int k, int tokens, LinearPolicy policy) {
     if (tokens <= 0) throw std::invalid_argument("MXFP8 linear_bias: tokens must be positive");
-    for (const auto& route : select_routes(rows, k, policy))
+    for (const auto& route : select_routes(rows, k, policy)) {
         if (tokens <= route.last_tokens) return route;
+    }
     throw std::invalid_argument("MXFP8 linear_bias: unsupported token count");
 }
 

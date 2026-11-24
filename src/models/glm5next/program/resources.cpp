@@ -53,9 +53,10 @@ Resources::Resources(ExecutionPlan input, DeviceContext& device, ContextCommunic
     if (const auto& m = plan.frame.mtp) {
         std::vector<std::int64_t> offsets(plan.shape.max_concurrency);
         for (std::size_t slot = 0; slot < m->tail_offsets.size(); ++slot) {
-            for (std::size_t row = 0; row < offsets.size(); ++row)
+            for (std::size_t row = 0; row < offsets.size(); ++row) {
                 offsets[row] = (slot * plan.shape.max_concurrency + row) * m->tail_keys.shape[0] *
                                m->tail_keys.shape[1] * sizeof(std::uint16_t);
+            }
             copy_bytes(m->tail_offsets[slot].region.bind(fixed_.span()),
                        {offsets.data(), offsets.size() * sizeof(offsets.front()), Device::cpu()},
                        device.execution_view());
@@ -120,7 +121,9 @@ Tensor Resources::tensor(const TensorRegion& region) { return region.bind(fixed_
 
 Tensor Resources::packed(const TensorRegion& region, std::initializer_list<std::int32_t> shape) {
     std::uint64_t elements = 1;
-    for (const auto n : shape) elements *= dimension(n);
+    for (const auto n : shape) {
+        elements *= dimension(n);
+    }
     auto value = tensor(region);
     return value.view({dimension(value.numel())}).slice(0, 0, dimension(elements)).view(shape);
 }

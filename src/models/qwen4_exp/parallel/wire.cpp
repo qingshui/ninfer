@@ -24,8 +24,9 @@ void encode_rank_load(Encoder& out, const RankLoadRequest& request) {
     out.u32(p.size);
     out.u32(p.ep_size);
     out.u8(static_cast<std::uint8_t>(p.ple_placement));
-    for (auto r : {p.gdn_keys, p.gdn_values, p.qsa_queries, p.qsa_kv, p.vocabulary, p.ple_shards})
+    for (auto r : {p.gdn_keys, p.gdn_values, p.qsa_queries, p.qsa_kv, p.vocabulary, p.ple_shards}) {
         range(out, r);
+    }
     out.u32(p.shared_intermediate);
     encode_assemblies(out, p.assemblies);
     encode_expert_partitions(out, p.experts);
@@ -61,7 +62,9 @@ RankLoadRequest decode_rank_load(Decoder& in) {
 void encode(Encoder& out, const RankExecutionDescription& r) {
     const auto& p = r.session;
     const auto& s = p.shape;
-    for (auto n : {s.max_context, s.max_concurrency, s.prefill_chunk, s.draft_tokens}) out.u32(n);
+    for (auto n : {s.max_context, s.max_concurrency, s.prefill_chunk, s.draft_tokens}) {
+        out.u32(n);
+    }
     out.u8(static_cast<std::uint8_t>(s.kv_storage));
     out.u8(static_cast<std::uint8_t>(s.purpose));
     out.boolean(s.context_cache);

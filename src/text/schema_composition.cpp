@@ -21,7 +21,9 @@ constexpr const char* kTypeNames[] = {"null",   "boolean", "string", "integer",
 
 std::string child(const std::string& path, const std::string& key) {
     std::string result = path + '/';
-    for (char c : key) result += c == '~' ? "~0" : c == '/' ? "~1" : std::string(1, c);
+    for (char c : key) {
+        result += c == '~' ? "~0" : c == '/' ? "~1" : std::string(1, c);
+    }
     return result;
 }
 
@@ -51,11 +53,14 @@ unsigned types(const Json& schema) {
     if (!schema.contains("type")) return kAll;
     unsigned result = 0;
     const auto add  = [&](const Json& value) {
-        for (unsigned i = 0; i < 7; ++i)
+        for (unsigned i = 0; i < 7; ++i) {
             if (value == kTypeNames[i]) result |= (1u << i) | (i == 4 ? kInteger : 0);
+        }
     };
     if (schema["type"].is_array())
-        for (const auto& type : schema["type"]) add(type);
+        for (const auto& type : schema["type"]) {
+            add(type);
+        }
     else
         add(schema["type"]);
     return result;
@@ -79,14 +84,16 @@ bool equal_value(const Json& a, const Json& b) {
     if (a.type() != b.type()) return false;
     if (a.is_array()) {
         if (a.size() != b.size()) return false;
-        for (std::size_t i = 0; i < a.size(); ++i)
+        for (std::size_t i = 0; i < a.size(); ++i) {
             if (!equal_value(a[i], b[i])) return false;
+        }
         return true;
     }
     if (a.is_object()) {
         if (a.size() != b.size()) return false;
-        for (const auto& [key, value] : a.items())
+        for (const auto& [key, value] : a.items()) {
             if (!b.contains(key) || !equal_value(value, b[key])) return false;
+        }
         return true;
     }
     return a == b;
@@ -94,27 +101,34 @@ bool equal_value(const Json& a, const Json& b) {
 
 bool needs_composition(const Json& node) {
     if (!node.is_object()) return false;
-    for (const char* key : {"minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum"})
+    for (const char* key : {"minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum"}) {
         if (node.contains(key)) return true;
+    }
     for (const char* op : {"$ref", "const", "enum", "anyOf", "oneOf", "allOf"}) {
         if (!node.contains(op)) continue;
         if (std::string_view(op) == "allOf" && node[op].size() > 1) return true;
-        for (const auto& [key, value] : node.items())
+        for (const auto& [key, value] : node.items()) {
             if (key != op && !annotation(key) &&
                 !(key == "type" &&
                   (std::string_view(op) == "const" || std::string_view(op) == "enum")))
                 return true;
+        }
     }
-    for (const char* map : {"properties", "$defs", "definitions"})
+    for (const char* map : {"properties", "$defs", "definitions"}) {
         if (node.contains(map))
-            for (const auto& value : node[map])
+            for (const auto& value : node[map]) {
                 if (needs_composition(value)) return true;
-    for (const char* array : {"anyOf", "oneOf", "allOf", "prefixItems"})
+            }
+    }
+    for (const char* array : {"anyOf", "oneOf", "allOf", "prefixItems"}) {
         if (node.contains(array))
-            for (const auto& value : node[array])
+            for (const auto& value : node[array]) {
                 if (needs_composition(value)) return true;
-    for (const char* key : {"items", "additionalProperties"})
+            }
+    }
+    for (const char* key : {"items", "additionalProperties"}) {
         if (node.contains(key) && needs_composition(node[key])) return true;
+    }
     return false;
 }
 
@@ -170,9 +184,10 @@ private:
             own.erase("$ref");
         }
         if (own.contains("allOf")) {
-            for (std::size_t i = 0; i < own["allOf"].size(); ++i)
+            for (std::size_t i = 0; i < own["allOf"].size(); ++i) {
                 expand({own["allOf"][i], child(child(part.path, "allOf"), std::to_string(i))},
                        output, refs);
+            }
             own.erase("allOf");
         }
         for (auto it = own.begin(); it != own.end();) {
@@ -216,7 +231,9 @@ private:
         for (const char* op : {"anyOf", "oneOf", "allOf"}) {
             if (!schema.contains(op)) continue;
             std::size_t accepted = 0;
-            for (const auto& branch : schema[op]) accepted += matches(branch, value, depth + 1);
+            for (const auto& branch : schema[op]) {
+                accepted += matches(branch, value, depth + 1);
+            }
             if ((std::string_view(op) == "anyOf" && accepted == 0) ||
                 (std::string_view(op) == "oneOf" && accepted != 1) ||
                 (std::string_view(op) == "allOf" && accepted != schema[op].size()))
@@ -225,8 +242,9 @@ private:
         if (value.is_string()) {
             const auto& text  = value.get_ref<const std::string&>();
             std::size_t count = 0;
-            for (std::size_t pos = 0; pos < text.size(); ++count)
+            for (std::size_t pos = 0; pos < text.size(); ++count) {
                 pos += unicode_internal::utf8_codepoint_at(text, pos, "schema literal").length;
+            }
             if (schema.contains("minLength") && count < schema["minLength"].get<std::size_t>())
                 return false;
             if (schema.contains("maxLength") && count > schema["maxLength"].get<std::size_t>())
@@ -252,13 +270,15 @@ private:
                 return false;
             if (schema.contains("maxItems") && value.size() > schema["maxItems"].get<std::size_t>())
                 return false;
-            for (std::size_t i = 0; i < value.size(); ++i)
+            for (std::size_t i = 0; i < value.size(); ++i) {
                 if (!matches(item_at({schema, {}}, i).value, value[i], depth + 1)) return false;
+            }
         }
         if (value.is_object()) {
             if (schema.contains("required"))
-                for (const auto& key : schema["required"])
+                for (const auto& key : schema["required"]) {
                     if (!value.contains(key.get<std::string>())) return false;
+                }
             for (const auto& [key, item] : value.items()) {
                 if (schema.contains("properties") && schema["properties"].contains(key)) {
                     if (!matches(schema["properties"][key], item, depth + 1)) return false;
@@ -282,14 +302,17 @@ private:
         };
         const auto av = finite(a), bv = finite(b);
         if (av && bv) {
-            for (const auto& x : *av)
-                for (const auto& y : *bv)
+            for (const auto& x : *av) {
+                for (const auto& y : *bv) {
                     if (equal_value(x, y)) return false;
+                }
+            }
             return true;
         }
         if (av || bv) {
-            for (const auto& value : *(av ? av : bv))
+            for (const auto& value : *(av ? av : bv)) {
                 if (value_type(value) & types(av ? b : a)) return false;
+            }
             return true;
         }
         if (!a.is_object() || !b.is_object() || !a.contains("required") || !b.contains("required"))
@@ -305,8 +328,11 @@ private:
                        y = finite(resolve(b["properties"][name]));
             if (!x || !y) continue;
             bool overlap = false;
-            for (const auto& v : *x)
-                for (const auto& w : *y) overlap |= equal_value(v, w);
+            for (const auto& v : *x) {
+                for (const auto& w : *y) {
+                    overlap |= equal_value(v, w);
+                }
+            }
             if (!overlap) return true;
         }
         return false;
@@ -317,7 +343,9 @@ private:
             fail(incoming.empty() ? "" : incoming[0].path,
                  "schema conjunction exceeds compilation limit");
         std::vector<Part> parts;
-        for (const auto& part : incoming) expand(part, parts);
+        for (const auto& part : incoming) {
+            expand(part, parts);
+        }
         std::string key;
         std::set<std::string> seen;
         for (auto it = parts.begin(); it != parts.end();) {
@@ -365,16 +393,17 @@ private:
                                         ? Json::array({part.value["const"]})
                                         : part.value["enum"];
             Json admitted         = Json::array();
-            for (const auto& candidate : candidates)
+            for (const auto& candidate : candidates) {
                 if (std::all_of(parts.begin(), parts.end(),
                                 [&](const auto& p) { return matches(p.value, candidate); }) &&
                     std::none_of(admitted.begin(), admitted.end(),
                                  [&](const auto& v) { return equal_value(v, candidate); }))
                     admitted.push_back(candidate);
+            }
             if (admitted.empty()) return false;
             return Json{{"enum", std::move(admitted)}};
         }
-        for (std::size_t i = 0; i < parts.size(); ++i)
+        for (std::size_t i = 0; i < parts.size(); ++i) {
             for (const char* op : {"anyOf", "oneOf"}) {
                 if (!parts[i].value.contains(op)) continue;
                 auto common = parts;
@@ -388,20 +417,26 @@ private:
                     if (!is_false(branch)) branches.push_back(std::move(branch));
                 }
                 if (std::string_view(op) == "oneOf")
-                    for (std::size_t a = 0; a < branches.size(); ++a)
-                        for (std::size_t b = 0; b < a; ++b)
+                    for (std::size_t a = 0; a < branches.size(); ++a) {
+                        for (std::size_t b = 0; b < a; ++b) {
                             if (!disjoint(branches[a], branches[b]))
                                 fail(child(parts[i].path, op),
                                      "oneOf branches are not provably disjoint after conjunction");
+                        }
+                    }
                 if (branches.empty()) return false;
                 return Json{{"anyOf", std::move(branches)}};
             }
+        }
         unsigned domain = kAll;
-        for (const auto& part : parts) domain &= types(part.value);
+        for (const auto& part : parts) {
+            domain &= types(part.value);
+        }
         if (!domain) return false;
         std::vector<unsigned> kinds;
-        for (unsigned i = 0; i < 7; ++i)
+        for (unsigned i = 0; i < 7; ++i) {
             if ((domain & (1u << i)) && !(i == 3 && (domain & kNumber))) kinds.push_back(i);
+        }
         if (kinds.size() > 1) {
             Json branches = Json::array();
             for (auto kind : kinds) {
@@ -415,7 +450,7 @@ private:
         const auto kind = kinds.front();
         Json result{{"type", kTypeNames[kind]}};
         const auto bound = [&](const char* name, bool lower) {
-            for (const auto& part : parts)
+            for (const auto& part : parts) {
                 if (part.value.contains(name)) {
                     const int cmp =
                         !result.contains(name)
@@ -424,6 +459,7 @@ private:
                                   .Compare(xgrammar::DecimalNumber::Parse(result[name].dump()));
                     if (lower ? cmp > 0 : cmp < 0) result[name] = part.value[name];
                 }
+            }
         };
         if (kind == 2 || kind == 5) {
             const char* lo = kind == 2 ? "minLength" : "minItems";
@@ -434,23 +470,29 @@ private:
         }
         if (kind == 2) {
             Json patterns = Json::array();
-            for (const auto& part : parts)
+            for (const auto& part : parts) {
                 if (part.value.contains("pattern") &&
                     std::find(patterns.begin(), patterns.end(), part.value["pattern"]) ==
                         patterns.end())
                     patterns.push_back(part.value["pattern"]);
+            }
             if (patterns.size() == 1)
                 result["pattern"] = patterns[0];
             else if (patterns.size() > 1) {
                 Json terms = Json::array({result});
-                for (const auto& pattern : patterns)
+                for (const auto& pattern : patterns) {
                     terms.push_back(Json{{"type", "string"}, {"pattern", pattern}});
+                }
                 result = Json{{"allOf", std::move(terms)}};
             }
         }
         if (kind == 3 || kind == 4) {
-            for (const auto* name : {"minimum", "exclusiveMinimum"}) bound(name, true);
-            for (const auto* name : {"maximum", "exclusiveMaximum"}) bound(name, false);
+            for (const auto* name : {"minimum", "exclusiveMinimum"}) {
+                bound(name, true);
+            }
+            for (const auto* name : {"maximum", "exclusiveMaximum"}) {
+                bound(name, false);
+            }
             const auto range = number_range(result);
             if (range.Empty()) return false;
             if (kind == 3 && (range.lower || range.upper)) {
@@ -471,13 +513,16 @@ private:
         }
         if (kind == 5) {
             std::size_t prefix_size = 0;
-            for (const auto& part : parts)
+            for (const auto& part : parts) {
                 if (const auto* key = prefix_key(part.value))
                     prefix_size = std::max(prefix_size, part.value[key].size());
+            }
             Json prefix = Json::array();
             for (std::size_t i = 0; i <= prefix_size; ++i) {
                 std::vector<Part> conditions;
-                for (const auto& part : parts) conditions.push_back(item_at(part, i));
+                for (const auto& part : parts) {
+                    conditions.push_back(item_at(part, i));
+                }
                 auto item = join(conditions);
                 if (is_false(item)) {
                     // An impossible position caps the length; it need not occur at all.
@@ -499,16 +544,19 @@ private:
             Json properties = Json::object(), required = Json::array();
             for (const auto& part : parts) {
                 if (part.value.contains("properties"))
-                    for (const auto& [key, value] : part.value["properties"].items())
+                    for (const auto& [key, value] : part.value["properties"].items()) {
                         properties[key] = true;
+                    }
                 if (part.value.contains("required"))
-                    for (const auto& key : part.value["required"])
+                    for (const auto& key : part.value["required"]) {
                         if (std::find(required.begin(), required.end(), key) == required.end())
                             required.push_back(key);
+                    }
             }
-            for (const auto& key : required)
+            for (const auto& key : required) {
                 if (!properties.contains(key.get<std::string>()))
                     properties[key.get<std::string>()] = true;
+            }
             for (auto& [key, value] : properties.items()) {
                 std::vector<Part> conditions;
                 for (const auto& part : parts) {
@@ -525,10 +573,11 @@ private:
                     return false;
             }
             std::vector<Part> extra;
-            for (const auto& part : parts)
+            for (const auto& part : parts) {
                 if (part.value.contains("additionalProperties"))
                     extra.push_back({part.value["additionalProperties"],
                                      child(part.path, "additionalProperties")});
+            }
             result["properties"]           = std::move(properties);
             result["required"]             = std::move(required);
             result["additionalProperties"] = join(extra);

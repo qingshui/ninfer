@@ -12,8 +12,9 @@ PreparedCheckpoint SessionImpl::prepare_checkpoint(Sequence& s) {
     auto record = checkpoints.reserve_owned();
     if (!record.valid()) return {};
     ContextDemand demand;
-    for (std::uint32_t pool = 0; pool < pool_count(); ++pool)
+    for (std::uint32_t pool = 0; pool < pool_count(); ++pool) {
         demand.add_growth(directory.pool(pool).histories(), s.histories[pool].handle(), 0);
+    }
     if (!directory.reserve(demand)) return {};
     return {std::move(record), capture_identity(s)};
 }
@@ -24,9 +25,10 @@ std::optional<CheckpointHandle> SessionImpl::detach(Sequence& s, runtime::Checkp
     if (!prepared.record.valid()) prepared = prepare_checkpoint(s);
     if (!prepared.record.valid()) return {};
     std::vector<context::HistoryPrefix> prefixes;
-    for (std::uint16_t pool = 0; pool < directory.pool_count(); ++pool)
+    for (std::uint16_t pool = 0; pool < directory.pool_count(); ++pool) {
         prefixes.push_back(directory.pool(pool).histories().retain_prefix(
             s.histories[pool].handle(), f));
+    }
     auto& states     = directory.states();
     const auto image = s.continuation.image;
     if (states.role(image) == context::StateRole::ActiveMutable) states.freeze(image);
@@ -40,7 +42,9 @@ std::optional<CheckpointHandle> SessionImpl::detach(Sequence& s, runtime::Checkp
         s.write_destination = {};
     }
     s.continuation.image = {};
-    for (auto& history : s.histories) history.reset();
+    for (auto& history : s.histories) {
+        history.reset();
+    }
     return record;
 }
 
@@ -59,8 +63,9 @@ Session::prepare_capture(SequenceHandle h, std::span<const CheckpointHandle> hos
     if (s.recovery_peak) {
         s.capture.reset();
         while (s.next_capture < s.captures.size() &&
-               s.captures[s.next_capture].frontier <= s.permitted_frontier)
+               s.captures[s.next_capture].frontier <= s.permitted_frontier) {
             ++s.next_capture;
+        }
         return {};
     }
     if (s.capture)
@@ -69,8 +74,9 @@ Session::prepare_capture(SequenceHandle h, std::span<const CheckpointHandle> hos
                                   .origin   = s.captures[s.next_capture].origin,
                                   .evidence = s.captures[s.next_capture].evidence};
     while (s.next_capture < s.captures.size() &&
-           s.captures[s.next_capture].frontier <= s.continuation.metadata.main_frontier)
+           s.captures[s.next_capture].frontier <= s.continuation.metadata.main_frontier) {
         ++s.next_capture;
+    }
     const auto begin   = s.continuation.metadata.main_frontier;
     const auto& advice = s.request->prompt.context_cache;
     if (s.phase == detail::Phase::Prefill && advice.automatic_checkpoints &&
@@ -128,7 +134,9 @@ Session::prepare_capture(SequenceHandle h, std::span<const CheckpointHandle> hos
 
 std::vector<std::uint32_t> Session::capture_frontiers(SequenceHandle h) const {
     std::vector<std::uint32_t> result;
-    for (const auto& point : impl_->sequence(h).captures) result.push_back(point.frontier);
+    for (const auto& point : impl_->sequence(h).captures) {
+        result.push_back(point.frontier);
+    }
     return result;
 }
 
@@ -184,9 +192,10 @@ bool Session::start_capture(SequenceHandle h) {
         migration.own_state(reservation.destination);
         reservation.destination = {};
         std::vector<context::HistoryPrefix> prefixes;
-        for (std::uint16_t pool = 0; pool < p.directory.pool_count(); ++pool)
+        for (std::uint16_t pool = 0; pool < p.directory.pool_count(); ++pool) {
             prefixes.push_back(p.directory.pool(pool).histories().retain_prefix(
                 s.histories[pool].handle(), s.continuation.metadata.main_frontier));
+        }
         p.directory.states().freeze(s.continuation.image);
         tx.snapshot.emplace(p.directory.states(), s.continuation, std::move(prefixes),
                             s.request->identity);

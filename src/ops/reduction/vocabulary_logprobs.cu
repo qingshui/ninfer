@@ -28,9 +28,10 @@ __global__ void stats_kernel(const __nv_bfloat16* logits, const int* targets, in
     maximum   = block_max_broadcast<kThreads>(maximum);
     float sum = 0;
 #pragma unroll
-    for (int i = 0; i < kTile / kThreads; ++i)
+    for (int i = 0; i < kTile / kThreads; ++i) {
         if (std::int64_t(start) + threadIdx.x + i * kThreads < live)
             sum += __expf(values[i] - maximum);
+    }
     __shared__ float warp_sums[kThreads / 32];
     sum = block_reduce_sum<kThreads>(sum, warp_sums);
     if (threadIdx.x == 0) {
@@ -53,7 +54,9 @@ __global__ void merge_kernel(const float* input, float* output, int pieces,
     if (col >= columns) return;
     const auto* in = input + col * column_stride;
     float maximum  = -CUDART_INF_F;
-    for (int i = lane; i < pieces; i += 32) maximum = fmaxf(maximum, in[i * piece_stride]);
+    for (int i = lane; i < pieces; i += 32) {
+        maximum = fmaxf(maximum, in[i * piece_stride]);
+    }
     maximum   = warp_max(maximum);
     float sum = 0, target = 0;
     for (int i = lane; i < pieces; i += 32) {
@@ -95,16 +98,18 @@ void vocabulary_logprob_stats(const Tensor& logits, const Tensor& target_ids, in
     operand::tensor(target_ids, DType::I32, {cols}, 4, op, "targets", execution.device());
     operand::tensor(stats, DType::FP32, {3, cols}, 4, op, "stats", execution.device());
     operand::device(workspace.device(), execution.device(), op, "workspace");
-    for (const auto* input : {&logits, &target_ids})
+    for (const auto* input : {&logits, &target_ids}) {
         operand::disjoint(operand::range(stats, op), operand::range(*input, op), op);
+    }
     auto scope     = workspace.scope();
     float* output  = static_cast<float*>(stats.data);
     float* partial = output;
     if (bytes) {
         const auto scratch = workspace.alloc_bytes(bytes);
         const auto range   = operand::range(scratch.data, scratch.bytes, op);
-        for (const auto* input : {&logits, &target_ids, static_cast<const Tensor*>(&stats)})
+        for (const auto* input : {&logits, &target_ids, static_cast<const Tensor*>(&stats)}) {
             operand::disjoint(range, operand::range(*input, op), op);
+        }
         partial = static_cast<float*>(scratch.data);
     }
     const int pieces = partials(rows),

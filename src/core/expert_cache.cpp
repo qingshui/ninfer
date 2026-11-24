@@ -404,7 +404,9 @@ struct ExpertCache::Impl {
         }
         try {
             ++writer_epoch;
-            for (const auto i : retired) wait_readers(i);
+            for (const auto i : retired) {
+                wait_readers(i);
+            }
             for (const auto i : retired) {
                 auto& entry = entries[i];
                 counters.used_bytes -= size(i);
@@ -536,7 +538,9 @@ struct ExpertCache::Impl {
     }
 
     void finish_upload(Slot& slot) {
-        for (const auto i : completed) mark_dirty(i);
+        for (const auto i : completed) {
+            mark_dirty(i);
+        }
         publish(slot);
         slot.done.record(transfer.stream());
         slot.pending = true;
@@ -762,7 +766,9 @@ void ExpertCache::release(ExpertCacheUse token, CudaExecutionView execution) {
         state.failed = true;
         throw;
     }
-    for (const auto ref : use.entries) --state.entries[ref.index].open_uses;
+    for (const auto ref : use.entries) {
+        --state.entries[ref.index].open_uses;
+    }
     use.released = true;
 }
 

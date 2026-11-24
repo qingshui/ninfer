@@ -88,9 +88,10 @@ TextWeights bind_text(Bindings& b, const TextConfig& c) {
     out.embedding = b.parameter("text/token_embedding", {c.vocabulary, c.hidden}, {}, QType::BF16);
     out.head     = b.parameter("text/output_head", {c.vocabulary, c.hidden}, {"text/final_hidden"});
     out.final_hc = hc(b, c, "text/final_hc/", true);
-    for (std::size_t l = 0; l < c.layers.size(); ++l)
+    for (std::size_t l = 0; l < c.layers.size(); ++l) {
         out.layers.push_back(
             block(b, c, "text/layers/" + std::to_string(l) + "/", c.layers[l].mixer));
+    }
     const auto p = "text/layers/" + std::to_string(c.ple.layer) + "/ple/";
     out.ple = {b.parameter(p + "key", {c.residual_width(), c.ple.embedding}, {p + "embedding"}),
                b.parameter(p + "value", {c.hidden, c.ple.embedding}, {p + "embedding"}),

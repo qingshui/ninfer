@@ -51,9 +51,10 @@ context::ContextDirectorySpec context_spec(const detail::SequencePlanImpl& plan)
         add_pool(1, *resources.dflash->full);
     result.metadata_budget_bytes = plan.context_metadata_bytes;
     if (result.metadata_budget_bytes)
-        for (auto& pool : result.pools)
+        for (auto& pool : result.pools) {
             pool.histories =
                 context::HistoryDirectory::capacity_for_metadata(result.metadata_budget_bytes);
+        }
     return result;
 }
 
@@ -137,10 +138,11 @@ SequencePlanner make_sequence_planner(std::shared_ptr<const execution::ModelProf
     metadata.bytes_per_record[state_class] +=
         detail::Checkpoints::metadata_bytes(1) - detail::Checkpoints::metadata_bytes(0) +
         context::RecoveryIndex<>::metadata_bytes(1) - context::RecoveryIndex<>::metadata_bytes(0);
-    for (const auto& pool : spec.pools)
+    for (const auto& pool : spec.pools) {
         metadata.bytes_per_record[state_class] +=
             context::HistoryDirectory::metadata_bytes(1, 0, pool.page_capacity) -
             context::HistoryDirectory::metadata_bytes(0, 0, pool.page_capacity);
+    }
     return SequencePlanner(std::move(impl));
 }
 

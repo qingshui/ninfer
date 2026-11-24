@@ -37,11 +37,12 @@ void validate_control_capacity(const ControlBudget& b, ExecutionCapacity frames,
                                                             {"Commit", b.commit},
                                                             {"Event", b.event},
                                                             {"MeasurementComplete", report}};
-    for (auto [name, bytes] : messages)
+    for (auto [name, bytes] : messages) {
         if (!bytes || bytes > limits.message_bytes)
             throw std::invalid_argument(std::string(name) + " capacity " + std::to_string(bytes) +
                                         " exceeds transport message limit " +
                                         std::to_string(limits.message_bytes));
+    }
 
     struct Queue {
         std::size_t bytes = 0, messages = 0;
@@ -151,7 +152,9 @@ void encode(wire::Encoder& out, const Envelope& e) {
     out.u64(e.plan);
     out.u32(e.scope.result_owner);
     out.u64(e.scope.owners.size());
-    for (auto rank : e.scope.owners) out.u32(rank);
+    for (auto rank : e.scope.owners) {
+        out.u32(rank);
+    }
 }
 
 Envelope envelope(wire::Decoder& in) {
@@ -161,7 +164,9 @@ Envelope envelope(wire::Decoder& in) {
     out.plan               = in.u64();
     out.scope.result_owner = in.u32();
     out.scope.owners.resize(in.count(4));
-    for (auto& rank : out.scope.owners) rank = in.u32();
+    for (auto& rank : out.scope.owners) {
+        rank = in.u32();
+    }
     return out;
 }
 
@@ -173,7 +178,9 @@ void encode(wire::Encoder& out, const DecisionInput& input) {
         out.u32(row.positions);
         out.u32(row.dead_positions);
         out.u64(row.words.size());
-        for (auto word : row.words) out.u32(word);
+        for (auto word : row.words) {
+            out.u32(word);
+        }
     }
 }
 
@@ -186,7 +193,9 @@ DecisionInput decision_input(wire::Decoder& in) {
         row.positions      = in.u32();
         row.dead_positions = in.u32();
         row.words.resize(in.count(4));
-        for (auto& word : row.words) word = in.u32();
+        for (auto& word : row.words) {
+            word = in.u32();
+        }
     }
     return out;
 }
@@ -198,7 +207,9 @@ void encode(wire::Encoder& out, const DecisionRequest& request) {
     for (const auto& row : request.rows) {
         out.u32(row.member);
         out.u64(row.drafts.size());
-        for (auto token : row.drafts) out.i32(token);
+        for (auto token : row.drafts) {
+            out.i32(token);
+        }
     }
 }
 
@@ -210,7 +221,9 @@ DecisionRequest decision_request(wire::Decoder& in) {
     for (auto& row : out.rows) {
         row.member = in.u32();
         row.drafts.resize(in.count(4));
-        for (auto& token : row.drafts) token = in.i32();
+        for (auto& token : row.drafts) {
+            token = in.i32();
+        }
     }
     return out;
 }

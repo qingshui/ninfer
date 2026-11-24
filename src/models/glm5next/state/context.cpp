@@ -87,8 +87,9 @@ std::vector<context::RecordRangeCopy> state_conversion(std::span<const StatePlac
     if (from >= states.size() || to >= states.size())
         throw std::out_of_range("GLM5Next State conversion owner is outside its rank group");
     std::vector<context::RecordRangeCopy> out;
-    for (std::uint32_t rank = 0; rank < states.size(); ++rank)
+    for (std::uint32_t rank = 0; rank < states.size(); ++rank) {
         out.push_back({rank, rank, 0, 0, states[rank].common.bytes});
+    }
     const auto& source      = states[from].owner_fields;
     const auto& destination = states[to].owner_fields;
     if (source.bytes != destination.bytes)

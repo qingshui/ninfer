@@ -16,8 +16,9 @@ const Mxfp8LinearShape& shape(int n, int k, LinearPolicy policy) {
         &kMxfp8N640K4096,   &kMxfp8N20480K1536, &kMxfp8N16384K1536, &kMxfp8N4096K16384,
         &kMxfp8N3072K1024,  &kMxfp8N1024K1024,
     };
-    for (const auto* shape : shapes)
+    for (const auto* shape : shapes) {
         if (shape->n == n && shape->k == k) return *shape;
+    }
 #endif
     throw std::invalid_argument("mxfp8 linear: unsupported shape");
 }
@@ -27,8 +28,9 @@ const Mxfp8LinearRoute& select_mxfp8_linear_route(int n, int k, int tokens, Line
     const auto& selected = shape(n, k, policy);
     if (tokens <= 0) throw std::invalid_argument("MXFP8 linear: tokens must be positive");
     const auto routes = allows_a8(policy) ? selected.a8 : selected.a16;
-    for (const auto& route : routes)
+    for (const auto& route : routes) {
         if (tokens <= route.last_tokens) return route;
+    }
     throw std::invalid_argument("MXFP8 linear: unsupported token count");
 }
 

@@ -268,8 +268,9 @@ __global__ __launch_bounds__(256) void shared_control_finalize(const float* part
     if (output >= Intermediate + Shape::experts + 1) return;
     const auto sum = [&](int row) {
         float value = 0.0F;
-        for (int split = 0; split < splits; ++split)
+        for (int split = 0; split < splits; ++split) {
             value += partials[(std::int64_t(split) * tokens + token) * PartialRows + row];
+        }
         return value;
     };
     if (output < Intermediate) {

@@ -33,7 +33,9 @@ struct CommandLine {
 CommandLine read_arguments(int argc, char** argv, EntryPoint entry,
                            std::span<const CommandLineOption> extra_options) {
     CommandLine result;
-    for (int i = 0; i < argc; ++i) result.argv.emplace_back(argv[i]);
+    for (int i = 0; i < argc; ++i) {
+        result.argv.emplace_back(argv[i]);
+    }
     bool positional_only = false;
     bool model_seen      = false;
     bool config_seen     = false;
@@ -255,7 +257,9 @@ void merge_layer(StartupPatch& merged, StartupPatch layer, EntryPoint entry) {
             assignment(merged, Field::Messages).reset();
         }
         if (assignment(layer, Field::ConstraintKind)) {
-            for (Field field : kConstraintFields) assignment(merged, field).reset();
+            for (Field field : kConstraintFields) {
+                assignment(merged, field).reset();
+            }
         }
         if (const auto& effort = assignment(layer, Field::ReasoningEffort)) {
             if (!std::holds_alternative<DefaultValue>(effort->value))
@@ -267,8 +271,9 @@ void merge_layer(StartupPatch& merged, StartupPatch layer, EntryPoint entry) {
             assignment(layer, Field::ReasoningEffort) =
                 Assignment{DefaultValue{}, thinking->source};
     }
-    for (std::size_t i = 0; i < layer.size(); ++i)
+    for (std::size_t i = 0; i < layer.size(); ++i) {
         if (layer[i]) merged[i] = std::move(layer[i]);
+    }
 }
 
 ReasoningEffort reasoning_effort(std::string_view name) {
@@ -520,16 +525,18 @@ ParsedOptions parse(int argc, char** argv, EntryPoint entry,
             parsed.cli.print_token_ids = boolean();
             break;
         case Field::StopIds:
-            for (auto token : std::get<std::vector<std::uint32_t>>(value))
+            for (auto token : std::get<std::vector<std::uint32_t>>(value)) {
                 parsed.cli.stop_token_ids.push_back(static_cast<TokenId>(token));
+            }
             break;
         case Field::Stop:
         case Field::ReasoningStop:
-            for (const auto& stop : std::get<std::vector<std::string>>(value))
+            for (const auto& stop : std::get<std::vector<std::string>>(value)) {
                 parsed.cli.stop_strings.push_back({.text    = stop,
                                                    .channel = spec.field == Field::Stop
                                                                   ? OutputChannel::Content
                                                                   : OutputChannel::Reasoning});
+            }
             break;
         case Field::ConstraintKind:
             parsed.cli.constraint.kind = constraint_kind(string());

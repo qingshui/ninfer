@@ -140,8 +140,9 @@ std::span<const Route> routes(LinearPolicy policy) {
 }
 
 const Route& select_route(LinearPolicy policy, int tokens) {
-    for (const auto& route : routes(policy))
+    for (const auto& route : routes(policy)) {
         if (tokens <= route.last_tokens) return route;
+    }
     throw std::invalid_argument("MXFP8 linear_split: unsupported token count");
 }
 

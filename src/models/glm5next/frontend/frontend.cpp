@@ -23,17 +23,20 @@ std::uint32_t checked_count(std::size_t count) {
 }
 
 void require_media_support(std::span<const ChatMessage> messages, bool vision_enabled) {
-    for (const auto& message : messages)
-        for (const auto& part : message.parts)
+    for (const auto& message : messages) {
+        for (const auto& part : message.parts) {
             if (part.kind == MessagePartKind::Media && !vision_enabled)
                 throw std::invalid_argument("Vision is disabled for this Engine");
+        }
+    }
 }
 
 std::vector<const OwnedMedia*> media_sources(const RenderedChat& chat,
                                              std::span<const ChatMessage> messages) {
     std::vector<const OwnedMedia*> result;
-    for (const auto& media : chat.media)
+    for (const auto& media : chat.media) {
         result.push_back(&messages[media.message].parts[media.part].media);
+    }
     return result;
 }
 
@@ -49,14 +52,16 @@ void encode_prompt(PreparedPromptData& output, const text::Tokenizer& tokenizer,
     std::vector<std::size_t> offsets = boundaries.semantic;
     offsets.insert(offsets.end(), boundaries.structural.begin(), boundaries.structural.end());
     offsets.insert(offsets.end(), boundaries.execution.begin(), boundaries.execution.end());
-    for (const auto marker : boundaries.markers)
+    for (const auto marker : boundaries.markers) {
         if (marker) offsets.push_back(*marker);
+    }
     if (boundaries.rewrite) offsets.push_back(boundaries.rewrite->frontier);
-    for (const auto& item : media_spans)
+    for (const auto& item : media_spans) {
         for (const auto span : item) {
             offsets.push_back(span.begin);
             offsets.push_back(span.end);
         }
+    }
     std::sort(offsets.begin(), offsets.end());
     offsets.erase(std::unique(offsets.begin(), offsets.end()), offsets.end());
     const auto start                = Clock::now();
@@ -77,14 +82,16 @@ void encode_prompt(PreparedPromptData& output, const text::Tokenizer& tokenizer,
     };
     const auto convert = [&](const auto& source) {
         std::vector<std::uint32_t> values;
-        for (const auto offset : source)
+        for (const auto offset : source) {
             if (const auto value = frontier(offset)) values.push_back(*value);
+        }
         sort_unique(values);
         return values;
     };
     std::vector<std::optional<std::uint32_t>> markers;
-    for (const auto marker : boundaries.markers)
+    for (const auto marker : boundaries.markers) {
         markers.push_back(marker ? frontier(*marker) : std::nullopt);
+    }
     output.context_cache = models::frontend::prepare_context_cache(
         hints, markers, convert(boundaries.semantic), convert(boundaries.structural));
     output.identity.execution_frontiers = convert(boundaries.execution);
@@ -204,9 +211,10 @@ PreparedPrompt Frontend::prepare(PromptInput input, const PreparationControl& co
                                                   data->prepare, control);
         media_spans =
             expand_media(rendered, boundaries, prepared.items, impl_->processor->merge_size());
-        for (auto& item : prepared.items)
+        for (auto& item : prepared.items) {
             data->identity.media.push_back(
                 {std::move(item), impl_->processor->preparation_digest()});
+        }
         data->media_payloads = std::move(prepared.payloads);
     }
     encode_prompt(*data, *impl_->tokenizer, rendered, boundaries, input.context_cache,
@@ -249,9 +257,10 @@ PreparedPrompt Frontend::prepare_tokens(std::vector<TokenId> tokens,
             RequestErrorKind::ContextLengthExceeded,
             runtime::context_length_error_message(tokens.size(), impl_->max_context));
     (void)checked_count(tokens.size());
-    for (const auto token : tokens)
+    for (const auto token : tokens) {
         if (!impl_->tokenizer->is_valid_token(token))
             throw std::invalid_argument("prompt token is outside the checkpoint vocabulary");
+    }
     auto data                                = std::make_unique<PreparedPromptData>();
     data->token_ids                          = std::move(tokens);
     data->identity.reusable                  = allow_prefix_identity;

@@ -83,8 +83,9 @@ prefill_plan_segment_counts(std::uint32_t prefill_chunk, std::uint32_t pack_toke
     std::vector<std::uint32_t> counts;
     if (prefill_chunk == 0) return counts;
     for (std::uint64_t segments = 1;
-         segments <= lanes && segments * prefill_chunk <= pack_tokens; segments <<= 1)
+         segments <= lanes && segments * prefill_chunk <= pack_tokens; segments <<= 1) {
         counts.push_back(static_cast<std::uint32_t>(segments));
+    }
     return counts;
 }
 

@@ -119,8 +119,9 @@ public:
         }
         cumulative_stats_.speculative_attempted_per_position.resize(speculative_positions_);
         cumulative_stats_.speculative_accepted_per_position.resize(speculative_positions_);
-        for (const auto& placement : instance_.session->placement_descriptions())
+        for (const auto& placement : instance_.session->placement_descriptions()) {
             cumulative_stats_.placements.push_back({.id = placement.id});
+        }
         stats_snapshot_             = cumulative_stats_;
         published_snapshot_.runtime = cumulative_stats_;
         published_snapshot_.ranks.assign(instance_.executor->observations().begin(),

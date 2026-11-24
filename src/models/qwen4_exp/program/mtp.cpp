@@ -251,11 +251,12 @@ void RankProgramImpl::prepare_mtp() {
     calls.reserve(steps);
     for (std::uint32_t step = 0; step < steps; ++step) {
         std::array<MtpInputRow, kMaximumSupportedConcurrency> step_inputs;
-        for (int b = 0; b < batch; ++b)
+        for (int b = 0; b < batch; ++b) {
             step_inputs[b] = {f.rows[b].main_frontier - 1 + std::min(step, round.extents[b]),
                               step == 0 || step < round.extents[b]
                                   ? std::span<const TokenId>(f.rows[b].ids)
                                   : std::span<const TokenId>{}};
+        }
         calls.push_back(mtp_inputs(frame.draft_steps[step], f.rows, 1,
                                    {step_inputs.data(), f.rows.size()}, false));
         f.draft_visible.push_back(calls.back().max_visible_tokens);
@@ -283,7 +284,9 @@ void RankProgramImpl::prepare_mtp() {
     }
     std::array<std::uint32_t, kMaximumSupportedConcurrency> valid;
     gpu_timer.end_draft();
-    for (int b = 0; b < batch; ++b) valid[b] = round.extents[b] + 1;
+    for (int b = 0; b < batch; ++b) {
+        valid[b] = round.extents[b] + 1;
+    }
     if (host_ple) host_ple->seal(*f.ple, {valid.data(), f.rows.size()});
     ops::prepare_verify_ids(row_tensor(buffers.anchors), drafts, row_tensor(frame.extents),
                             f.batch.ids, cuda);
