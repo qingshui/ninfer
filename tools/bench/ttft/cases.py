@@ -149,7 +149,8 @@ def _preemption_messages(corpus: Corpus, marker: str) -> list[dict[str, Any]]:
     messages = copy.deepcopy(corpus.shape_messages("interferer-256"))
     messages[0]["content"] = marker + "。" + messages[0]["content"]
     messages[-1]["content"] += (
-        "\n每章写出具体场景、人物对话和连续动作。慢慢展开环境变化、人物记忆与线索发现，"
+        "\n每章写出具体场景、人物对话和连续动作"
+        "。慢慢展开环境变化、人物记忆与线索发现，"
         "详细描写每个转折的过程。让故事自然推进，保持情节连贯。"
         "重点描写设备操作的细节，以及主角在不同阶段的观察、推理和具体行动。"
         "保持每章的完整性。"
@@ -291,7 +292,8 @@ def _shared_growth_messages(corpus: Corpus, branch: str) -> list[dict[str, Any]]
     system = corpus.shape_messages("state-2k-a")[0]["content"]
     question = corpus.shape_messages("interferer-256")[-1]["content"]
     question += (
-        "\n每章写出具体场景、人物对话和连续动作。慢慢展开环境变化、人物记忆与线索发现，"
+        "\n每章写出具体场景、人物对话和连续动作"
+        "。慢慢展开环境变化、人物记忆与线索发现，"
         "详细描写每个转折的过程。让故事自然推进，保持情节连贯。"
         f"\n故事分支 {branch}。"
     )
@@ -370,7 +372,8 @@ def _vision_growth_replay(context: CaseContext, corpus: Corpus) -> None:
     """Run fixed Text and Vision growth arrivals and require the Vision request's own replay."""
     messages = corpus.media_messages("image-chart")
     prompt = corpus.shape_messages("interferer-256")[-1]["content"] + (
-        "\n详细讲述每一步的判断过程，逐段分析人物和环境的变化。保持故事连贯，不要提前结束。"
+        "\n详细讲述每一步的判断过程，逐段分析人物"
+        "和环境的变化。保持故事连贯，不要提前结束。"
     )
     for part in messages[0]["content"]:
         if part.get("type") == "text":
