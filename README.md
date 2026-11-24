@@ -2,7 +2,7 @@
 
 > 在 RTX 5090、B200 与 DGX Spark 上对精选模型做原生 C++/CUDA 推理。
 
-NInfer 通过本地 CLI 或兼容 OpenAI 与 Anthropic 的 HTTP API 运行文本与图像/视频生成。它支持单卡执行，也支持跨两台 DGX Spark 的模型并行，带有 CUDA Graph decode、投机解码与共享前缀缓存。一个 Engine 服务一个模型，使用可配置数量的执行 lane：服务默认同时 8 个活跃请求，`--max-concurrency 0` 会按模型的上下文容量自动拟合，最多 1024 条 lane（各模型上限不同；见[服务指南](docs/serving.md#execution-behavior)）。
+NInfer 通过本地 CLI 或兼容 OpenAI 与 Anthropic 的 HTTP API 运行文本与图像/视频生成。它支持单卡执行，也支持跨两台 DGX Spark 的模型并行，带有 CUDA Graph decode、投机解码与共享前缀缓存。一个 Engine 服务一个模型，使用可配置数量的执行 lane：服务默认按模型的上下文容量自动拟合 lane 数（最多 1024 条，各模型上限不同），lane governor 按 decode 节拍约束常驻 lane 以优先保证延迟；显式 `--max-concurrency N` 固定 N 条 lane（见[服务指南](docs/serving.md#execution-behavior)）。
 
 ## 支持的模型与部署
 
@@ -15,7 +15,7 @@ NInfer 通过本地 CLI 或兼容 OpenAI 与 Anthropic 的 HTTP API 运行文本
 | GLM-5.3-Flash | GLM5Next | 双 Spark | MTP |
 | Spark2_5 17B | Spark2_5 | RTX 5090 | — |
 
-除 Qwen3.5-MoE-122B 只支持文本外，其余均支持文本、视觉、工具调用、受约束输出与离线困惑度评分。Spark2_5 仅文本，且没有已发布的 artifact；用 [Spark 配方](docs/weight-conversion.md#spark2_5)转换本地 `Spark2_5ForCausalLM` checkpoint。Qwen3.5-MoE-122B 同样没有已发布 artifact；用 [`qwen3_5_122b_nvfp4` 配方](docs/weight-conversion.md)转换本地 ModelOpt NVFP4 checkpoint。视觉与投机解码要求 artifact 内含相应组件并在启动时开启；评分只加载 Text。CPU 专家 offload 适用于 RTX 5090 目标；Spark 执行把部分权重留在 GPU。Flash Next 的 offload 还需要较大系统内存存放专家权重，见 [CLI 指南](docs/cli.md#cpu-expert-offload)。
+除 Qwen3.5-MoE-122B 只支持文本外，其余均支持文本、视觉、工具调用、受约束输出与离线困惑度评分。Spark2_5 仅文本，且没有已发布的 artifact；用 [Spark 配方](docs/weight-conversion.md#spark2_5)转换本地 `Spark2_5ForCausalLM` checkpoint。Qwen3.5-MoE-122B 同样没有已发布 artifact；用 [`qwen3_5_122b_nvfp4` 配方](docs/weight-conversion.md)转换本地 ModelOpt NVFP4 checkpoint，其在 B200 上的编译、部署与验证流程见 [Qwen3.5-MoE-122B B200 指南](docs/qwen35-122b-b200.md)。视觉与投机解码要求 artifact 内含相应组件并在启动时开启；评分只加载 Text。CPU 专家 offload 适用于 RTX 5090 目标；Spark 执行把部分权重留在 GPU。Flash Next 的 offload 还需要较大系统内存存放专家权重，见 [CLI 指南](docs/cli.md#cpu-expert-offload)。
 
 双 Spark 的 Flash Next 使用 TP2，可选 EP2。GLM 使用 TP2 加 attention DP2，可选 EP2。[部署指南](docs/startup-configuration.md#distributed-deployment)解释这些设置与 worker 启动；[示例配置](examples/configs/)覆盖常见部署，包括视觉、FP8 KV、MTP3 与优化后的 draft head。
 

@@ -35,6 +35,23 @@ python3 tools/bench/run_serve_concurrency.py \
 两种 suite 的工作量和时间边界不同，报告使用实际完成输出及请求 outcome。
 语料会影响 expert 激活与 speculative 接受情况；重复文本不能未经测量就声称不影响结果。
 
+## 定批 decode
+
+[run_serve_fixed_batch.py](run_serve_fixed_batch.py)向已运行服务同时释放 N 条各生成 `--max-tokens`
+的长流，报告全部 N 行常驻窗口内每条流的 TPOT 中位数，即 N 行时的 decode 步长。
+每条流使用预先建立的连接，采样显式带 presence penalty 以保证跨引擎可比；token 数取
+usage 计数，缺失时退化为事件计数并标记为估计。
+
+```bash
+python3 -I tools/bench/run_serve_fixed_batch.py \
+  --base-url http://127.0.0.1:8080 --rows 32,48,56,64,72,96 \
+  --max-tokens 1200 --output .agent-tmp/fixed_batch/run.json
+```
+
+服务需另行启动；要保证 N 行全部常驻，用显式 `--max-concurrency`（不小于最大行数）关闭
+governor。Qwen3.5-MoE-122B 在 B200 上的完整流程见
+[部署与验证指南](../../docs/qwen35-122b-b200.md)。
+
 ## 外部服务 TTFT
 
 [TTFT 说明](ttft/README.md)定义公开 HTTP 的首输出、stream gap、取消与缓存诊断。
