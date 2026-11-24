@@ -63,6 +63,7 @@ def _canonical_scale_words(
 def _cuda_scale_words(
     max_abs: torch.Tensor, qmax: int
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Compute scale words and reciprocals on the GPU with host-identical rounding."""
     # Keep the same FP64 -> FP32 -> FP16 rounding boundaries as the host oracle.
     scale = (max_abs.double() / qmax).float().half()
     scale = torch.where((scale == 0) & (max_abs > 0), _FP16_MIN_SUBNORMAL, scale)
@@ -74,6 +75,7 @@ def _cuda_scale_words(
 
 
 def pick_device(preferred: str | torch.device = "cuda") -> torch.device:
+    """Return the preferred device, falling back to CPU when CUDA is unavailable."""
     device = torch.device(preferred)
     if device.type == "cuda" and not torch.cuda.is_available():
         return torch.device("cpu")

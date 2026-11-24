@@ -1,3 +1,5 @@
+"""Tests for the EvalScopeBackend planner and metric normalization."""
+
 import json
 import tempfile
 import threading
@@ -12,7 +14,10 @@ from ninfer_eval.config import JobConfig
 
 
 class EvalScopeBackendTest(unittest.TestCase):
+    """Tests for EvalScopeBackend work planning and result normalization."""
+
     def test_plans_new_text_and_multimodal_datasets(self):
+        """Plan totals match the known sample counts of the text and multimodal datasets."""
         backend = EvalScopeBackend()
         expected = {
             "erqa": 400,
@@ -35,6 +40,7 @@ class EvalScopeBackendTest(unittest.TestCase):
                 self.assertEqual(backend.plan(job, None).total, total)
 
     def test_plans_needle_haystack_generated_matrix(self):
+        """Planning the generated needle-haystack grid yields 66 cells over two subsets."""
         backend = EvalScopeBackend()
         job = JobConfig(
             "needle",
@@ -60,6 +66,7 @@ class EvalScopeBackendTest(unittest.TestCase):
         self.assertEqual(plan.subsets, ("english", "chinese"))
 
     def test_normalizes_all_needle_haystack_grid_cells(self):
+        """Grid cells normalize into overall and per-subset accuracies and completed counts."""
         backend = EvalScopeBackend()
         job = JobConfig(
             "needle", "evalscope", "needle_haystack", "api", 1, None, 1, {}, {}
@@ -114,6 +121,7 @@ class EvalScopeBackendTest(unittest.TestCase):
             self.assertEqual(result.counts.completed, 4)
 
     def test_normalizes_accuracy_without_importing_evalscope(self):
+        """A plain accuracy score normalizes to the primary metric without evalscope."""
         backend = EvalScopeBackend()
         job = JobConfig("gpqa", "evalscope", "gpqa_diamond", "api", 1, None, 1, {}, {})
         with tempfile.TemporaryDirectory() as tmp:
@@ -131,6 +139,7 @@ class EvalScopeBackendTest(unittest.TestCase):
             self.assertEqual(result.counts.completed, 198)
 
     def test_normalizes_ifbench_official_metrics(self):
+        """IFBench mean_* metrics normalize to named scores with prompt_level_strict primary."""
         backend = EvalScopeBackend()
         job = JobConfig("ifbench", "evalscope", "ifbench", "api", 2, None, 1, {}, {})
         scores = {
@@ -163,6 +172,7 @@ class EvalScopeBackendTest(unittest.TestCase):
             self.assertEqual(result.counts.completed, 300)
 
     def test_normalizes_bfcl_official_aggregates(self):
+        """BFCL official aggregate subsets normalize to per-subset metrics with overall primary."""
         backend = EvalScopeBackend()
         job = JobConfig("bfcl", "evalscope", "bfcl_v4", "api", 1, None, 1, {}, {})
         with tempfile.TemporaryDirectory() as tmp:
@@ -191,6 +201,7 @@ class EvalScopeBackendTest(unittest.TestCase):
             self.assertEqual(result.metrics["agentic"], 0.4)
 
     def test_partial_bfcl_uses_selected_sample_accuracy(self):
+        """A partial BFCL run keeps selected-subset accuracy and drops the official overall."""
         backend = EvalScopeBackend()
         job = JobConfig(
             "bfcl",
@@ -236,6 +247,7 @@ class EvalScopeBackendTest(unittest.TestCase):
             self.assertNotIn("overall", result.metrics)
 
     def test_normalization_surfaces_provider_errors_wrapped_by_bfcl(self):
+        """Provider errors wrapped in BFCL output surface as a failed run of one sample."""
         backend = EvalScopeBackend()
         job = JobConfig(
             "bfcl",
@@ -277,6 +289,7 @@ class EvalScopeBackendTest(unittest.TestCase):
             self.assertEqual(result.status, "failed")
 
     def test_short_report_is_partial_and_keeps_original_accuracy(self):
+        """A report with fewer samples than planned is partial but keeps its accuracy."""
         backend = EvalScopeBackend()
         job = JobConfig("aime", "evalscope", "aime26", "api", 8, None, 32, {}, {})
         with tempfile.TemporaryDirectory() as tmp:
@@ -291,6 +304,7 @@ class EvalScopeBackendTest(unittest.TestCase):
             self.assertEqual(result.counts.scored, 900)
 
     def test_dataset_seed_does_not_become_request_seed(self):
+        """The dataset seed stays the task seed and never leaks into generation_config."""
         from ninfer_eval.config import RequestConfig, TargetConfig
         from ninfer_eval.secrets import ResolvedTarget
 
@@ -334,6 +348,7 @@ class EvalScopeBackendTest(unittest.TestCase):
         self.assertNotIn("seed", task["generation_config"])
 
     def test_bfcl_task_snapshot_does_not_contain_serpapi_secret(self):
+        """The BFCL task snapshot hides the SERPAPI key while the run environment gets it."""
         backend = EvalScopeBackend()
         job = JobConfig(
             "bfcl",
@@ -390,6 +405,7 @@ class EvalScopeBackendTest(unittest.TestCase):
                 os.environ["TEST_SERP_KEY"] = old
 
     def test_none_sample_retention_removes_prediction_and_review_caches(self):
+        """Sample retention 'none' deletes the prediction and review cache directories."""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             for dirname in ("predictions", "reviews"):

@@ -91,6 +91,8 @@ LOG_EVENT_TIMEOUT_SECONDS = 10.0
 
 @dataclasses.dataclass(frozen=True)
 class Fixture:
+    """One corpus case: its messages, thinking flag, and generation limits."""
+
     name: str
     messages: list[dict[str, Any]]
     thinking: bool
@@ -101,6 +103,8 @@ class Fixture:
 
 @dataclasses.dataclass(frozen=True)
 class RunSpec:
+    """One formal benchmark request: artifact, mode, sampling, KV dtype, fixture, and seed."""
+
     target: str
     model_id: str
     artifact: Path
@@ -114,6 +118,7 @@ class RunSpec:
 
     @property
     def key(self) -> tuple[str, str, str, str, int]:
+        """Return the (target, mode, sampling, fixture, seed) identity of this run."""
         return (
             self.target,
             self.speculative_mode,
@@ -124,13 +129,16 @@ class RunSpec:
 
 
 class CampaignError(RuntimeError):
-    pass
+    """Raised for campaign configuration, protocol, and validation failures."""
 
 
 class ServerLogTail:
+    """Incrementally tail a ninfer-serve JSONL request log for lifecycle events."""
+
     def __init__(
         self, path: Path, process: subprocess.Popen[bytes], initial_offset: int
     ) -> None:
+        """Track the log path, server process, and events found after the initial offset."""
         self.path = path
         self.process = process
         self.offset = initial_offset
@@ -138,6 +146,7 @@ class ServerLogTail:
         self.pending: list[dict[str, Any]] = []
 
     def _check_process(self) -> None:
+        """Raise CampaignError when the server process has already exited."""
         returncode = self.process.poll()
         if returncode is not None:
             raise CampaignError(
@@ -145,6 +154,7 @@ class ServerLogTail:
             )
 
     def _read_new(self) -> None:
+        """Read appended log bytes and queue server lifecycle events as pending records."""
         if not self.path.exists():
             return
         with self.path.open("rb") as handle:
@@ -178,6 +188,7 @@ class ServerLogTail:
         description: str,
         timeout: float = LOG_EVENT_TIMEOUT_SECONDS,
     ) -> dict[str, Any]:
+        """Poll the log until predicate matches a pending event; remove and return it."""
         deadline = time.monotonic() + timeout
         while True:
             self._read_new()
@@ -193,6 +204,8 @@ class ServerLogTail:
 
 
 class RunningServer:
+    """A ninfer-serve subprocess with readiness and request-completion tracking."""
+
     def __init__(
         self,
         command: Sequence[str],
@@ -200,6 +213,7 @@ class RunningServer:
         port: int,
         log_path: Path,
     ) -> None:
+        """Store the launch command, host, port, and request log path."""
         self.command = list(command)
         self.host = host
         self.port = port
@@ -208,15 +222,18 @@ class RunningServer:
         self.tail: ServerLogTail | None = None
 
     def __enter__(self) -> "RunningServer":
+        """Start the server process and begin tailing its request log."""
         initial_offset = self.log_path.stat().st_size if self.log_path.exists() else 0
         self.process = subprocess.Popen(self.command, cwd=REPO_ROOT)
         self.tail = ServerLogTail(self.log_path, self.process, initial_offset)
         return self
 
     def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        """Stop the server when leaving the with block."""
         self.stop()
 
     def stop(self) -> None:
+        """Terminate the server, escalating to kill after the grace timeout."""
         if self.process is None or self.process.poll() is not None:
             return
         self.process.terminate()
@@ -227,6 +244,7 @@ class RunningServer:
             self.process.wait()
 
     def wait_until_ready(self) -> dict[str, Any]:
+        """Poll /health and the log until the server reports its server_start event."""
         if self.process is None or self.tail is None:
             raise CampaignError("server process was not started")
         deadline = time.monotonic() + STARTUP_TIMEOUT_SECONDS
@@ -266,10 +284,12 @@ class RunningServer:
     def wait_for_request_done(
         self, server_instance_id: str, response_id: str | None = None
     ) -> dict[str, Any]:
+        """Wait for this instance's next request_done, optionally matching response_id."""
         if self.tail is None:
             raise CampaignError("server log tail is unavailable")
 
         def matches(event: dict[str, Any]) -> bool:
+            """Match this instance's request_done, or raise on a request_error event."""
             if event.get("server_instance_id") != server_instance_id:
                 return False
             if event.get("event") == "request_error":
@@ -286,6 +306,7 @@ class RunningServer:
 
 
 def add_launch_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add the shared ninfer-serve launch arguments to the argument parser."""
     parser.add_argument(
         "--config", type=Path, help="public Serve TOML, including deployment"
     )
@@ -308,6 +329,7 @@ def add_launch_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 def resolve_launch_arguments(args: argparse.Namespace) -> argparse.Namespace:
+    """Fill unset launch arguments from the TOML engine table and its defaults."""
     engine = {}
     if args.config:
         args.config = args.config.expanduser().resolve()
@@ -330,6 +352,7 @@ def resolve_launch_arguments(args: argparse.Namespace) -> argparse.Namespace:
 def launch_arguments(
     args: argparse.Namespace, concurrency: int, stats_interval: int
 ) -> list[str]:
+    """Build the fixed ninfer-serve command-line arguments for one campaign block."""
     command = ["--config", str(args.config)] if args.config else []
     command.extend(
         [
@@ -364,6 +387,7 @@ def launch_arguments(
 
 
 def sampling_arguments(mode: str) -> list[str]:
+    """Return the server sampling arguments for greedy or stochastic decoding."""
     if mode == "greedy":
         return ["--temperature", "0"]
     return [
@@ -383,6 +407,7 @@ def sampling_arguments(mode: str) -> list[str]:
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    """Parse and resolve the campaign command-line arguments."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--serve",
@@ -423,6 +448,7 @@ def filename_label(label: str) -> str:
 
 
 def parse_artifacts(values: Sequence[str]) -> list[tuple[str, Path]]:
+    """Parse LABEL=PATH artifact values into a validated, deduplicated ordered list."""
     parsed: dict[str, Path] = {}
     for value in values:
         target, separator, raw_path = value.partition("=")
@@ -442,6 +468,7 @@ def parse_artifacts(values: Sequence[str]) -> list[tuple[str, Path]]:
 
 
 def fixture_metadata(name: str) -> tuple[str, str | None]:
+    """Return the (suite, category) campaign assignment of one fixture name."""
     if name in NIAH_FIXTURES:
         return "long_niah", None
     if name in LONG_DECODE_FIXTURES:
@@ -455,6 +482,7 @@ def fixture_metadata(name: str) -> tuple[str, str | None]:
 
 
 def load_fixtures(thinking: str = "fixture") -> dict[str, Fixture]:
+    """Load the campaign fixtures and their messages from the examples manifest."""
     try:
         manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -493,6 +521,7 @@ def load_fixtures(thinking: str = "fixture") -> dict[str, Fixture]:
 
 
 def block_fixture_names(speculative_backend: str) -> tuple[str, ...]:
+    """Return the fixture names benchmarked in one server block for a backend."""
     scenarios = tuple(name for names in SCENARIO_FIXTURES.values() for name in names)
     if speculative_backend == "none":
         return NIAH_FIXTURES
@@ -508,6 +537,7 @@ def build_specs(
     sampling_mode: str,
     kv_dtype: str,
 ) -> list[RunSpec]:
+    """Enumerate one RunSpec per artifact, mode, backend fixture, and seed."""
     specs: list[RunSpec] = []
     for target, artifact in artifacts:
         for mode_name in mode_names:
@@ -532,6 +562,7 @@ def build_specs(
 
 
 def request_payload(model_id: str, fixture: Fixture, seed: int) -> dict[str, Any]:
+    """Build the chat-completions request body for one fixture and seed."""
     return {
         "model": model_id,
         "messages": fixture.messages,
@@ -543,6 +574,7 @@ def request_payload(model_id: str, fixture: Fixture, seed: int) -> dict[str, Any
 
 
 def send_json(connection: http.client.HTTPConnection, payload: dict[str, Any]) -> None:
+    """POST the JSON payload to /v1/chat/completions over the open connection."""
     body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode(
         "utf-8"
     )
@@ -563,6 +595,7 @@ def send_json(connection: http.client.HTTPConnection, payload: dict[str, Any]) -
 
 
 def receive_json(connection: http.client.HTTPConnection) -> dict[str, Any]:
+    """Read the response and return its JSON object, or raise CampaignError."""
     try:
         response = connection.getresponse()
         response_body = response.read()
@@ -583,11 +616,13 @@ def receive_json(connection: http.client.HTTPConnection) -> dict[str, Any]:
 def post_json(
     connection: http.client.HTTPConnection, payload: dict[str, Any]
 ) -> dict[str, Any]:
+    """Send one JSON request on the connection and return the parsed JSON response."""
     send_json(connection, payload)
     return receive_json(connection)
 
 
 def require_server_log_identity(event: dict[str, Any], event_name: str) -> None:
+    """Verify a log event's artifact type, schema version, and event name."""
     identity = (
         event.get("artifact_type"),
         event.get("schema_version"),
@@ -603,6 +638,7 @@ def require_server_log_identity(event: dict[str, Any], event_name: str) -> None:
 def validate_server_start(
     event: dict[str, Any], spec: RunSpec, args: argparse.Namespace
 ) -> tuple[str, str]:
+    """Validate server_start against the campaign spec, returning identity and signature."""
     require_server_log_identity(event, "server_start")
     engine = event.get("engine", {})
     actual = {
@@ -664,12 +700,14 @@ def validate_server_start(
 
 
 def safe_ratio(numerator: float, denominator: float) -> float | None:
+    """Return numerator/denominator, or None when the denominator is not positive."""
     if denominator <= 0.0:
         return None
     return numerator / denominator
 
 
 def repeated_suffix(response: dict[str, Any]) -> int | None:
+    """Measure the shortest suffix unit repeated in the response tail, or None."""
     message = response.get("choices", [{}])[0].get("message", {})
     text = (message.get("reasoning_content") or "") + (message.get("content") or "")
     tail = text[-1024:]
@@ -687,6 +725,7 @@ def build_result_record(
     response: dict[str, Any],
     server_event: dict[str, Any],
 ) -> dict[str, Any]:
+    """Validate request_done and build one run.jsonl record with derived metrics."""
     require_server_log_identity(server_event, "request_done")
     request = server_event.get("request", {})
     result = server_event.get("result", {})
@@ -866,6 +905,7 @@ def build_result_record(
 
 
 def record_key(record: dict[str, Any]) -> tuple[str, str, str, str, int]:
+    """Extract the (target, mode, sampling, fixture, seed) key of a result record."""
     try:
         return (
             str(record["target"]),
@@ -882,6 +922,7 @@ def load_existing_records(
     path: Path,
     expected_specs: dict[tuple[str, str, str, str, int], RunSpec],
 ) -> dict[tuple[str, str, str, str, int], dict[str, Any]]:
+    """Load resumable results from run.jsonl, validating them against the campaign specs."""
     records: dict[tuple[str, str, str, str, int], dict[str, Any]] = {}
     if not path.exists():
         return records
@@ -931,6 +972,7 @@ def load_existing_records(
 
 
 def append_record(handle: Any, record: dict[str, Any]) -> None:
+    """Append one JSON result record to the run file, flush it, and fsync."""
     handle.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
     handle.flush()
     os.fsync(handle.fileno())
@@ -942,6 +984,7 @@ def server_command(
     server_log: Path,
     args: argparse.Namespace,
 ) -> list[str]:
+    """Build the full ninfer-serve command line for one block's server."""
     command = [
         str(serve),
         str(spec.artifact),
@@ -973,6 +1016,7 @@ def run_block(
     completed_before_block: int,
     total: int,
 ) -> None:
+    """Run one block's missing requests against a fresh server and record the results."""
     first = block_specs[0]
     server_log = (
         output_dir
@@ -1029,6 +1073,7 @@ def run_block(
 
 
 def metric_values(records: Iterable[dict[str, Any]], name: str) -> list[float]:
+    """Collect the non-None values of one metric across the records."""
     values: list[float] = []
     for record in records:
         value = record["metrics"].get(name)
@@ -1040,6 +1085,7 @@ def metric_values(records: Iterable[dict[str, Any]], name: str) -> list[float]:
 def sample_stats(
     records: Sequence[dict[str, Any]], name: str
 ) -> tuple[int, float | None, float | None]:
+    """Return the sample count, mean, and sample stddev of one metric."""
     values = metric_values(records, name)
     if not values:
         return 0, None, None
@@ -1055,6 +1101,7 @@ def select_records(
     sampling_mode: str,
     fixtures: Sequence[str],
 ) -> list[dict[str, Any]]:
+    """Return the records of one target/mode/sampling across fixtures and seeds."""
     return [
         records[(target, speculative_mode, sampling_mode, fixture, seed)]
         for fixture in fixtures
@@ -1107,6 +1154,7 @@ def set_stats(
     records: Sequence[dict[str, Any]],
     metric: str,
 ) -> None:
+    """Store the mean and stddev of one metric in the row under the given prefix."""
     _, mean, stddev = sample_stats(records, metric)
     row[f"{prefix}_mean"] = mean
     row[f"{prefix}_stddev"] = stddev
@@ -1121,6 +1169,7 @@ def summary_row(
     sampling_mode: str,
     records: Sequence[dict[str, Any]],
 ) -> dict[str, Any]:
+    """Build one summary row of per-metric mean/stddev stats for a record group."""
     prefill_signatures = {
         str(record.get("prefill_signature", "")) for record in records
     }
@@ -1174,6 +1223,7 @@ def build_summary_rows(
     mode_names: Sequence[str],
     sampling_mode: str,
 ) -> list[dict[str, Any]]:
+    """Build all summary rows per target, mode, fixture, and scenario category."""
     rows: list[dict[str, Any]] = []
     for target in target_order:
         for mode_name in mode_names:
@@ -1251,6 +1301,7 @@ def build_summary_rows(
 
 
 def csv_value(value: Any) -> Any:
+    """Map a summary value to its CSV form, rejecting non-finite floats."""
     if value is None:
         return ""
     if isinstance(value, float) and not math.isfinite(value):
@@ -1259,6 +1310,7 @@ def csv_value(value: Any) -> Any:
 
 
 def format_mean_stddev(row: dict[str, Any], prefix: str, digits: int = 1) -> str:
+    """Format a metric's mean and stddev as 'mean ± stddev', or a dash when absent."""
     mean = row.get(f"{prefix}_mean")
     stddev = row.get(f"{prefix}_stddev")
     if mean is None or stddev is None:
@@ -1267,6 +1319,7 @@ def format_mean_stddev(row: dict[str, Any], prefix: str, digits: int = 1) -> str
 
 
 def format_percent_mean_stddev(row: dict[str, Any], prefix: str) -> str:
+    """Format a 0..1 metric's mean and stddev as percentages with sample stddev."""
     mean = row.get(f"{prefix}_mean")
     stddev = row.get(f"{prefix}_stddev")
     if mean is None or stddev is None:
@@ -1275,6 +1328,7 @@ def format_percent_mean_stddev(row: dict[str, Any], prefix: str) -> str:
 
 
 def markdown_table(headers: Sequence[str], rows: Sequence[Sequence[str]]) -> str:
+    """Render headers and rows as a GitHub-style markdown table."""
     header = "| " + " | ".join(headers) + " |"
     divider = "| " + " | ".join("---" for _ in headers) + " |"
     body = ["| " + " | ".join(row) + " |" for row in rows]
@@ -1282,6 +1336,7 @@ def markdown_table(headers: Sequence[str], rows: Sequence[Sequence[str]]) -> str
 
 
 def mode_display_name(mode_name: str) -> str:
+    """Return the report display name of one speculative mode."""
     if mode_name == "mtp0":
         return "MTP0"
     if mode_name in ("mtp3", "mtp5"):
@@ -1294,6 +1349,7 @@ def mode_display_name(mode_name: str) -> str:
 
 
 def write_summaries(rows: Sequence[dict[str, Any]], output_dir: Path) -> None:
+    """Write summary.csv and the per-mode markdown summary tables."""
     with (output_dir / "summary.csv").open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(
             handle, fieldnames=SUMMARY_FIELDS, extrasaction="ignore"
@@ -1428,6 +1484,7 @@ def write_summaries(rows: Sequence[dict[str, Any]], output_dir: Path) -> None:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    """Resume or run every missing formal request, then write the campaign summaries."""
     args = parse_args(argv)
     if args.port < 1 or args.port > 65535:
         raise CampaignError("--port must be in [1, 65535]")

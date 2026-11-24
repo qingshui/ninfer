@@ -1,3 +1,5 @@
+"""Strictly validated user-facing configuration model for evaluation runs."""
+
 from __future__ import annotations
 
 import hashlib
@@ -14,24 +16,28 @@ class ConfigError(ValueError):
 
 
 def _mapping(value: Any, where: str) -> dict[str, Any]:
+    """Return value as a dict, raising ConfigError unless it is a mapping."""
     if not isinstance(value, Mapping):
         raise ConfigError(f"{where} must be a mapping")
     return dict(value)
 
 
 def _reject_unknown(data: Mapping[str, Any], allowed: set[str], where: str) -> None:
+    """Raise ConfigError naming any keys in data that fall outside allowed."""
     unknown = sorted(set(data) - allowed)
     if unknown:
         raise ConfigError(f"{where} has unknown field(s): {', '.join(unknown)}")
 
 
 def _positive_int(value: Any, where: str) -> int:
+    """Return value as a positive integer, rejecting bools, non-ints, and values <= 0."""
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise ConfigError(f"{where} must be a positive integer")
     return value
 
 
 def _nonnegative_int(value: Any, where: str) -> int:
+    """Return value as a non-negative integer, rejecting bools, non-ints, and values < 0."""
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise ConfigError(f"{where} must be a non-negative integer")
     return value
@@ -39,6 +45,8 @@ def _nonnegative_int(value: Any, where: str) -> int:
 
 @dataclass(frozen=True)
 class RequestConfig:
+    """Per-request HTTP settings for a target: timeout, retries, and extra headers."""
+
     timeout_seconds: float = 600.0
     retries: int = 5
     retry_interval_seconds: float = 10.0
@@ -46,6 +54,7 @@ class RequestConfig:
 
     @classmethod
     def from_dict(cls, raw: Any, where: str) -> "RequestConfig":
+        """Validate a RequestConfig from a raw mapping, rejecting unknown fields and credentials."""
         data = _mapping(raw or {}, where)
         _reject_unknown(
             data,
@@ -86,6 +95,8 @@ class RequestConfig:
 
 @dataclass(frozen=True)
 class TargetConfig:
+    """A named inference endpoint that evaluation jobs send requests to."""
+
     name: str
     protocol: str
     base_url: str
@@ -97,6 +108,7 @@ class TargetConfig:
 
     @classmethod
     def from_dict(cls, name: str, raw: Any) -> "TargetConfig":
+        """Validate the target named `name` from its raw mapping under targets.<name>."""
         where = f"targets.{name}"
         data = _mapping(raw, where)
         _reject_unknown(
@@ -142,6 +154,8 @@ class TargetConfig:
 
 @dataclass(frozen=True)
 class JobConfig:
+    """A single evaluation job: dataset, backend, generation, and target selection."""
+
     id: str
     backend: str
     dataset: str
@@ -154,6 +168,7 @@ class JobConfig:
 
     @classmethod
     def from_dict(cls, raw: Any, where: str) -> "JobConfig":
+        """Validate a JobConfig from a raw mapping, checking ids, limit, and generation keys."""
         data = _mapping(raw, where)
         _reject_unknown(
             data,
@@ -223,11 +238,14 @@ class JobConfig:
 
 @dataclass(frozen=True)
 class SuiteConfig:
+    """A named suite of jobs with unique ids, run together as one unit."""
+
     name: str
     jobs: tuple[JobConfig, ...]
 
     @classmethod
     def from_dict(cls, name: str, raw: Any) -> "SuiteConfig":
+        """Validate the suite named `name` from its raw mapping, requiring unique job ids."""
         where = f"suites.{name}"
         data = _mapping(raw, where)
         _reject_unknown(data, {"jobs"}, where)
@@ -246,12 +264,15 @@ class SuiteConfig:
 
 @dataclass(frozen=True)
 class ProgressConfig:
+    """Progress display settings: enablement, refresh rate, and heartbeat interval."""
+
     enabled: bool = True
     refresh_seconds: float = 1.0
     heartbeat_seconds: float = 30.0
 
     @classmethod
     def from_dict(cls, raw: Any, where: str) -> "ProgressConfig":
+        """Validate a ProgressConfig from a raw mapping, requiring positive intervals."""
         data = _mapping(raw or {}, where)
         _reject_unknown(
             data, {"enabled", "refresh_seconds", "heartbeat_seconds"}, where
@@ -280,6 +301,8 @@ class ProgressConfig:
 
 @dataclass(frozen=True)
 class RuntimeConfig:
+    """Run-wide settings: parallelism, runs directory, progress, and sample retention."""
+
     max_parallel_jobs: int = 1
     runs_dir: str = "eval/runs"
     progress: ProgressConfig = field(default_factory=ProgressConfig)
@@ -287,6 +310,7 @@ class RuntimeConfig:
 
     @classmethod
     def from_dict(cls, raw: Any) -> "RuntimeConfig":
+        """Validate a RuntimeConfig from a raw mapping under the runtime section."""
         where = "runtime"
         data = _mapping(raw or {}, where)
         _reject_unknown(
@@ -314,6 +338,8 @@ class RuntimeConfig:
 
 @dataclass(frozen=True)
 class AppConfig:
+    """The fully parsed configuration: targets, suites, and runtime settings."""
+
     schema_version: int
     targets: dict[str, TargetConfig]
     suites: dict[str, SuiteConfig]
@@ -321,12 +347,14 @@ class AppConfig:
     source_path: Path
 
     def suite(self, name: str) -> SuiteConfig:
+        """Return the named suite, raising ConfigError for an unknown name."""
         try:
             return self.suites[name]
         except KeyError as exc:
             raise ConfigError(f"unknown suite: {name}") from exc
 
     def target(self, name: str | None) -> TargetConfig | None:
+        """Return the named target (None when name is None), raising ConfigError if unknown."""
         if name is None:
             return None
         try:
@@ -335,6 +363,7 @@ class AppConfig:
             raise ConfigError(f"unknown target: {name}") from exc
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize to a plain dict suitable for YAML, omitting source_path."""
         data = asdict(self)
         data.pop("source_path", None)
         data["targets"] = {
@@ -353,6 +382,7 @@ class AppConfig:
         return data
 
     def fingerprint(self, suite_name: str) -> str:
+        """Return a sha256 hex digest of the configuration relevant to the named suite."""
         suite = self.suite(suite_name)
         used_targets = {job.target for job in suite.jobs if job.target is not None}
         relevant = {
@@ -368,6 +398,7 @@ class AppConfig:
 
 
 def _target_to_dict(target: TargetConfig) -> dict[str, Any]:
+    """Serialize a TargetConfig to its YAML-friendly dict form, omitting empty fields."""
     out: dict[str, Any] = {
         "protocol": target.protocol,
         "base_url": target.base_url,
@@ -383,6 +414,7 @@ def _target_to_dict(target: TargetConfig) -> dict[str, Any]:
 
 
 def _job_to_dict(job: JobConfig) -> dict[str, Any]:
+    """Serialize a JobConfig to its YAML-friendly dict form, omitting unset fields."""
     out: dict[str, Any] = {
         "id": job.id,
         "backend": job.backend,
@@ -401,6 +433,7 @@ def _job_to_dict(job: JobConfig) -> dict[str, Any]:
 
 
 def load_config(path: str | Path) -> AppConfig:
+    """Load and validate the YAML file at path, cross-checking job target references."""
     source = Path(path).resolve()
     try:
         raw = yaml.safe_load(source.read_text(encoding="utf-8"))
@@ -442,6 +475,7 @@ def load_config(path: str | Path) -> AppConfig:
 
 
 def dump_config(config: AppConfig, path: Path) -> None:
+    """Write config to path as UTF-8 YAML, preserving field order."""
     path.write_text(
         yaml.safe_dump(config.to_dict(), sort_keys=False, allow_unicode=True),
         encoding="utf-8",

@@ -13,11 +13,15 @@ from .safetensors import SafetensorsSource
 
 
 class ModelOptNvfp4:
+    """Read ModelOpt NVFP4 checkpoints, converting multipliers to divisors."""
+
     def __init__(self, store: SafetensorsSource):
+        """Bind to the safetensors store holding the ModelOpt weights."""
         self.store = store
 
     @lru_cache(maxsize=None)
     def scales(self, prefix: str) -> tuple[bytes, bytes, bytes, bytes]:
+        """Return cached (multiplier, divisor) word pairs for weight_scale_2 and input_scale."""
         result = []
         for suffix in ("weight_scale_2", "input_scale"):
             name = f"{prefix}.{suffix}"
@@ -34,6 +38,7 @@ class ModelOptNvfp4:
         return tuple(result)
 
     def matrix(self, prefix: str, shape: tuple[int, int]) -> LogicalSource:
+        """Build a LogicalSource for one NVFP4 weight matrix from the store."""
         n, k = shape
         if k % 16:
             raise ValueError(
@@ -52,6 +57,7 @@ class ModelOptNvfp4:
         _, dw, _, da = self.scales(prefix)
 
         def encoded(first, last):
+            """Read and validate one row range's codes and scales with the weight divisor."""
             if not 0 <= first < last <= n:
                 raise ValueError("encoded source row range exceeds matrix")
             codes = self.store.read_flat(
@@ -69,6 +75,7 @@ class ModelOptNvfp4:
             return EncodedRows("nvfp4", codes, scales, dw)
 
         def values(begin, end):
+            """Decode a row range to float64 values using the NVFP4 code table."""
             if begin == end:
                 return torch.empty(0, dtype=torch.float64)
             first, last = begin // k, (end + k - 1) // k

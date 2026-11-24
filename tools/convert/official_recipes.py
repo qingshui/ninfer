@@ -26,11 +26,13 @@ FP8_FP32 = "fp8_e4m3fn_row_fp32"
 
 
 def _assign(recipe, name, format, *, source=None):
+    """Assign name with the grouped_absmax method for Q4-Q8 formats and cast_direct otherwise."""
     method = grouped_absmax if format in (Q4, Q5, Q6, Q8) else cast_direct
     recipe.assign(name, format=format, method=method, source=source)
 
 
 def _optional(model, recipe):
+    """Assign official formats to vision and draft-component projections and share dflash context caches."""
     for name, parameter in model.parameters.items():
         if not parameter.projection:
             continue
@@ -69,6 +71,7 @@ def _optional(model, recipe):
 
 
 def _dense_groupwise(model, recipe, vocabulary):
+    """Build the Dense recipe with Q4/Q5 projections and the given vocabulary format for embedding and head."""
     if "num_experts" in model.config:
         raise ValueError("this official recipe requires Qwen3.5 Dense mathematics")
     _optional(model, recipe)
@@ -97,14 +100,17 @@ def _dense_groupwise(model, recipe, vocabulary):
 
 
 def qwen3_6_27b(model, recipe, sources):
+    """Official Qwen3.5-6/27B recipe using the Q6 vocabulary format."""
     _dense_groupwise(model, recipe, Q6)
 
 
 def qwen3_8_27b(model, recipe, sources):
+    """Official Qwen3.5-8/27B recipe using the Q8 vocabulary format."""
     _dense_groupwise(model, recipe, Q8)
 
 
 def qwen3_6_35b_a3b(model, recipe, sources):
+    """Official Qwen3.5-MoE 35B-A3B recipe assigning Q8 attention and layer-graded Q4-Q6 expert formats."""
     if "num_experts" not in model.config:
         raise ValueError("this official recipe requires Qwen3.5 MoE mathematics")
     _optional(model, recipe)
@@ -133,6 +139,7 @@ def qwen3_6_35b_a3b(model, recipe, sources):
 
 
 def qwen3_6_27b_nvfp4(model, recipe, sources):
+    """Official Qwen3.5-6/27B NVFP4 recipe importing quantized words for projections outside the direct set."""
     if "num_experts" in model.config:
         raise ValueError("this official recipe requires Qwen3.5 Dense mathematics")
     _optional(model, recipe)
@@ -163,6 +170,7 @@ def qwen3_6_27b_nvfp4(model, recipe, sources):
 
 
 def qwen3_8_27b_nvfp4(model, recipe, sources):
+    """Official Qwen3.5-8/27B recipe mixing NVFP4 MLP imports with FP8 row-scaled attention projections."""
     if "num_experts" in model.config:
         raise ValueError("this official recipe requires Qwen3.5 Dense mathematics")
     _optional(model, recipe)
@@ -380,10 +388,12 @@ def _spark_recipe(model, recipe, fp8_source):
 
 
 def spark_x2_6_17b_bf16(model, recipe, sources):
+    """Spark2.5 recipe for the BF16 checkpoint, quantizing projections to FP8 row scales from BF16 weights."""
     _spark_recipe(model, recipe, None)
 
 
 def spark_x2_6_17b_fp8(model, recipe, sources):
+    """Spark2.5 recipe for the FP8 checkpoint, importing its published FP8 row-scaled words."""
     _spark_recipe(model, recipe, sources["base"])
 
 

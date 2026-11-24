@@ -12,6 +12,7 @@ from .schema import TensorObject
 
 
 def artifact_summary(artifact: Artifact) -> dict:
+    """Build the artifact's summary of counts, sizes and format histograms."""
     tensors = [obj for obj in artifact.objects if isinstance(obj, TensorObject)]
     return {
         "path": str(artifact.path),
@@ -33,6 +34,7 @@ def artifact_summary(artifact: Artifact) -> dict:
 
 
 def main() -> None:
+    """Print one artifact's summary as JSON or as key-value lines."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("artifact", type=Path)
     parser.add_argument(

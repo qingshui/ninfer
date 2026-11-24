@@ -13,11 +13,15 @@ from urllib.parse import urlsplit
 
 
 class HttpClientError(RuntimeError):
+    """Raised for invalid client usage or unusable base URLs."""
     pass
 
 
 class _StreamingResponse(http.client.HTTPResponse):
+    """HTTPResponse subclass that keeps chunked-stream EOF distinct from protocol errors."""
+
     def _read_next_chunk_size(self) -> int:
+        """Read the next chunk-size line, keeping clean EOF distinct from a malformed line."""
         # HTTPResponse conflates EOF with a malformed chunk-size line as IncompleteRead.
         # Keep EOF distinct so a local shutdown cannot hide a protocol error.
         line = self.fp.readline(http.client._MAXLINE + 1)
@@ -36,6 +40,7 @@ class _StreamingResponse(http.client.HTTPResponse):
 
 @dataclass(frozen=True)
 class HttpResponseHead:
+    """The status line and headers of a response with their arrival timestamp."""
     status: int
     reason: str
     headers: dict[str, str]
@@ -44,6 +49,7 @@ class HttpResponseHead:
 
 @dataclass
 class HttpExchangeResult:
+    """Timing, status, body, and cancellation outcome of one HTTP exchange."""
     sent_ns: int | None = None
     body_sent_ns: int | None = None
     headers_ns: int | None = None
@@ -69,6 +75,7 @@ class PreparedExchange:
         body: bytes,
         headers: Mapping[str, str],
     ) -> None:
+        """Initialize one single-use exchange, buffering its request line and headers."""
         self._connection = connection
         self._connection.response_class = _StreamingResponse
         self._transport = connection.sock
@@ -91,14 +98,17 @@ class PreparedExchange:
 
     @property
     def body_bytes(self) -> int:
+        """Return the request body length in bytes."""
         return len(self._body)
 
     @property
     def cancel_ns(self) -> int | None:
+        """Return the recorded cancellation timestamp, if any."""
         with self._lock:
             return self._cancel_ns
 
     def cancel(self) -> int:
+        """Request cancellation, shut down the transport, and return the cancel timestamp."""
         now = time.perf_counter_ns()
         with self._lock:
             if self._cancel_ns is None:
@@ -126,6 +136,7 @@ class PreparedExchange:
         on_chunk: Callable[[bytes, int], None] | None = None,
         chunk_size: int = 64 * 1024,
     ) -> HttpExchangeResult:
+        """Send the buffered request, stream the response, and return the exchange result."""
         with self._lock:
             if self._started:
                 raise HttpClientError("prepared HTTP exchange is single-use")
@@ -215,7 +226,10 @@ class PreparedExchange:
 
 
 class StreamingHttpClient:
+    """Client that opens a fresh HTTP/1.1 connection for each prepared exchange."""
+
     def __init__(self, base_url: str, timeout_seconds: float) -> None:
+        """Initialize the client from an absolute base URL and a positive timeout."""
         parsed = urlsplit(base_url)
         if parsed.scheme not in {"http", "https"} or not parsed.hostname:
             raise HttpClientError("base URL must be an absolute http:// or https:// URL")
@@ -230,6 +244,7 @@ class StreamingHttpClient:
         self._timeout = float(timeout_seconds)
 
     def _new_connection(self) -> http.client.HTTPConnection:
+        """Open and connect a new HTTP or HTTPS connection."""
         if self._scheme == "https":
             connection: http.client.HTTPConnection = http.client.HTTPSConnection(
                 self._host, self._port, timeout=self._timeout
@@ -248,6 +263,7 @@ class StreamingHttpClient:
         body: bytes = b"",
         headers: Mapping[str, str] | None = None,
     ) -> PreparedExchange:
+        """Build a PreparedExchange for method and path with default headers added."""
         if not path.startswith("/"):
             raise HttpClientError("request path must start with '/'")
         request_headers = dict(headers or {})

@@ -32,6 +32,7 @@ K_ALIGNMENT = 128
 
 @dataclass(frozen=True, slots=True)
 class Layout:
+    """A named tensor byte layout with its alignment and accepted numeric formats."""
     name: str
     alignment: int
     formats: frozenset[str]
@@ -39,6 +40,7 @@ class Layout:
 
 @dataclass(frozen=True, slots=True)
 class RowSplitGeometry:
+    """Plane offsets and byte sizes for a row-split encoded [N,K] matrix."""
     n: int
     k: int
     k_pad: int
@@ -59,6 +61,7 @@ class RowSplitGeometry:
 
 @dataclass(frozen=True, slots=True)
 class BlockScaleGeometry:
+    """Plane geometry for a block-scale NVFP4 matrix or expert batch."""
     matrices: int
     n: int
     k: int
@@ -73,6 +76,7 @@ class BlockScaleGeometry:
 
 @dataclass(frozen=True, slots=True)
 class Fp8BlockGeometry:
+    """Plane geometry for a block-scaled FP8 matrix or expert batch."""
     matrices: int
     n: int
     k: int
@@ -86,6 +90,7 @@ class Fp8BlockGeometry:
 
 @dataclass(frozen=True, slots=True)
 class RowScaleGeometry:
+    """Plane geometry for a row-scaled FP8 [N,K] matrix."""
     n: int
     k: int
     code_plane_bytes: int
@@ -96,6 +101,7 @@ class RowScaleGeometry:
 
 @dataclass(frozen=True, slots=True)
 class RowGroupScaleGeometry:
+    """Plane geometry for an MXFP8 row-group-scaled matrix or expert batch."""
     matrices: int
     n: int
     k: int
@@ -108,6 +114,7 @@ class RowGroupScaleGeometry:
 
 @dataclass(frozen=True, slots=True)
 class Csf32Geometry:
+    """Plane geometry for a CSF 32x2 matrix or expert batch."""
     matrices: int
     n: int
     k: int
@@ -120,6 +127,7 @@ class Csf32Geometry:
     payload_bytes: int
 
     def plane(self, name: str) -> tuple[int, int]:
+        """Return the (offset, size) byte range of the named CSF plane."""
         for key, offset, size in self.planes:
             if key == name:
                 return offset, size
@@ -128,6 +136,7 @@ class Csf32Geometry:
 
 @dataclass(frozen=True, slots=True)
 class RowPagedGeometry:
+    """Page geometry for an NF4 matrix stored in 4096-byte pages."""
     n: int
     k: int
     row_bytes: int
@@ -137,6 +146,7 @@ class RowPagedGeometry:
     payload_bytes: int
 
     def row_offset(self, row: int) -> int:
+        """Return the byte offset of a row inside its 4096-byte page."""
         if not 0 <= row < self.n:
             raise ValueError("row exceeds paged tensor")
         page, slot = divmod(row, self.rows_per_page)
@@ -192,12 +202,14 @@ LAYOUTS = MappingProxyType(
 
 
 def align_up(value: int, alignment: int) -> int:
+    """Round value up to the nearest multiple of alignment."""
     if value < 0 or alignment <= 0:
         raise ValueError("align_up requires a nonnegative value and positive alignment")
     return (value + alignment - 1) // alignment * alignment
 
 
 def get_layout(name: str) -> Layout:
+    """Return the registered layout for name, raising ValueError when unknown."""
     try:
         return LAYOUTS[name]
     except KeyError:
@@ -205,6 +217,7 @@ def get_layout(name: str) -> Layout:
 
 
 def _format(value: str | NumericFormat) -> NumericFormat:
+    """Resolve a format name or instance to its registered NumericFormat."""
     if isinstance(value, str):
         return get_format(value)
     registered = get_format(value.name)
@@ -214,6 +227,7 @@ def _format(value: str | NumericFormat) -> NumericFormat:
 
 
 def _layout(value: str | Layout) -> Layout:
+    """Resolve a layout name or instance to its registered Layout."""
     if isinstance(value, str):
         return get_layout(value)
     registered = get_layout(value.name)
@@ -223,6 +237,7 @@ def _layout(value: str | Layout) -> Layout:
 
 
 def _shape(value: Sequence[int], *, rank: int | None = None) -> tuple[int, ...]:
+    """Validate a shape as positive integers, optionally enforcing an exact rank."""
     dims = []
     for dim in value:
         if isinstance(dim, bool):
@@ -243,6 +258,7 @@ def _shape(value: Sequence[int], *, rank: int | None = None) -> tuple[int, ...]:
 def row_split_geometry(
     format: str | QuantFormat, shape: Sequence[int]
 ) -> RowSplitGeometry:
+    """Compute plane geometry for a grouped-quantized [N,K] matrix in row_split_k128_v1."""
     spec = _format(format)
     if not isinstance(spec, QuantFormat):
         raise ValueError("row_split_k128_v1 requires a grouped quantized format")
@@ -284,6 +300,7 @@ def row_split_geometry(
 def block_scale_geometry(
     format: str | Nvfp4Format, shape: Sequence[int]
 ) -> BlockScaleGeometry:
+    """Compute plane geometry for an NVFP4 [N,K] or [E,N,K] tensor."""
     spec = _format(format)
     if not isinstance(spec, Nvfp4Format):
         raise ValueError("block_scale_k16_m128x4_v1 requires NVFP4")
@@ -318,6 +335,7 @@ def block_scale_geometry(
 def fp8_block_geometry(
     format: str | Fp8BlockFormat, shape: Sequence[int]
 ) -> Fp8BlockGeometry:
+    """Compute plane geometry for a block-scaled FP8 [N,K] or [E,N,K] tensor."""
     spec = _format(format)
     if not isinstance(spec, Fp8BlockFormat):
         raise ValueError("block_scale_m128_k128_v1 requires block-scaled FP8")
@@ -348,6 +366,7 @@ def fp8_block_geometry(
 def row_scale_geometry(
     format: str | Fp8RowFormat, shape: Sequence[int]
 ) -> RowScaleGeometry:
+    """Compute plane geometry for a row-scaled FP8 [N,K] matrix."""
     spec = _format(format)
     if not isinstance(spec, Fp8RowFormat):
         raise ValueError("row_scale_v1 requires a row-scaled FP8 format")
@@ -368,6 +387,7 @@ def row_scale_geometry(
 def row_paged_geometry(
     format: str | Nf4Format, shape: Sequence[int]
 ) -> RowPagedGeometry:
+    """Compute page geometry for an NF4 G16 [N,K] matrix."""
     if not isinstance(_format(format), Nf4Format):
         raise ValueError("row_paged_g16_4k_v1 requires NF4 G16")
     n, k = _shape(shape, rank=2)
@@ -386,6 +406,7 @@ def row_paged_geometry(
 def row_group_scale_geometry(
     format: str | Mxfp8Format, shape: Sequence[int]
 ) -> RowGroupScaleGeometry:
+    """Compute plane geometry for an MXFP8 [N,K] or [E,N,K] tensor."""
     spec = _format(format)
     if not isinstance(spec, Mxfp8Format):
         raise ValueError("row_group_scale_v1 requires MXFP8")
@@ -405,6 +426,7 @@ def row_group_scale_geometry(
 
 
 def csf32_geometry(shape: Sequence[int], exception_count: int) -> Csf32Geometry:
+    """Compute plane geometry for a CSF 32x2 [N,K] or [E,N,K] tensor."""
     dims = _shape(shape)
     if len(dims) not in (2, 3):
         raise ValueError("CSF requires [N,K] or [E,N,K]")
@@ -457,6 +479,7 @@ def encoded_size(
     shape: Sequence[int],
     layout_parameters: Mapping[str, int] | None = None,
 ) -> int:
+    """Return the encoded byte size of a tensor for a given layout, format, and shape."""
     layout_spec = _layout(layout)
     numeric_spec = _format(format)
     parameters = {} if layout_parameters is None else layout_parameters

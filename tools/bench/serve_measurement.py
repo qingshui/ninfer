@@ -9,6 +9,7 @@ from typing import Any
 
 
 def snapshot(port: int) -> dict[str, Any]:
+    """Fetch one /monitor/snapshot document from the local Serve instance."""
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
     try:
         connection.request("GET", "/monitor/snapshot")
@@ -41,6 +42,7 @@ def wait_idle(port: int, completed: int) -> dict[str, Any]:
 
 
 def subtract(before: Any, after: Any) -> Any:
+    """Subtract nested observation counters, failing if shapes change or values decrease."""
     if isinstance(after, dict):
         return {key: subtract(before[key], value) for key, value in after.items()}
     if isinstance(after, list):
@@ -54,6 +56,7 @@ def subtract(before: Any, after: Any) -> Any:
 
 
 def execution_delta(before: dict, after: dict) -> dict:
+    """Compute per-phase deltas between two execution counters with mean latencies."""
     fields = (
         "units",
         "rows",
@@ -79,6 +82,7 @@ def execution_delta(before: dict, after: dict) -> dict:
 
 
 def measurement(before: dict, after: dict) -> dict:
+    """Diff two snapshots into per-request runtime, execution, and rank measurements."""
     if before["server_instance_id"] != after["server_instance_id"]:
         raise ValueError("Serve instance changed during measurement")
     a, b = before["engine"], after["engine"]

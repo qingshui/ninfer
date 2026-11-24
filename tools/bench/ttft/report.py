@@ -21,17 +21,20 @@ from tools.bench.ttft.diagnostics import (
 
 
 class ReportError(RuntimeError):
+    """Raised when campaign artifacts cannot be read or fail validation."""
     pass
 
 
 @dataclass(frozen=True)
 class MetricRef:
+    """A case and request-role pair identifying one measured TTFT metric."""
     case: str
     role: str
 
 
 @dataclass(frozen=True)
 class ComparisonDefinition:
+    """A named comparison of a subject metric against a baseline metric."""
     name: str
     section: str
     label: str
@@ -41,6 +44,7 @@ class ComparisonDefinition:
 
 @dataclass(frozen=True)
 class PlannedRun:
+    """One planned run from the campaign manifest with its artifact paths."""
     index: int
     case: str
     profile: str
@@ -53,6 +57,7 @@ class PlannedRun:
 
 @dataclass
 class CampaignData:
+    """A loaded campaign: manifest, plans, parsed runs, failures, and artifact errors."""
     root: Path
     manifest: dict[str, Any]
     plans: list[PlannedRun]
@@ -62,6 +67,7 @@ class CampaignData:
 
 
 def _ref(case: str, role: str) -> MetricRef:
+    """Return a MetricRef for the given case and request role."""
     return MetricRef(case, role)
 
 
@@ -74,6 +80,7 @@ def _comparison(
     baseline_case: str,
     baseline_role: str,
 ) -> ComparisonDefinition:
+    """Return a ComparisonDefinition from subject and baseline case and role pairs."""
     return ComparisonDefinition(
         name,
         section,
@@ -444,6 +451,7 @@ COMPARISONS = (
 
 
 def _read_json(path: Path) -> Any:
+    """Parse a JSON file, raising ReportError when it cannot be read or decoded."""
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
@@ -451,6 +459,7 @@ def _read_json(path: Path) -> Any:
 
 
 def _relocate(root: Path, recorded_root: Path | None, value: str) -> Path:
+    """Rebase a recorded path onto the current campaign root when possible."""
     path = Path(value).expanduser()
     if not path.is_absolute():
         return root / path
@@ -463,6 +472,7 @@ def _relocate(root: Path, recorded_root: Path | None, value: str) -> Path:
 
 
 def _relative(root: Path, path: Path) -> str:
+    """Return path text relative to root, or its full string when outside root."""
     try:
         return str(path.resolve(strict=False).relative_to(root))
     except ValueError:
@@ -470,6 +480,7 @@ def _relative(root: Path, path: Path) -> str:
 
 
 def _required(value: dict[str, Any], name: str, expected: type, context: str) -> Any:
+    """Return value[name] when it is an instance of expected, else raise ReportError."""
     result = value.get(name)
     if not isinstance(result, expected):
         raise ReportError(f"{context} has invalid {name}")
@@ -477,6 +488,7 @@ def _required(value: dict[str, Any], name: str, expected: type, context: str) ->
 
 
 def _validate_run_artifact(value: dict[str, Any], plan: PlannedRun) -> None:
+    """Validate one parsed run artifact against its plan, raising ReportError on violations."""
     context = f"run {plan.case} sample {plan.sample}"
     constructed = value.get("constructed")
     if not isinstance(constructed, bool):
@@ -537,6 +549,7 @@ def _validate_run_artifact(value: dict[str, Any], plan: PlannedRun) -> None:
 
 
 def load_campaign(path: Path) -> CampaignData:
+    """Load and validate a Serve TTFT campaign directory into CampaignData."""
     root = path.expanduser().resolve()
     manifest_path = root / "manifest.json"
     manifest = _read_json(manifest_path)
@@ -698,6 +711,7 @@ def load_campaign(path: Path) -> CampaignData:
 
 
 def _stats(samples: Sequence[tuple[int, int, str]]) -> dict[str, Any]:
+    """Return TTFT distribution statistics for (sample, ttft, source) rows."""
     values = sorted(value for _, value, _ in samples)
     median = float(statistics.median(values))
     minimum = values[0]
@@ -723,6 +737,7 @@ def _stats(samples: Sequence[tuple[int, int, str]]) -> dict[str, Any]:
 
 
 def _case_metadata(case: str, runs: Sequence[dict[str, Any]]) -> tuple[str, str]:
+    """Return the (category, description) pair for a case, defaulting to unknown."""
     definition = CASES.get(case)
     if definition is not None:
         return definition.category, definition.description
@@ -742,6 +757,7 @@ def _request_maps(
     dict[tuple[str, str, int], dict[str, int]],
     dict[tuple[str, str, str, str], Counter[tuple[Any, Any]]],
 ]:
+    """Index per-role TTFT samples, per-run role values, and rejection counts."""
     groups: dict[tuple[str, str, str, str], list[tuple[int, int, str]]] = defaultdict(list)
     run_roles: dict[tuple[str, str, int], dict[str, int]] = {}
     rejected: dict[tuple[str, str, str, str], Counter[tuple[Any, Any]]] = defaultdict(
@@ -793,6 +809,7 @@ def _request_maps(
 
 
 def _symmetric_rows(runs: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Compute order statistics for symmetric request-role groups across constructed runs."""
     values: dict[
         tuple[str, str, str, str, tuple[str, ...], int], list[tuple[int, int, str]]
     ] = defaultdict(list)
@@ -910,6 +927,7 @@ def _canonical_observations(
 
 
 def _observation_key(row: dict[str, Any]) -> tuple[Any, ...]:
+    """Return a hashable key identifying an observation across campaigns."""
     common = (row["model"], row["case"], row["profile_label"])
     if row["observation_kind"] == "role":
         return (*common, "role", row["request_role"])
@@ -926,6 +944,7 @@ def _comparison_rows(
     groups: Sequence[dict[str, Any]],
     run_roles: dict[tuple[str, str, int], dict[str, int]],
 ) -> list[dict[str, Any]]:
+    """Build rows for every declared comparison, pairing within runs when both sides share a case."""
     lookup = {
         (str(row["model"]), str(row["case"]), str(row["request_role"])): row
         for row in groups
@@ -1025,6 +1044,7 @@ def _cross_campaign_rows(
     current_symmetric: Sequence[dict[str, Any]],
     baseline_symmetric: Sequence[dict[str, Any]],
 ) -> list[dict[str, Any]]:
+    """Compare current observations against matching baseline campaign observations."""
     current = _canonical_observations(current_groups, current_symmetric)
     baseline = _canonical_observations(baseline_groups, baseline_symmetric)
     baseline_lookup = {_observation_key(row): row for row in baseline}
@@ -1064,6 +1084,7 @@ def _cross_campaign_rows(
 
 
 def _validate_baseline(current: CampaignData, baseline: CampaignData) -> None:
+    """Raise ReportError when baseline model_profile or kv_dtype differs from the current campaign."""
     for field in ("model_profile", "kv_dtype"):
         if current.manifest.get(field) != baseline.manifest.get(field):
             raise ReportError(
@@ -1073,6 +1094,7 @@ def _validate_baseline(current: CampaignData, baseline: CampaignData) -> None:
 
 
 def _distribution(values: Sequence[int]) -> dict[str, int | float | None]:
+    """Return count, mean, median, p95, and max for a sequence of values."""
     ordered = sorted(values)
     return {
         "count": len(ordered),
@@ -1084,6 +1106,7 @@ def _distribution(values: Sequence[int]) -> dict[str, int | float | None]:
 
 
 def _lifecycle_metrics(requests: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """Return outcome counts and latency distributions for a sequence of requests."""
     return {
         "requests": len(requests),
         "request_outcomes": dict(Counter(str(r.get("outcome")) for r in requests)),
@@ -1096,6 +1119,7 @@ def _lifecycle_metrics(requests: Sequence[dict[str, Any]]) -> dict[str, Any]:
 
 
 def _lifecycle_groups(runs: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Group constructed-run requests by class or role and compute lifecycle metrics per group."""
     groups: dict[tuple[str, str, str, str], list[dict[str, Any]]] = defaultdict(list)
     samples: dict[tuple[str, str, str, str], set[int]] = defaultdict(set)
     for run in runs:
@@ -1116,6 +1140,7 @@ def _lifecycle_groups(runs: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _phase_metrics(runs: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Compute lifecycle metric rows for each workload phase declared in run notes."""
     rows = []
     for run in runs:
         by_role = {request["role"]: request for request in run.get("requests", [])}
@@ -1164,7 +1189,9 @@ def _arrival_metrics(notes: dict[str, Any], requests: Sequence[dict[str, Any]]) 
 
 
 def _contract_rejections(current: CampaignData, baseline: CampaignData) -> list[dict[str, Any]]:
+    """Return rows for case/profile pairs whose measurement contract differs within or across campaigns."""
     def contracts(runs: Sequence[dict[str, Any]]) -> dict[tuple[str, str], set[str]]:
+        """Collect the measurement contract versions declared by each case and profile pair."""
         result: dict[tuple[str, str], set[str]] = defaultdict(set)
         for run in runs:
             result[(run["case"], run["profile_label"])].add(
@@ -1330,6 +1357,7 @@ def _stream_observations(runs: Sequence[dict[str, Any]]) -> tuple[list[dict[str,
 
 
 def _request_timing_rows(runs: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return request timing analysis rows for every request in every run."""
     return [
         {"case": run.get("case"), "profile_label": run.get("profile_label"),
          "sample": run.get("_sample"), "request_role": request.get("role"),
@@ -1344,6 +1372,7 @@ def _request_timing_rows(runs: Sequence[dict[str, Any]]) -> list[dict[str, Any]]
 def summarize_campaign(
     campaign: CampaignData, baseline: CampaignData | None = None
 ) -> dict[str, Any]:
+    """Build the complete campaign summary dictionary, optionally against a baseline campaign."""
     groups_map, run_roles, rejected = _request_maps(campaign.runs)
     stream_observations, workload_metrics = _stream_observations(campaign.runs)
     expected_by_case = Counter(plan.case for plan in campaign.plans)

@@ -9,6 +9,7 @@ from .methods import AuxiliaryValue, CHUNK_BYTES, PrepareRequest, _preflight
 
 
 def _exception_counts(source):
+    """Decode one source's CSF planes into per-block exception counts."""
     planes = source.native_planes
     geometry = csf32_geometry(source.shape, planes.exception_count)
     offsets = np.frombuffer(
@@ -37,6 +38,7 @@ def _exception_counts(source):
 
 
 def import_csf(request: PrepareRequest):
+    """Validate native CSF inputs and return the job that streams them into the parent matrices."""
     _preflight(request, values=False)
     if request.target.format != "nvfp4_mul" or len(request.target.shape) not in (2, 3):
         raise ValueError("native CSF import requires NVFP4 multiplier matrix/bank")
@@ -101,6 +103,7 @@ def import_csf(request: PrepareRequest):
         raise ValueError("native CSF inputs do not cover the parent matrices")
 
     def produce(output):
+        """Write each matrix's planes plus derived offsets, page bases and matrix scales."""
         exception_cursor = 0
         for matrix, sources in enumerate(matrices):
             row, counts = 0, []

@@ -19,11 +19,12 @@ _IMAGE_DATA_URI = (
 
 
 class ContractError(RuntimeError):
-    pass
+    """Raised when the server violates the exercised NInfer HTTP contract."""
 
 
 @dataclass(frozen=True)
 class Response:
+    """One raw HTTP response: status code, content type, and body bytes."""
     status: int
     content_type: str
     body: bytes
@@ -32,6 +33,7 @@ class Response:
 def request(
     base_url: str, method: str, path: str, payload: Any | None = None
 ) -> Response:
+    """Issue one HTTP request and return the raw response, wrapping HTTP errors in ContractError."""
     body = None
     headers = {"Accept": "application/json"}
     if payload is not None:
@@ -57,6 +59,7 @@ def request(
 def json_response(
     base_url: str, method: str, path: str, payload: Any | None = None
 ) -> dict[str, Any]:
+    """Issue a request and return the decoded JSON object from a 200 application/json response."""
     response = request(base_url, method, path, payload)
     if response.status != 200 or response.content_type != "application/json":
         raise ContractError(
@@ -72,6 +75,7 @@ def json_response(
 
 
 def wait_for_health(base_url: str, timeout: float) -> None:
+    """Poll /health every quarter second until it reports ok or the timeout expires."""
     deadline = time.monotonic() + timeout
     last_error: Exception | None = None
     while time.monotonic() < deadline:
@@ -87,6 +91,7 @@ def wait_for_health(base_url: str, timeout: float) -> None:
 
 
 def require_usage(usage: Any, prompt_key: str, completion_key: str) -> tuple[int, int]:
+    """Validate a usage object and return its prompt and completion token counts."""
     if not isinstance(usage, dict):
         raise ContractError("response usage is not an object")
     prompt = usage.get(prompt_key)
@@ -106,6 +111,7 @@ def openai_nonstream(
     max_tokens: int,
     stop: list[str] | None = None,
 ) -> dict[str, Any]:
+    """Post one non-streaming chat completion and verify its choices, finish reason, and usage."""
     payload: dict[str, Any] = {
         "model": model,
         "messages": messages,
@@ -138,6 +144,7 @@ def openai_nonstream(
 
 
 def parse_openai_stream(response: Response) -> tuple[str, str, str, dict[str, Any]]:
+    """Parse an OpenAI SSE body and return its content, reasoning, finish reason, and usage."""
     if response.status != 200 or response.content_type != "text/event-stream":
         raise ContractError(
             f"OpenAI stream returned status={response.status} content-type={response.content_type}"
@@ -226,6 +233,7 @@ def parse_openai_stream(response: Response) -> tuple[str, str, str, dict[str, An
 
 
 def response_text(response: dict[str, Any]) -> tuple[str, str]:
+    """Extract the output and reasoning text from a Responses object's output items."""
     output = response.get("output")
     if not isinstance(output, list):
         raise ContractError("Responses output is not an array")
@@ -253,6 +261,7 @@ def response_text(response: dict[str, Any]) -> tuple[str, str]:
 
 
 def require_responses_usage(usage: Any) -> tuple[int, int]:
+    """Validate Responses usage details and return its input and output token counts."""
     prompt, completion = require_usage(usage, "input_tokens", "output_tokens")
     if usage.get("total_tokens") != prompt + completion:
         raise ContractError("Responses total_tokens does not equal input + output")
@@ -277,6 +286,7 @@ def responses_nonstream(
     store: bool,
     previous_response_id: str | None = None,
 ) -> dict[str, Any]:
+    """Post one non-streaming /v1/responses request and verify its envelope and usage."""
     payload: dict[str, Any] = {
         "model": model,
         "input": input_value,
@@ -306,6 +316,7 @@ def responses_nonstream(
 
 
 def parse_responses_stream(response: Response) -> tuple[str, str, dict[str, Any]]:
+    """Parse a Responses SSE stream and return its terminal content, reasoning, and Response."""
     if response.status != 200 or response.content_type != "text/event-stream":
         raise ContractError(
             "Responses stream returned "
@@ -367,6 +378,7 @@ def parse_responses_stream(response: Response) -> tuple[str, str, dict[str, Any]
 
 
 def exercise(base_url: str, model: str) -> dict[str, Any]:
+    """Run every smoke check against the live server and return the summary facts."""
     models = json_response(base_url, "GET", "/v1/models")
     entries = models.get("data")
     if (
@@ -553,6 +565,7 @@ def exercise(base_url: str, model: str) -> dict[str, Any]:
 
 
 def main() -> None:
+    """Parse arguments, wait for health, and print the exercise results as JSON."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-url", default="http://127.0.0.1:18080")
     parser.add_argument("--model", required=True)

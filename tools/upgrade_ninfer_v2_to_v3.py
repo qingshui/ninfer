@@ -48,14 +48,17 @@ WRITEBACK = 64 * 1024 * 1024
 
 
 def align(value, amount=4096):
+    """Round value up to the next multiple of amount."""
     return (value + amount - 1) // amount * amount
 
 
 def f32(value):
+    """Round value to the nearest binary32 and return it."""
     return struct.unpack("<f", struct.pack("<f", value))[0]
 
 
 def text_config(moe):
+    """Build the known Qwen3.5 text config, with MoE expert fields when moe is true."""
     layers = 40 if moe else 64
     result = {
         "architectures": ["Qwen3_5MoeForCausalLM" if moe else "Qwen3_5ForCausalLM"],
@@ -97,6 +100,7 @@ def text_config(moe):
 
 
 def vision_config(moe):
+    """Return the known Qwen3.5 vision component config for the model variant."""
     return {
         "model_type": "qwen3_5_moe_vision" if moe else "qwen3_5_vision",
         "depth": 27,
@@ -111,6 +115,7 @@ def vision_config(moe):
 
 
 def draft_config(second):
+    """Return the known DFlash draft config, first or second generation."""
     draft = {
         "target_layer_ids": (
             [5, 19, 33, 47, 61] if second else [1, 6, 11, 16, 22, 27, 32, 37]
@@ -140,6 +145,7 @@ def draft_config(second):
 
 
 def encoded_bytes(obj):
+    """Return the v3 payload byte count of one object's shape/format/layout."""
     dims, format, layout = obj["shape"], obj["format"], obj["layout"]
     if any(type(d) is not int or d <= 0 for d in dims):
         raise ValueError(f"{obj['id']}: invalid shape")
@@ -173,6 +179,7 @@ def encoded_bytes(obj):
 
 
 def _input_names(name, components):
+    """Return the logical inputs each parameter consumes, per the known v3 mapping."""
     backends = [c for c in ("mtp", "dflash", "dflash2") if c in components]
     if name == "text/output_head":
         return ["text/final_hidden"] + [c + "/final_hidden" for c in backends]
@@ -261,6 +268,7 @@ def _input_names(name, components):
 
 
 def make_directory(identity, old_objects):
+    """Build the complete v3 directory from a known v2 identity and object list."""
     key = (identity["model_id"], identity["weights_id"])
     if key not in KNOWN_COUNTS or len(old_objects) not in KNOWN_COUNTS[key]:
         raise ValueError(f"unsupported v2 input {key} with {len(old_objects)} objects")
@@ -312,6 +320,7 @@ def make_directory(identity, old_objects):
     bindings, parameter_formats, scalar_uses = {}, {}, {}
 
     def put(name, obj, shape, bounds=None):
+        """Record a logical binding of name to obj, whole or as a row range."""
         if name in bindings:
             raise ValueError(f"duplicate logical mapping {name}")
         if bounds is None:
@@ -329,6 +338,7 @@ def make_directory(identity, old_objects):
         parameter_formats[name] = obj["format"]
 
     def split(obj, entries, width):
+        """Bind consecutive row ranges of a fused object to the listed names."""
         cursor = 0
         for name, rows in entries:
             put(name, obj, (rows, width), (cursor * width, (cursor + rows) * width))
@@ -702,6 +712,7 @@ def make_directory(identity, old_objects):
 
 
 def read_v2(path):
+    """Read and validate a v2 input's header, directory and payload extent."""
     with path.open("rb") as stream:
         header = stream.read(16)
         if len(header) != 16 or header[:8] != b"NINFER\0\2":
@@ -735,6 +746,7 @@ def read_v2(path):
 
 
 def layout(entry, directory, payload):
+    """Serialize the directory into the padded header area and split its payload into files."""
     reserve = 4096 - 32
     while True:
         start = reserve + 32
@@ -766,6 +778,7 @@ def layout(entry, directory, payload):
 
 
 def upgrade(input_path, output_path):
+    """Write a v3 output that preserves the v2 weights and installs the chat template."""
     input_path, output_path = Path(input_path), Path(output_path)
     if input_path.resolve() == output_path.resolve():
         raise ValueError("input and output must differ")
@@ -871,6 +884,7 @@ def upgrade(input_path, output_path):
 
 
 def main():
+    """Parse the input and output arguments and run the upgrade."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("input", type=Path)
     parser.add_argument("output", type=Path)

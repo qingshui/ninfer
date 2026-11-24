@@ -50,6 +50,8 @@ SCHEMA_VERSION = 5
 
 @dataclasses.dataclass(frozen=True)
 class Point:
+    """One benchmark point: artifact, model, speculative, sampling, KV, suite, and concurrency."""
+
     target: str
     model_id: str
     artifact: Path
@@ -64,14 +66,18 @@ class Point:
 
     @property
     def key(self) -> str:
+        """Filename-safe key that uniquely identifies this point."""
         return (
-            f"{corpus.filename_label(self.target)}_{self.kv_dtype}_{self.speculative_mode}_{self.proposal_head}_{self.sampling_mode}_"
+            f"{corpus.filename_label(self.target)}_{self.kv_dtype}_"
+            f"{self.speculative_mode}_{self.proposal_head}_{self.sampling_mode}_"
             f"{self.suite.replace('-', '_')}_c{self.concurrency}"
         )
 
 
 @dataclasses.dataclass(frozen=True)
 class Job:
+    """A queued client request with its fixture, seed, and output token budget."""
+
     index: int
     case_index: int
     fixture: corpus.Fixture
@@ -81,6 +87,8 @@ class Job:
 
 @dataclasses.dataclass(frozen=True)
 class ClientResult:
+    """Client-side outcome of one request: timing, token usage, and finish reason."""
+
     job: Job
     started_at: float
     finished_at: float
@@ -90,10 +98,12 @@ class ClientResult:
 
     @property
     def elapsed_seconds(self) -> float:
+        """Client-observed wall-clock duration of the request in seconds."""
         return self.finished_at - self.started_at
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    """Parse command-line arguments and resolve shared launch arguments."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--serve",
@@ -161,6 +171,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 
 def validate_args(args: argparse.Namespace) -> None:
+    """Validate parsed arguments, raising CampaignError on invalid or duplicate values."""
     if args.port < 1 or args.port > 65535:
         raise corpus.CampaignError("--port must be in [1, 65535]")
     if args.device < 0:
@@ -183,6 +194,7 @@ def validate_args(args: argparse.Namespace) -> None:
 def build_points(
     artifacts: Sequence[tuple[str, Path]], args: argparse.Namespace
 ) -> list[Point]:
+    """Build the cross product of artifacts, modes, suites, and concurrencies as points."""
     mode_names = args.mode or list(corpus.DEFAULT_MODES)
     if len(mode_names) != len(set(mode_names)):
         raise corpus.CampaignError("duplicate --mode value")
@@ -218,6 +230,7 @@ def build_points(
 def build_jobs(
     point: Point, fixtures: dict[str, corpus.Fixture], decode_tokens: int
 ) -> list[Job]:
+    """Build the ordered job list for a point according to its suite."""
     if point.suite == "context-profile":
         return [
             Job(index, index, fixtures[name], seed, fixtures[name].max_new)
@@ -260,6 +273,7 @@ def build_jobs(
 
 
 def workload_order(point: Point) -> dict[str, Any]:
+    """Describe the request dispatch order for a point's suite."""
     if point.suite == "context-profile":
         return {"kind": "fixture_order", "dispatch": "serial_http_send"}
     if point.suite == "corpus-makespan":
@@ -275,6 +289,7 @@ def workload_order(point: Point) -> dict[str, Any]:
 
 
 def workload_order_label(point: Point) -> str:
+    """Return a human-readable label for a point's workload order."""
     order = workload_order(point)
     if "seed" in order:
         return f"{order['kind']} seed={order['seed']}"
@@ -282,6 +297,7 @@ def workload_order_label(point: Point) -> str:
 
 
 def request_payload(point: Point, job: Job) -> dict[str, Any]:
+    """Build the Chat Completions payload for a job with its output token budget."""
     payload = corpus.request_payload(point.model_id, job.fixture, job.seed)
     payload["max_completion_tokens"] = job.max_tokens
     return payload
@@ -293,6 +309,7 @@ def server_command(
     server_log: Path,
     args: argparse.Namespace,
 ) -> list[str]:
+    """Assemble the ninfer-serve command line for a point."""
     command = [
         str(serve),
         str(point.artifact),
@@ -325,6 +342,7 @@ def server_command(
 def validate_server_start(
     event: dict[str, Any], point: Point, args: argparse.Namespace
 ) -> tuple[str, str]:
+    """Check a server_start event against the point and return instance id and prefill signature."""
     corpus.require_server_log_identity(event, "server_start")
     engine = event.get("engine", {})
     expected = {
@@ -388,6 +406,7 @@ def validate_server_start(
 def parse_client_response(
     job: Job, response: dict[str, Any], started_at: float, finished_at: float
 ) -> ClientResult:
+    """Convert a Chat Completions response into a ClientResult, raising CampaignError when malformed."""
     try:
         usage = response["usage"]
         choices = response["choices"]
@@ -412,6 +431,7 @@ def run_clients(
     port: int,
     on_result: Callable[[ClientResult, dict[str, Any]], None] | None = None,
 ) -> tuple[list[ClientResult], float, float]:
+    """Run client threads that execute all jobs and return ordered results with campaign time bounds."""
     pending: queue.Queue[Job] = queue.Queue()
     for job in jobs:
         pending.put(job)
@@ -427,6 +447,7 @@ def run_clients(
     errors: list[Exception] = []
 
     def record_failure(error: Exception) -> None:
+        """Record a worker error, flag the run failed, and wake dispatch waiters."""
         with result_lock:
             errors.append(error)
         failed.set()
@@ -434,6 +455,7 @@ def run_clients(
             dispatch_condition.notify_all()
 
     def worker() -> None:
+        """Drain pending jobs over one HTTP connection until the queue empties or the run fails."""
         nonlocal next_dispatch_index
         connection = http.client.HTTPConnection(
             "127.0.0.1", port, timeout=corpus.REQUEST_TIMEOUT_SECONDS
@@ -531,6 +553,7 @@ def run_clients(
 
 
 def load_server_events(path: Path, server_instance_id: str) -> list[dict[str, Any]]:
+    """Load identity-checked serving events for one server instance from a JSONL log."""
     events: list[dict[str, Any]] = []
     try:
         with path.open("r", encoding="utf-8") as handle:
@@ -555,6 +578,7 @@ def load_server_events(path: Path, server_instance_id: str) -> list[dict[str, An
 
 
 def sum_request_done(events: Sequence[dict[str, Any]]) -> dict[str, int | float | None]:
+    """Sum token and speculative metrics across request_done events."""
     prompt_tokens = 0
     completion_tokens = 0
     computed_prefill_tokens = 0
@@ -596,6 +620,7 @@ def sum_request_done(events: Sequence[dict[str, Any]]) -> dict[str, int | float 
 
 
 def sum_throughput(events: Sequence[dict[str, Any]]) -> dict[str, int | float | None]:
+    """Sum engine token and decode-batch counters across throughput events."""
     computed_prefill_tokens = 0
     committed_decode_tokens = 0
     decode_rounds = 0
@@ -622,6 +647,7 @@ def sum_throughput(events: Sequence[dict[str, Any]]) -> dict[str, int | float | 
 
 
 def is_steady_interval(event: dict[str, Any], concurrency: int) -> bool:
+    """Report whether a throughput event covers a full-batch steady decode interval."""
     try:
         tokens = event["tokens"]
         batch = event["decode_batch"]
@@ -651,6 +677,7 @@ def is_steady_interval(event: dict[str, Any], concurrency: int) -> bool:
 def steady_metrics(
     events: Sequence[dict[str, Any]], concurrency: int
 ) -> dict[str, int | float | None]:
+    """Aggregate full-batch steady decode intervals into throughput metrics."""
     selected = [event for event in events if is_steady_interval(event, concurrency)]
     if not selected:
         return {
@@ -684,6 +711,7 @@ def steady_metrics(
 def client_records(
     results: Sequence[ClientResult], campaign_start: float
 ) -> list[dict[str, Any]]:
+    """Convert client results into JSON records offset from the campaign start."""
     return [
         {
             "index": result.job.index,
@@ -714,6 +742,7 @@ def analyze_point(
     campaign_end: float,
     measured: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    """Cross-check server events against client results and build the point report."""
     errors = [event for event in events if event.get("event") == "request_error"]
     if errors:
         message = errors[0].get("error", {}).get("message", "unknown request error")
@@ -808,6 +837,7 @@ def analyze_point(
 
 
 def write_json(path: Path, value: Any) -> None:
+    """Write value as pretty JSON to path through an atomic temporary file."""
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(
         json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False) + "\n",
@@ -823,6 +853,7 @@ def run_point(
     output_dir: Path,
     args: argparse.Namespace,
 ) -> dict[str, Any]:
+    """Execute one benchmark point end to end and return its report."""
     jobs = build_jobs(point, fixtures, args.decode_tokens)
     server_log = output_dir / "server" / f"{point.key}.jsonl"
     command = server_command(serve, point, server_log, args)
@@ -873,6 +904,7 @@ def run_point(
             def save(
                 result: ClientResult, response: dict, measured: dict | None = None
             ) -> None:
+                """Record one completed request to results.jsonl and update progress output."""
                 job = result.job
                 event = server.wait_for_request_done(server_instance_id, response["id"])
                 spec = corpus.RunSpec(
@@ -954,6 +986,7 @@ def run_point(
                     pending = []
 
                     def enqueue(result: ClientResult, response: dict) -> None:
+                        """Enqueue a finished request for saving, draining the previous future first."""
                         if pending and pending[-1].done():
                             pending[-1].result()
                         pending.append(collector.submit(save, result, response))
@@ -1017,6 +1050,7 @@ def run_point(
 
 
 def add_speedups(reports: Sequence[dict[str, Any]]) -> None:
+    """Annotate each report with its speedup against the matching concurrency-1 baseline."""
     baselines: dict[tuple[str, str, str, str, str, str], dict[str, Any]] = {}
     for report in reports:
         key = (
@@ -1080,6 +1114,7 @@ SUMMARY_FIELDS = (
 
 
 def summary_row(report: dict[str, Any]) -> dict[str, Any]:
+    """Flatten a point report into one summary row."""
     row = {
         "suite": report["suite"],
         "target": report["target"],
@@ -1127,6 +1162,7 @@ def summary_row(report: dict[str, Any]) -> dict[str, Any]:
 
 
 def csv_value(value: Any) -> Any:
+    """Convert a summary value for CSV, mapping None to blank and rejecting non-finite floats."""
     if value is None:
         return ""
     if isinstance(value, float) and not math.isfinite(value):
@@ -1135,12 +1171,14 @@ def csv_value(value: Any) -> Any:
 
 
 def format_number(value: Any, digits: int = 2) -> str:
+    """Format a value with fixed decimals, or an em dash when None."""
     if value is None:
         return "—"
     return f"{float(value):.{digits}f}"
 
 
 def markdown_table(headers: Sequence[str], rows: Sequence[Sequence[str]]) -> str:
+    """Render headers and rows as a markdown table."""
     header = "| " + " | ".join(headers) + " |"
     divider = "| " + " | ".join("---" for _ in headers) + " |"
     body = ["| " + " | ".join(row) + " |" for row in rows]
@@ -1148,6 +1186,7 @@ def markdown_table(headers: Sequence[str], rows: Sequence[Sequence[str]]) -> str
 
 
 def write_summaries(reports: Sequence[dict[str, Any]], output_dir: Path) -> None:
+    """Write summary JSON, CSV, and grouped markdown tables for all reports."""
     rows = [summary_row(report) for report in reports]
     summary = {
         "artifact_type": SUMMARY_ARTIFACT_TYPE,
@@ -1291,6 +1330,7 @@ def write_summaries(reports: Sequence[dict[str, Any]], output_dir: Path) -> None
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    """Run every benchmark point, then write summaries and progress markers."""
     args = parse_args(argv)
     validate_args(args)
     artifacts = corpus.parse_artifacts(args.artifact)

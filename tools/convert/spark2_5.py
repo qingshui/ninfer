@@ -22,10 +22,12 @@ _LAYER_TYPES = ("full_attention", "sliding_attention")
 
 
 def _error(message: str) -> ValueError:
+    """Return a ValueError tagged with the spark2_5 adapter prefix."""
     return ValueError("spark2_5: " + message)
 
 
 def _positive(raw: dict, key: str) -> int:
+    """Return the positive integer raw[key], or raise a tagged ValueError."""
     value = raw.get(key)
     if type(value) is not int or value <= 0:
         raise _error(f"{key}: expected a positive integer")
@@ -33,6 +35,7 @@ def _positive(raw: dict, key: str) -> int:
 
 
 def _token_id(raw: dict, key: str) -> int:
+    """Return the nonnegative integer raw[key], or raise a tagged ValueError."""
     value = raw.get(key)
     if type(value) is not int or value < 0:
         raise _error(f"{key}: expected a nonnegative integer")
@@ -40,6 +43,7 @@ def _token_id(raw: dict, key: str) -> int:
 
 
 def _f32(value, name: str) -> float:
+    """Return value narrowed to a positive finite F32, or raise a tagged ValueError."""
     if type(value) not in (float, int):
         raise _error(f"{name}: expected a real value")
     try:
@@ -134,7 +138,10 @@ def text_config(source: dict) -> dict:
 
 
 class _Builder:
+    """Accumulates the parameters and packing groups of the Spark2.5 text model."""
+
     def __init__(self, model: Model, store: SafetensorsSource):
+        """Bind the model under construction and its safetensors store."""
         self.model = model
         self.store = store
 
@@ -148,10 +155,12 @@ class _Builder:
         source_shape=None,
         rows=None,
     ):
+        """Add one artifact parameter mapped to a checkpoint source tensor."""
         shape = tuple(shape)
         original = shape if source_shape is None else tuple(source_shape)
 
         def factory(selected, format=None):
+            """Return the parameter's source reference for a store and target format."""
             if len(original) == 2:
                 ref = matrix_source(selected, source_name, original, format)
                 return select_rows(ref, rows) if rows is not None else ref
@@ -172,9 +181,11 @@ class _Builder:
         )
 
     def group(self, *names):
+        """Append one packing group of artifact parameter names."""
         self.model.packing_groups.append(tuple(names))
 
     def layer(self, index, config):
+        """Add every parameter and packing group of one text layer."""
         h, d = config["hidden_size"], config["head_dim"]
         q = config["num_attention_heads"] * d
         kv = config["num_key_value_heads"] * d
@@ -234,6 +245,7 @@ def build_model(
     companions: Mapping[str, SafetensorsSource] | None = None,
     resource_overrides: Mapping[str, str | Path] | None = None,
 ) -> Model:
+    """Build the Spark2.5 text model from a safetensors checkpoint and its resources."""
     if tuple(components) != ("text",):
         raise _error("only the text component is supported")
     if companions:

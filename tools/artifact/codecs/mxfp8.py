@@ -16,6 +16,7 @@ from ._tensor_bytes import (
 
 
 def validate_mxfp8_words(codes: torch.Tensor, scales: torch.Tensor) -> None:
+    """Raise ValueError unless codes are finite E4M3FN and scales finite UE8M0 words."""
     if bool(((codes & 0x7F) == 0x7F).any()):
         raise ValueError("MXFP8 codes must be finite E4M3FN words")
     if bool((scales == 255).any()):
@@ -25,6 +26,7 @@ def validate_mxfp8_words(codes: torch.Tensor, scales: torch.Tensor) -> None:
 def encode_mxfp8(
     code_words: torch.Tensor, scale_words: torch.Tensor, shape: Sequence[int]
 ) -> bytes:
+    """Validate and pack MXFP8 code and scale words into the row-group payload bytes."""
     g = row_group_scale_geometry("mxfp8", shape)
     codes = _exact_uint8_matrix(code_words, tuple(shape), "MXFP8 codes")
     scales = _exact_uint8_matrix(
@@ -40,6 +42,7 @@ def encode_mxfp8(
 def decode_mxfp8_words(
     payload: Payload, shape: Sequence[int]
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Decode payload into validated code and scale word tensors of the given shape."""
     g = row_group_scale_geometry("mxfp8", shape)
     if _payload_length(payload) != g.payload_bytes:
         raise ValueError("MXFP8 payload size differs from its geometry")
@@ -53,6 +56,7 @@ def decode_mxfp8_words(
 def dequantize_mxfp8(
     payload: Payload, shape: Sequence[int], dtype: torch.dtype = torch.float32
 ) -> torch.Tensor:
+    """Decode MXFP8 words and convert them to floating-point values in dtype."""
     codes, scales = decode_mxfp8_words(payload, shape)
     multipliers = torch.exp2(scales.double() - 127).repeat_interleave(32, -1)
     return (codes.view(torch.float8_e4m3fn).double() * multipliers).to(dtype)

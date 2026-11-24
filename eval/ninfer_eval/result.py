@@ -1,3 +1,5 @@
+"""Per-dataset evaluation result records and the run summary file writers."""
+
 from __future__ import annotations
 
 import json
@@ -10,6 +12,8 @@ RESULT_SCHEMA_VERSION = 1
 
 @dataclass
 class ResultCounts:
+    """Planned/completed/scored/failed/skipped sample counters for one dataset run."""
+
     planned: int | None = None
     completed: int = 0
     scored: int = 0
@@ -19,6 +23,8 @@ class ResultCounts:
 
 @dataclass
 class DatasetResult:
+    """Outcome of one dataset evaluation: status, metrics, counts, duration, and artifacts."""
+
     job_id: str
     backend: str
     dataset: str
@@ -32,10 +38,12 @@ class DatasetResult:
     diagnostics: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
+        """Return this record as a nested dict suitable for JSON serialization."""
         return asdict(self)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "DatasetResult":
+        """Rebuild a DatasetResult from a dict, converting counts back to ResultCounts."""
         value = dict(data)
         value["counts"] = ResultCounts(**value["counts"])
         return cls(**value)
@@ -44,6 +52,7 @@ class DatasetResult:
 def write_summary(
     run_dir: Path, run_id: str, status: str, results: list[DatasetResult]
 ) -> dict[str, Any]:
+    """Write summary.json and a human-readable summary.md table for the run."""
     payload = {
         "schema_version": RESULT_SCHEMA_VERSION,
         "run_id": run_id,
@@ -79,6 +88,7 @@ def write_summary(
 
 
 def load_summary(run_dir: Path) -> dict[str, Any]:
+    """Parse and return summary.json from run_dir, or raise FileNotFoundError if missing."""
     path = run_dir / "summary.json"
     if not path.exists():
         raise FileNotFoundError(f"summary does not exist: {path}")
@@ -86,6 +96,7 @@ def load_summary(run_dir: Path) -> dict[str, Any]:
 
 
 def _atomic_json(path: Path, payload: Any) -> None:
+    """Write payload as indented JSON via a temp file that atomically replaces path."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(

@@ -15,6 +15,7 @@ from .sources.safetensors import SafetensorsSource, tensor_source
 
 
 def _positive(raw, key):
+    """Return raw[key] when it is a positive integer, else raise ValueError."""
     value = raw.get(key)
     if type(value) is not int or value <= 0:
         raise ValueError(f"qwen4_exp.{key}: expected positive integer")
@@ -22,6 +23,7 @@ def _positive(raw, key):
 
 
 def text_config(source):
+    """Validate a Qwen4Exp config and return the normalized text component config."""
     if source.get("architectures") not in (
         ["Qwen4ExpForConditionalGeneration"],
         ["Qwen4ExpForCausalLM"],
@@ -107,6 +109,7 @@ def text_config(source):
 
 
 def bank_source(store, name, shape, role):
+    """Return a LogicalSource for one expert-bank slice, deinterleaving fused gate/up rows."""
     e, n, k = shape
     source_shape = (e, 2 * n, k) if role in ("gate", "up") else shape
     info = store.describe(name)
@@ -115,6 +118,7 @@ def bank_source(store, name, shape, role):
     width = n * k
 
     def read(begin, end):
+        """Read the slice's rows, remapping gate/up rows inside the fused bank."""
         pieces = []
         while begin < end:
             expert, local = divmod(begin, width)
@@ -134,7 +138,10 @@ def bank_source(store, name, shape, role):
 
 
 class Builder:
+    """Maps Qwen4Exp checkpoint tensors onto the Model's logical parameters."""
+
     def __init__(self, model, base, cfg):
+        """Store the model, base store and config, and track consumed tensors."""
         self.model, self.base, self.cfg = model, base, cfg
         self.consumed = set()
 
@@ -151,10 +158,12 @@ class Builder:
         rows=None,
         transpose=None,
     ):
+        """Register one logical parameter shaped from the checkpoint tensor source."""
         shape = tuple(shape)
         original = tuple(source_shape or shape)
 
         def factory(store, format=None):
+            """Build the tensor's LogicalSource for one store, remapped as configured."""
             if format not in (None, direct):
                 raise ValueError(f"{name}: this source mapping requires {direct}")
             info = store.describe(source)
@@ -193,9 +202,11 @@ class Builder:
         )
 
     def group(self, *names):
+        """Record that the named parameters should be packed together."""
         self.model.packing_groups.append(tuple(names))
 
     def hc(self, p, s, inject=True):
+        """Register the hyper-connection norm, up/down matrices and optional inject."""
         h, c, r = (self.cfg[x] for x in ("hidden_size", "hc_count", "hc_lowrank"))
         self.add(p + "norm", s + "hc_norm.weight", (c * h,))
         self.add(
@@ -220,6 +231,7 @@ class Builder:
             self.group(p + "down", p + "inject")
 
     def gdn(self, p, s):
+        """Register the linear-attention GDN projections, convolution and norms."""
         h = self.cfg["hidden_size"]
         nv = self.cfg["linear_num_value_heads"]
         dv = self.cfg["linear_value_head_dim"]
@@ -269,6 +281,7 @@ class Builder:
         self.group(p + "gdn/a_projection", p + "gdn/b_projection")
 
     def qsa(self, p, s, mtp=False):
+        """Register the indexed-attention projections, indexer projections and norms."""
         h = self.cfg["hidden_size"]
         d = self.cfg["head_dim"]
         heads = self.cfg["num_attention_heads"]
@@ -331,6 +344,7 @@ class Builder:
             self.group(*(p + "attention/" + x for x in group))
 
     def moe(self, p, s):
+        """Register the MoE router, shared expert weights and routed expert banks."""
         h, e, i, is_ = (
             self.cfg[x]
             for x in (
@@ -378,6 +392,7 @@ class Builder:
             )
 
     def ple(self, p, s):
+        """Register the PLE projections, convolutions, embedding shards and hash controls."""
         h, c, ed = (self.cfg[x] for x in ("hidden_size", "hc_count", "ple_embed_dim"))
         for role, n in [("key", h * c), ("value", h)]:
             self.add(
@@ -411,6 +426,7 @@ class Builder:
         width = prod(shard_shape)
 
         def read(begin, end):
+            """Read rows across the PLE embedding shards as one logical table."""
             chunks = []
             while begin < end:
                 j, local = divmod(begin, width)
@@ -454,6 +470,7 @@ class Builder:
         self.cfg["ple_shard_shape"] = list(shard_shape)
 
     def vision(self, cfg):
+        """Register the vision patch embedding, transformer blocks and merger."""
         h = cfg["hidden_size"]
         i = cfg["intermediate_size"]
         k = cfg["in_channels"] * cfg["temporal_patch_size"] * cfg["patch_size"] ** 2
@@ -529,6 +546,7 @@ class Builder:
 def build_model(
     base, *, components=("text",), companions=None, resource_overrides=None
 ):
+    """Build the Qwen4Exp model for the selected components, verifying full source coverage."""
     selected = set(components)
     if "text" not in selected or selected - {"text", "vision", "mtp"}:
         raise ValueError("Qwen4Exp supports text, vision and mtp components")
@@ -649,6 +667,7 @@ def build_model(
     }
     if b.consumed != expected:
         raise ValueError(
-            f"Qwen4Exp source coverage differs: missing {sorted(expected-b.consumed)}, extra {sorted(b.consumed-expected)}"
+            f"Qwen4Exp source coverage differs: missing {sorted(expected-b.consumed)}, "
+            f"extra {sorted(b.consumed-expected)}"
         )
     return model

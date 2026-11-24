@@ -38,6 +38,7 @@ from .sources.logical import LogicalSource, select_rows
 
 @dataclass(frozen=True, slots=True)
 class Selection:
+    """A logical element range of a parameter and its conversion selections."""
     begin: int
     end: int
     format: str
@@ -50,6 +51,7 @@ class Selection:
 
 @dataclass(frozen=True, slots=True)
 class WeightJob:
+    """One prepared weight object with its method, sources, and placement."""
     spec: TensorSpec
     prepared: PreparedMethod
     parameters: tuple[str, ...]
@@ -61,6 +63,7 @@ class WeightJob:
 
 @dataclass(frozen=True, slots=True)
 class AuxiliaryReference:
+    """A byte range reference into one named auxiliary tensor."""
     tensor: str
     begin: int
     end: int
@@ -68,6 +71,7 @@ class AuxiliaryReference:
 
 @dataclass(frozen=True, slots=True)
 class PreparedRecipe:
+    """Prepared conversion output: weight jobs, bindings, uses, and auxiliary outputs."""
     weights: tuple[WeightJob, ...]
     bindings: dict
     uses: tuple[dict, ...]
@@ -75,6 +79,7 @@ class PreparedRecipe:
 
 
 def default_layout(format: str) -> str:
+    """Return the default tensor layout name for a numeric format."""
     if format == "mxfp8":
         return "row_group_scale_v1"
     kind = get_format(format)
@@ -92,6 +97,7 @@ def default_layout(format: str) -> str:
 
 
 def _slice_source(source: LogicalSource, begin: int, end: int) -> LogicalSource:
+    """Return the sub-source covering flat elements [begin, end), requiring whole leading-axis rows."""
     if begin == 0 and end == prod(source.shape):
         return source
     width = prod(source.shape[1:]) if source.shape else 1
@@ -113,6 +119,7 @@ class Recipe:
     """Configuration remains ordinary Python; prepared output contains only data and jobs."""
 
     def __init__(self, model: Model):
+        """Initialize empty recipe state and register every parameter of the model."""
         self.model = model
         self.provenance = {}
         self.selections: dict[str, list[Selection]] = {}
@@ -131,6 +138,7 @@ class Recipe:
             self.add_parameter(parameter.name)
 
     def add_parameter(self, name: str) -> None:
+        """Register a parameter with a full-range direct-cast selection and A16Only policies."""
         parameter = self.model.parameters[name]
         if name in self.selections:
             raise ValueError(f"recipe already contains {name}")
@@ -149,6 +157,7 @@ class Recipe:
             self.policies[(name, input_name)] = "A16Only"
 
     def match(self, selectors: str | Sequence[str]) -> tuple[str, ...]:
+        """Resolve exact names and fnmatch selectors to unique parameter names in order."""
         if isinstance(selectors, str):
             selectors = (selectors,)
         if not selectors:
@@ -183,6 +192,7 @@ class Recipe:
         activation_policy=None,
         rows=None,
     ) -> None:
+        """Apply physical conversion overrides to a row range and set activation policies."""
         if isinstance(method, str):
             try:
                 method = METHODS[method]
@@ -258,6 +268,7 @@ class Recipe:
         activation_policy=None,
         auxiliaries=None,
     ):
+        """Set the activation policy and auxiliary overrides for one parameter input."""
         key = (parameter, input_name)
         if key not in self.policies:
             raise ValueError(f"{parameter}@{input_name}: unknown mathematical use")
@@ -295,6 +306,7 @@ class Recipe:
                 self.auxiliary_overrides[(*key, role)] = value
 
     def auxiliary_tensor(self, name: str, value: AuxiliaryValue) -> None:
+        """Store a named auxiliary tensor after checking its encoded size."""
         if name in self.auxiliary_tensors:
             raise ValueError(f"duplicate auxiliary tensor {name}")
         if len(value.data) != encoded_size(
@@ -361,6 +373,7 @@ class Recipe:
         }
 
     def place(self, selectors, order: tuple[int, ...]) -> None:
+        """Set the placement order for every parameter matched by the selectors."""
         for name in self.match(selectors):
             self.placements[name] = tuple(order)
 
@@ -406,13 +419,16 @@ class Recipe:
         self.explicit_parents.append((tuple(regions), tuple(shape), tuple(order)))
 
     def separate(self, selectors) -> None:
+        """Exclude matched parameters from automatic packing groups."""
         self.separate_parameters.update(self.match(selectors))
 
     def group(self, selectors, *, shape=None) -> None:
+        """Register an explicit packing group of matched parameters with an optional parent shape."""
         names = self.match(selectors)
         self.explicit_groups.append((names, None if shape is None else tuple(shape)))
 
     def share(self, parameter: str, target: str) -> None:
+        """Alias parameter to target, reusing target selections after shape and cycle checks."""
         if parameter not in self.selections or target not in self.selections:
             raise ValueError("shared parameters must exist")
         if (
@@ -440,12 +456,14 @@ class Recipe:
         source_cache_bytes=SOURCE_CACHE_BYTES,
         reader=None,
     ) -> PreparedRecipe:
+        """Convert selections into prepared weight jobs, bindings, uses, and auxiliary outputs."""
         weights = []
         fragments = {name: [] for name in self.selections}
         auxiliary_values = dict(self.auxiliary_overrides)
         used = set()
 
         def compatible(items):
+            """Return whether every item shares the first item's format, layout, method, and parameters."""
             first = items[0][1]
             return all(
                 (value.format, value.layout, value.method, value.parameters)
@@ -454,6 +472,7 @@ class Recipe:
             )
 
         def parent_shape(items, chosen):
+            """Compute the parent shape and per-item sliced sources for a packing group."""
             sources = [
                 _slice_source(
                     value.source,
@@ -495,6 +514,7 @@ class Recipe:
             )
 
         def emit(items, chosen=None, order=None):
+            """Convert one group of selections into a single prepared weight job."""
             if len({self.model.parameters[name].residency for name, _ in items}) > 1:
                 raise ValueError(
                     "grouping crosses independently selected private weights"

@@ -11,6 +11,7 @@ from pathlib import Path
 
 
 def records(path: Path):
+    """Yield semicolon-split fields from a Unicode 17 UCD file, skipping comment lines."""
     text = path.read_text(encoding="utf-8")
     if "17.0.0" not in text.splitlines()[0]:
         raise ValueError(f"{path}: expected Unicode 17.0.0")
@@ -21,11 +22,13 @@ def records(path: Path):
 
 
 def cpp_string(sequence: str) -> str:
+    """Return a C++ string literal with the UTF-8 bytes of a hex codepoint sequence."""
     data = "".join(chr(int(word, 16)) for word in sequence.split()).encode("utf-8")
     return '"' + "".join(f"\\x{byte:02x}" for byte in data) + '"'
 
 
 def main():
+    """Generate unicode_data.h with full-case mappings and contextual-case properties."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("ucd_directory", type=Path)
     args = parser.parse_args()

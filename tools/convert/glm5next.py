@@ -17,6 +17,7 @@ from .sources.safetensors import tensor_source
 
 
 def text_config(source):
+    """Extract and validate the GLM5Next text model configuration from a checkpoint config."""
     if source.get("architectures") not in (
         ["Glm5NextForConditionalGeneration"],
         ["Glm5NextForCausalLM"],
@@ -116,6 +117,7 @@ def text_config(source):
 
 
 def _nvfp4_source(store, prefix, shape):
+    """Build a LogicalSource that decodes a prefixed NVFP4 matrix with its scale tensors."""
     n, k = shape
     for suffix, dims, dtype in (
         ("weight", (n, k // 2), "U8"),
@@ -129,6 +131,7 @@ def _nvfp4_source(store, prefix, shape):
 
     @lru_cache(maxsize=1)
     def source():
+        """Create and cache the NVFP4 matrix reader for this store and prefix."""
         return ModelOptNvfp4(store).matrix(prefix, shape)
 
     return LogicalSource(
@@ -143,9 +146,11 @@ def _nvfp4_source(store, prefix, shape):
 
 
 def bank_source(sources, shape):
+    """Stitch per-expert matrix sources into one LogicalSource over the concatenated expert rows."""
     width = prod(shape[1:])
 
     def read(begin, end):
+        """Read the flat row range [begin, end) by slicing across the per-expert sources."""
         parts = []
         while begin < end:
             expert, local = divmod(begin, width)
@@ -168,7 +173,10 @@ def bank_source(sources, shape):
 
 
 class Builder:
+    """Incremental builder that registers GLM5Next parameters from a checkpoint store."""
+
     def __init__(self, model, base, cfg):
+        """Bind the model, base store, and config, and detect natively mixed-precision weights."""
         self.model, self.base, self.cfg = model, base, cfg
         self.consumed = set()
         self.native = (
@@ -189,6 +197,7 @@ class Builder:
         rows=None,
         axes=None,
     ):
+        """Register a parameter from a checkpoint tensor with optional encoding, row, or axis handling."""
         shape = tuple(shape)
         original = tuple(source_shape or shape)
         info = self.base.describe(source)
@@ -213,6 +222,7 @@ class Builder:
         dtype = {"bf16": "BF16", "fp32": "F32"}.get(direct)
 
         def factory(store, format=None):
+            """Build the source for a store after validating its representation and shape."""
             if format not in (None, direct):
                 raise ValueError(f"{name}: source representation is {direct}")
             info = store.describe(source)
@@ -237,6 +247,7 @@ class Builder:
                 width = prod(original[1:])
 
                 def read(begin, end):
+                    """Read a row range from the permuted matrix by slicing the transposed chunk."""
                     if begin == end:
                         return ref.values(0, 0)
                     first, last = begin // width, (end + width - 1) // width
@@ -265,13 +276,16 @@ class Builder:
         )
 
     def group(self, *names):
+        """Record that the named parameters should be packed together."""
         self.model.packing_groups.append(tuple(names))
 
     def encoded(self, name, prefix, shape, *, inputs):
+        """Register a parameter stored as an NVFP4 block, either natively or reconstructed."""
         if self.native:
             return self.add(name, prefix + ".weight", shape, inputs=inputs)
 
         def factory(store, format=None):
+            """Build the NVFP4 LogicalSource for a store, rejecting any other representation."""
             if format not in (None, "nvfp4"):
                 raise ValueError(f"{name}: source representation is nvfp4")
             return _nvfp4_source(store, prefix, shape)
@@ -293,6 +307,7 @@ class Builder:
         )
 
     def hc(self, p, s, site):
+        """Add the hyper-connections projection, base, and scale parameters for one site."""
         h, c = self.cfg["hidden_size"], self.cfg["hc_mult"]
         n = c * c + 2 * c
         self.add(p + "projection", s + f"hc_{site}_fn", (n, c * h))
@@ -300,6 +315,7 @@ class Builder:
         self.add(p + "scale", s + f"hc_{site}_scale", (3,))
 
     def kda(self, p, s):
+        """Add a layer's linear-attention parameters, including its fused convolution source."""
         cfg = self.cfg
         h, heads, d, r = (
             cfg[k]
@@ -341,6 +357,7 @@ class Builder:
             raise ValueError("KDA convolution requires BF16 or FP32 weights")
 
         def factory(store, format=None):
+            """Build the fused convolution source after validating every q/k/v conv weight."""
             if format not in (None, conv_format):
                 raise ValueError("KDA convolution preserves its source words")
             for name in names:
@@ -349,6 +366,7 @@ class Builder:
                     raise ValueError(f"{name}: expected {conv_dtype} {(c, 1, taps)}")
 
             def read(begin, end):
+                """Read the fused q/k/v convolution rows from the concatenated transposed weights."""
                 values = torch.cat(
                     [store.read_flat(name).reshape(c, taps).T for name in names], dim=1
                 )
@@ -368,6 +386,7 @@ class Builder:
         )
 
     def mla(self, p, s):
+        """Add a layer's sparse-attention parameters: latent, indexer, and query projections plus norms."""
         cfg = self.cfg
         h, q, c, heads, dq, dv, ih, di = (
             cfg[k]
@@ -446,6 +465,7 @@ class Builder:
             self.add(p + "attention/" + role, a + field, dims)
 
     def dense(self, p, s):
+        """Add a layer's dense MLP gate, up, and down projections."""
         h, i = self.cfg["hidden_size"], self.cfg["intermediate_size"]
         for role in ("gate", "up", "down"):
             self.encoded(
@@ -457,6 +477,7 @@ class Builder:
         self.group(p + "mlp/gate", p + "mlp/up")
 
     def moe(self, p, s, *, encoded):
+        """Add a layer's MoE router, shared experts, and banked routed expert projections."""
         cfg = self.cfg
         h, e, i = (
             cfg[k] for k in ("hidden_size", "n_routed_experts", "moe_intermediate_size")
@@ -498,6 +519,7 @@ class Builder:
             def factory(
                 store, format=None, *, prefixes=prefixes, matrix=matrix, shape=shape
             ):
+                """Build the expert bank source for a store, validating each expert's representation."""
                 expected = (
                     "nvfp4_mul" if self.native else "nvfp4" if encoded else "bf16"
                 )
@@ -533,6 +555,7 @@ class Builder:
         self.group(p + "moe/shared/gate", p + "moe/shared/up")
 
     def vision(self, cfg):
+        """Add the vision tower: patch embedding, transformer blocks, downsample, and merger."""
         h, i, out, merge = (
             cfg[k]
             for k in (
@@ -633,6 +656,7 @@ class Builder:
 def build_model(
     base, *, components=("text",), companions=None, resource_overrides=None
 ):
+    """Build the complete GLM5Next logical model and verify full checkpoint coverage."""
     selected = set(components)
     if "text" not in selected or selected - {"text", "vision", "mtp"}:
         raise ValueError("GLM5Next supports text, vision and mtp components")
@@ -755,6 +779,7 @@ def build_model(
     }
     if b.consumed != expected:
         raise ValueError(
-            f"GLM5Next source coverage differs: missing {sorted(expected - b.consumed)}, extra {sorted(b.consumed - expected)}"
+            f"GLM5Next source coverage differs: missing {sorted(expected - b.consumed)}, "
+            f"extra {sorted(b.consumed - expected)}"
         )
     return model

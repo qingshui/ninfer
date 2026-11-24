@@ -14,6 +14,7 @@ from ._tensor_bytes import _exact_uint8_matrix
 
 
 def divisor_word(value: bytes | torch.Tensor) -> bytes:
+    """Return the NF4 divisor as 4 bytes, requiring a positive finite FP32 value."""
     if isinstance(value, torch.Tensor):
         if value.dtype != torch.float32 or value.numel() != 1:
             raise TypeError("NF4 divisor must be one FP32 word")
@@ -33,6 +34,7 @@ def divisor_word(value: bytes | torch.Tensor) -> bytes:
 
 
 def nf4_rows(codes: torch.Tensor, scales: torch.Tensor, k: int) -> np.ndarray:
+    """Validate NF4 code and scale shapes and return them concatenated row-wise as uint8."""
     rows = codes.shape[0]
     codes = _exact_uint8_matrix(codes, (rows, k // 2), "NF4 packed codes")
     scales = _exact_uint8_matrix(scales, (rows, k // 16), "NF4 scales")
@@ -47,6 +49,7 @@ def encode_nf4(
     divisor: bytes | torch.Tensor,
     shape: Sequence[int],
 ) -> bytes:
+    """Return the NF4 payload: rows in zero-padded 4 KiB pages plus the divisor word."""
     g = row_paged_geometry("nf4_g16_e4m3fn", shape)
     if codes.shape[0] != g.n:
         raise ValueError("NF4 codes differ from logical rows")
@@ -61,6 +64,7 @@ def encode_nf4(
 
 
 def decode_nf4_words(payload: bytes | bytearray | memoryview, shape: Sequence[int]):
+    """Split an NF4 payload back into codes, scales, and the FP32 divisor, checking padding."""
     g = row_paged_geometry("nf4_g16_e4m3fn", shape)
     raw = memoryview(payload).cast("B")
     if len(raw) != g.payload_bytes:

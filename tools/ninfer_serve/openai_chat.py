@@ -17,6 +17,7 @@ def chat_request(
     stream: bool = True,
     tools: Sequence[dict[str, Any]] | None = None,
 ) -> ProtocolRequest:
+    """Build an openai_chat ProtocolRequest for /v1/chat/completions with temperature 0 and optional tools."""
     if max_output_tokens <= 0:
         raise ValueError("Chat max_output_tokens must be positive")
     payload: dict[str, Any] = {
@@ -41,7 +42,9 @@ def chat_request(
 
 
 class ChatStreamAdapter:
+    """Stream adapter that classifies OpenAI Chat Completions frames into protocol events."""
     def consume(self, event: SseEvent) -> list[ProtocolEvent]:
+        """Convert one SSE frame into terminal, error, accepted, model_output, or metadata protocol events."""
         if event.data == "[DONE]":
             return [ProtocolEvent("terminal", "done", event.received_ns)]
         try:

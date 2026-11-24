@@ -28,12 +28,16 @@ _CANCEL_TERMINATION_LIMIT_NS = 5_000_000_000
 
 @dataclass(frozen=True)
 class SymmetricRoleGroup:
+    """A named set of request roles treated as interchangeable within a case."""
+
     name: str
     roles: tuple[str, ...]
 
 
 @dataclass(frozen=True)
 class CaseDefinition:
+    """Metadata and the run function for one audited TTFT case."""
+
     name: str
     protocol: str
     profile: str
@@ -45,6 +49,7 @@ class CaseDefinition:
 
 
 def _mark_generated_input(context: CaseContext) -> None:
+    """Mark the case notes as depending on generated model output, disabling throughput comparison."""
     context.notes["input_dependency"] = "generated"
     context.notes["throughput_comparable"] = False
     reason = "Later inputs include generated assistant output or stored response history."
@@ -54,6 +59,7 @@ def _mark_generated_input(context: CaseContext) -> None:
 
 
 def _response_id(context: CaseContext, handle: RequestHandle) -> str:
+    """Return a completed handle's response id, failing the case when it is absent."""
     if not handle.response_id:
         raise CaseExecutionError(f"request {handle.role} completed without a response id")
     _mark_generated_input(context)
@@ -61,6 +67,7 @@ def _response_id(context: CaseContext, handle: RequestHandle) -> str:
 
 
 def _assistant(context: CaseContext, handle: RequestHandle) -> dict[str, str]:
+    """Wrap a handle's generated output as an assistant message, failing when it is empty."""
     output = handle.output_text
     if not output:
         raise CaseExecutionError(f"request {handle.role} produced no assistant content")
@@ -69,6 +76,7 @@ def _assistant(context: CaseContext, handle: RequestHandle) -> dict[str, str]:
 
 
 def _require_successes(context: CaseContext, handles: Iterable[RequestHandle]) -> None:
+    """Require success for every handle as a non-prerequisite condition."""
     for handle in handles:
         context.require_success(handle, prerequisite=False)
 
@@ -78,6 +86,7 @@ def _require_order(
     expression: str,
     values: Iterable[tuple[str, int | None]],
 ) -> None:
+    """Require the named timestamp sequence to be strictly increasing."""
     observed = list(values)
     valid = all(isinstance(value, int) for _, value in observed)
     if valid:
@@ -88,6 +97,7 @@ def _require_order(
 
 
 def _chat_shape(context: CaseContext, corpus: Corpus, shape: str, role: str) -> RequestHandle:
+    """Start one chat request for the named corpus shape under the given role."""
     facts = corpus.shape(shape)
     return context.start(
         role,
@@ -108,6 +118,7 @@ def _responses_shape(
     store: bool,
     previous_response_id: str | None = None,
 ) -> RequestHandle:
+    """Start one Responses request for the named shape, optionally stored or chained."""
     facts = corpus.shape(shape)
     if previous_response_id is not None:
         _mark_generated_input(context)
@@ -124,13 +135,17 @@ def _responses_shape(
 
 
 def _cold_shape(shape: str) -> CaseFunction:
+    """Build a case that measures one cold chat request for the given shape."""
+
     def run(context: CaseContext, corpus: Corpus) -> None:
+        """Start the cold shape request and require its success."""
         context.require_success(_chat_shape(context, corpus, shape, "request"))
 
     return run
 
 
 def _preemption_messages(corpus: Corpus, marker: str) -> list[dict[str, Any]]:
+    """Copy the interferer messages with a role marker and a long-growth instruction."""
     messages = copy.deepcopy(corpus.shape_messages("interferer-256"))
     messages[0]["content"] = marker + "。" + messages[0]["content"]
     messages[-1]["content"] += (
@@ -143,7 +158,10 @@ def _preemption_messages(corpus: Corpus, marker: str) -> list[dict[str, Any]]:
 
 
 class _LiveRequestLog:
+    """Tail the case's request log to observe scheduling events while requests run."""
+
     def __init__(self, context: CaseContext) -> None:
+        """Capture the request log path and starting offset from the case notes."""
         value = context.notes.get("request_log_jsonl")
         self.path = Path(value) if isinstance(value, str) else None
         self.offset = self.path.stat().st_size if self.path is not None and self.path.is_file() else 0
@@ -151,6 +169,7 @@ class _LiveRequestLog:
         self.error: str | None = None
 
     def poll(self) -> list[dict[str, Any]]:
+        """Return newly observed scheduling or throughput events with their observation times."""
         if self.path is None or not self.path.is_file() or self.error is not None:
             return []
         samples = []
@@ -182,6 +201,7 @@ def _fixed_request_graph(
     *,
     prepare_at_arrival: bool = False,
 ) -> list[RequestHandle]:
+    """Run requests on a fixed-offset schedule, recording arrivals, lateness, and token usage."""
     handles = [] if prepare_at_arrival else [context.prepare(role, request) for role, request in requests]
     live_log = _LiveRequestLog(context) if on_sample is not None else None
     gates = [threading.Event() for _ in handles]
@@ -246,7 +266,10 @@ def _fixed_request_graph(
 
 
 def _preemption_load(restore: str) -> CaseFunction:
+    """Build a two-arrival preemption case that requires the named restore mechanism."""
+
     def run(context: CaseContext, corpus: Corpus) -> None:
+        """Run the two fixed arrivals under preemption and require both to succeed."""
         # Offline token counts describe the fixture; serving usage remains authoritative.
         context.notes.update({
             "mechanism_requirements": ["preemption", restore],
@@ -264,6 +287,7 @@ def _preemption_load(restore: str) -> CaseFunction:
 
 
 def _shared_growth_messages(corpus: Corpus, branch: str) -> list[dict[str, Any]]:
+    """Build a shared-system conversation with an explicit cache breakpoint and a branch question."""
     system = corpus.shape_messages("state-2k-a")[0]["content"]
     question = corpus.shape_messages("interferer-256")[-1]["content"]
     question += (
@@ -279,6 +303,7 @@ def _shared_growth_messages(corpus: Corpus, branch: str) -> list[dict[str, Any]]
 
 
 def _shared_growth_recovery(context: CaseContext, corpus: Corpus) -> None:
+    """Grow three shared-prefix branches with fixed shorts, then release recovery shorts on a Replay restoration."""
     seed = context.start("seed", chat_request(context.model, _shared_growth_messages(corpus, "A"), 1))
     context.require_success(seed)
     context.notes.update({
@@ -309,6 +334,7 @@ def _shared_growth_recovery(context: CaseContext, corpus: Corpus) -> None:
     recovery_arrivals: list[RequestHandle] = []
 
     def submit_after_replay(sample: dict[str, Any], _handles: list[RequestHandle]) -> None:
+        """Submit the two recovery shorts once a replay restoration event is observed."""
         event = sample["event"]
         if recovery_arrivals or event.get("event") != "request_scheduling":
             return
@@ -341,6 +367,7 @@ def _shared_growth_recovery(context: CaseContext, corpus: Corpus) -> None:
 
 
 def _vision_growth_replay(context: CaseContext, corpus: Corpus) -> None:
+    """Run fixed Text and Vision growth arrivals and require the Vision request's own replay."""
     messages = corpus.media_messages("image-chart")
     prompt = corpus.shape_messages("interferer-256")[-1]["content"] + (
         "\n详细讲述每一步的判断过程，逐段分析人物和环境的变化。保持故事连贯，不要提前结束。"
@@ -368,6 +395,7 @@ def _vision_growth_replay(context: CaseContext, corpus: Corpus) -> None:
 
 
 def _anonymous_hot(context: CaseContext, corpus: Corpus) -> None:
+    """Continue a completed request's full history with its generated reply appended."""
     source_messages = corpus.shape_messages("long-8k-16")
     source = context.start(
         "source",
@@ -386,6 +414,7 @@ def _anonymous_hot(context: CaseContext, corpus: Corpus) -> None:
 
 
 def _state_probe(context: CaseContext, corpus: Corpus, label: str, turn: int) -> None:
+    """Send one state probe request for the given label and turn and require its success."""
     request = context.start(
         f"{label}{turn}", chat_request(context.model, corpus.state_messages(label, turn), 32)
     )
@@ -393,6 +422,7 @@ def _state_probe(context: CaseContext, corpus: Corpus, label: str, turn: int) ->
 
 
 def _shared_state_working_set(context: CaseContext, corpus: Corpus) -> None:
+    """Run two three-conversation working sets while continually revisiting one shared prefix."""
     for turn in range(2):
         for label in "abc":
             _state_probe(context, corpus, label, turn)
@@ -406,6 +436,7 @@ def _shared_state_working_set(context: CaseContext, corpus: Corpus) -> None:
 def _private_state_working_set(
     context: CaseContext, corpus: Corpus, *, automatic_shared: bool = True,
 ) -> None:
+    """Grow paired full-history conversations over rounds, with automatic or explicit shared capture."""
     context.notes["automatic_shared_capture"] = automatic_shared
     for labels, rounds in (("ab", 2), ("cd", 4)):
         histories = {label: corpus.state_messages(label) for label in labels}
@@ -423,6 +454,7 @@ def _private_state_working_set(
 
 
 def _shared_state_hot_prefix(context: CaseContext, corpus: Corpus) -> None:
+    """Keep one state prefix hot while interleaving five single-use conversations."""
     _state_probe(context, corpus, "a", 0)
     _state_probe(context, corpus, "a", 1)
     for turn, label in enumerate("bcdef", start=2):
@@ -431,6 +463,7 @@ def _shared_state_hot_prefix(context: CaseContext, corpus: Corpus) -> None:
 
 
 def _session_hot(context: CaseContext, corpus: Corpus) -> None:
+    """Continue a stored long Responses session through its previous response id."""
     source = _responses_shape(
         context, corpus, "long-8k-16", "source", store=True
     )
@@ -449,6 +482,7 @@ def _session_hot(context: CaseContext, corpus: Corpus) -> None:
 
 
 def _session_alternating(context: CaseContext, corpus: Corpus) -> None:
+    """Alternate between two stored sessions, continuing each once after both are established."""
     messages_a = corpus.shape_messages("long-8k-16")
     messages_b = copy.deepcopy(messages_a)
     messages_b[-1]["content"] += "\nThis is independent session B."
@@ -485,6 +519,7 @@ def _session_alternating(context: CaseContext, corpus: Corpus) -> None:
 
 
 def _session_alternating_64k_host_swap(context: CaseContext, corpus: Corpus) -> None:
+    """Alternate two near-capacity 64K stored sessions to exercise Host KV swapping."""
     a1 = _responses_shape(
         context, corpus, "long-64k-32", "a1", store=True
     )
@@ -518,6 +553,7 @@ def _session_alternating_64k_host_swap(context: CaseContext, corpus: Corpus) -> 
 
 
 def _session_rotation_55k_host(context: CaseContext, corpus: Corpus) -> None:
+    """Create six 55K stored roots, then rotate sequential resume rounds across all of them."""
     source_ids: list[str] = []
     for index in range(6):
         source = _responses_shape(
@@ -531,6 +567,7 @@ def _session_rotation_55k_host(context: CaseContext, corpus: Corpus) -> None:
         source_ids.append(_response_id(context, source))
 
     def resume(role: str, source_index: int) -> None:
+        """Resume one stored 55K root under the given role and require its success."""
         request = context.start(
             role,
             responses_request(
@@ -553,6 +590,7 @@ class _BackgroundResponseLoops:
     """Keep two store-free streamed generations active across a long foreground history."""
 
     def __init__(self, context: CaseContext, initial: list[RequestHandle]) -> None:
+        """Adopt the initial handles and start one replacement thread per stream."""
         self._context = context
         self._current = list(initial)
         self._generations = [0 for _ in initial]
@@ -573,6 +611,7 @@ class _BackgroundResponseLoops:
 
     @staticmethod
     def _request(context: CaseContext, index: int) -> Any:
+        """Build the long store-free background sequence request for one worker index."""
         return responses_request(
             context.model,
             (
@@ -585,6 +624,7 @@ class _BackgroundResponseLoops:
 
     @classmethod
     def start(cls, context: CaseContext) -> _BackgroundResponseLoops:
+        """Barrier-start two background streams and wait for their first outputs."""
         handles = context.barrier(
             (
                 (f"background-{index}-generation-0", cls._request(context, index))
@@ -596,11 +636,13 @@ class _BackgroundResponseLoops:
         return cls(context, handles)
 
     def _record_error(self, index: int, error: BaseException) -> None:
+        """Record a loop failure and signal every thread to stop."""
         with self._lock:
             self._errors.append(f"background loop {index}: {type(error).__name__}: {error}")
             self._stop.set()
 
     def _run(self, index: int) -> None:
+        """Wait out each generation and start its replacement until stopped or failed."""
         try:
             while True:
                 with self._lock:
@@ -645,6 +687,7 @@ class _BackgroundResponseLoops:
             self._record_error(index, error)
 
     def require_active(self) -> None:
+        """Block until every stream is mid-generation past its first output, or fail."""
         deadline = time.monotonic() + self._context.timeout
         while True:
             with self._lock:
@@ -664,6 +707,7 @@ class _BackgroundResponseLoops:
             time.sleep(0.01)
 
     def stop(self) -> None:
+        """Cancel live streams, join the threads, and fail on survivors or recorded errors."""
         with self._lock:
             self._stop.set()
             for handle in self._current:
@@ -685,6 +729,7 @@ class _BackgroundResponseLoops:
 
 
 def _second_rotation_messages(corpus: Corpus, index: int) -> list[dict[str, Any]]:
+    """Rewrite a 55K fixture's leading system marker into the same-length second-cohort label."""
     facts = corpus.shape(f"rotation-55k-{index}")
     messages = corpus.shape_messages(f"rotation-55k-{index}")
     if not messages or messages[0].get("role") != "system":
@@ -703,6 +748,7 @@ def _second_rotation_messages(corpus: Corpus, index: int) -> list[dict[str, Any]
 
 
 def _session_rotation_55k_two_cohort_stream(context: CaseContext, corpus: Corpus) -> None:
+    """Build the first 55K rotation estate, then stream a distinct second cohort under live background streams."""
     # Reproduce the process history from #144: first establish the complete sequential rotation
     # estate, then keep two store-free streams live while a distinct second cohort is created and
     # resumed. Same-length leading marker replacements preserve the frozen 55K request shape while
@@ -756,6 +802,7 @@ def _session_rotation_55k_two_cohort_stream(context: CaseContext, corpus: Corpus
 
 
 def _unmarked_common(context: CaseContext, corpus: Corpus) -> None:
+    """Send two sequential requests that share only raw token commonality."""
     first = _chat_shape(context, corpus, "unmarked-common-a", "first")
     context.require_success(first)
     second = _chat_shape(context, corpus, "unmarked-common-b", "second")
@@ -763,6 +810,7 @@ def _unmarked_common(context: CaseContext, corpus: Corpus) -> None:
 
 
 def _pressure_graph(context: CaseContext, corpus: Corpus) -> None:
+    """Store a long source, overlap two interferer streams, then resume the stored source."""
     source = _responses_shape(
         context, corpus, "long-8k-16", "source", store=True
     )
@@ -808,6 +856,7 @@ def _pressure_graph(context: CaseContext, corpus: Corpus) -> None:
 
 
 def _cache_off(context: CaseContext, corpus: Corpus) -> None:
+    """Run the session-hot continuation as the cache-off control."""
     _session_hot(context, corpus)
 
 
@@ -817,6 +866,7 @@ def _anthropic_system(
     suffix: str,
     role: str,
 ) -> RequestHandle:
+    """Start an Anthropic request pairing the shared system prompt with a short user suffix."""
     return context.start(
         role,
         anthropic_request(
@@ -829,6 +879,7 @@ def _anthropic_system(
 
 
 def _shared_sequential(context: CaseContext, corpus: Corpus) -> None:
+    """Reuse one Anthropic system prefix across two sequential suffix requests."""
     system = corpus.shared_system("system-a")
     first = _anthropic_system(context, system, "Suffix one: answer briefly.", "first")
     context.require_success(first)
@@ -837,6 +888,7 @@ def _shared_sequential(context: CaseContext, corpus: Corpus) -> None:
 
 
 def _openai_explicit_shared(context: CaseContext, corpus: Corpus) -> None:
+    """Reuse an explicitly marked OpenAI system prefix across two suffix requests."""
     system = [
         {
             "type": "text",
@@ -871,6 +923,7 @@ def _openai_explicit_shared(context: CaseContext, corpus: Corpus) -> None:
 
 
 def _openai_implicit_shared(context: CaseContext, corpus: Corpus) -> None:
+    """Send an unmarked prompt, an independent filler, then the same prompt to exercise automatic reuse."""
     messages = corpus.shape_messages("unmarked-common-a")
     facts = corpus.shape("unmarked-common-a")
     first = context.start(
@@ -893,6 +946,7 @@ def _openai_implicit_shared(context: CaseContext, corpus: Corpus) -> None:
 
 
 def _unmarked_repeat_after_interference(context: CaseContext, corpus: Corpus) -> None:
+    """Observe an unmarked Anthropic prompt twice, add an independent filler, then reuse it."""
     messages = corpus.shape_messages("unmarked-common-a")
     facts = corpus.shape("unmarked-common-a")
     first = context.start(
@@ -922,6 +976,7 @@ def _unmarked_repeat_after_interference(context: CaseContext, corpus: Corpus) ->
 
 
 def _shared_fanout(context: CaseContext, corpus: Corpus) -> None:
+    """Seed one shared prefix, then start two concurrent independent branches from it."""
     system = corpus.shared_system("system-a")
     seed = _anthropic_system(context, system, "Establish this stable prefix.", "seed")
     context.require_success(seed)
@@ -951,6 +1006,7 @@ def _shared_fanout(context: CaseContext, corpus: Corpus) -> None:
 
 
 def _shared_prefix_competition(context: CaseContext, corpus: Corpus) -> None:
+    """Revisit a marked prefix after a competing prefix and an independent request."""
     system_a = corpus.shared_system("system-a")
     system_b = corpus.shared_system("system-b")
     first_a = _anthropic_system(context, system_a, "Prefix A first use.", "a-first")
@@ -971,6 +1027,7 @@ def _shared_prefix_competition(context: CaseContext, corpus: Corpus) -> None:
 
 
 def _shared_tool_prefix_competition(context: CaseContext, corpus: Corpus) -> None:
+    """Compete a marked system prefix with a tool prefix, then reuse the tool prefix."""
     system = corpus.shared_system("system-a")
     first_a = _anthropic_system(context, system, "Establish prefix A.", "a")
     context.require_success(first_a)
@@ -1017,6 +1074,7 @@ def _shared_tool_prefix_competition(context: CaseContext, corpus: Corpus) -> Non
 
 
 def _shared_tools_revisit(context: CaseContext, corpus: Corpus) -> None:
+    """Reuse a stable tool prefix, then repeat the same question after an early tool change."""
     for role, question, changed in (
         ("source", "Summarize what these tools can inspect.", False),
         ("stable", "Name one safe repository operation.", False),
@@ -1035,6 +1093,7 @@ def _shared_tools_revisit(context: CaseContext, corpus: Corpus) -> None:
 
 
 def _short_during_prefill(context: CaseContext, corpus: Corpus) -> None:
+    """Arrive a short request during a long prefill and require the accepted-before-first order."""
     long_request = _chat_shape(context, corpus, "long-8k-32", "long")
     long_request.wait_accepted(context.timeout)
     short = _chat_shape(context, corpus, "short-32", "short")
@@ -1056,6 +1115,7 @@ def _finish_decode_overlap(
     holder: RequestHandle,
     foreground: RequestHandle,
 ) -> None:
+    """Require a decoding holder to resume output after a foreground completes, then cancel it."""
     context.require_success(foreground)
     completed_ns = foreground.completed_ns
     if not isinstance(completed_ns, int):
@@ -1097,6 +1157,7 @@ def _finish_decode_overlap(
 
 
 def _decode_with_short_arrival(context: CaseContext, corpus: Corpus) -> None:
+    """Arrive a short request while a holder decodes and verify the holder resumes output."""
     holder = _chat_shape(context, corpus, "holder-4096", "holder")
     holder.wait_first_output(context.timeout)
     short = _chat_shape(context, corpus, "short-32", "short")
@@ -1104,6 +1165,7 @@ def _decode_with_short_arrival(context: CaseContext, corpus: Corpus) -> None:
 
 
 def _short_behind_long(context: CaseContext, corpus: Corpus) -> None:
+    """Send a short request behind an accepted long prefill while a holder is still decoding."""
     holder = _chat_shape(context, corpus, "holder-4096", "holder")
     holder.wait_first_output(context.timeout)
     head = _chat_shape(context, corpus, "long-8k-32", "head")
@@ -1122,6 +1184,7 @@ def _short_behind_long(context: CaseContext, corpus: Corpus) -> None:
 
 
 def _active_lanes_full(context: CaseContext, corpus: Corpus) -> None:
+    """Fill every decode lane with holders, then require a queued probe be sent before any completes."""
     context.notes["measurement_contract"] = "2"
     messages = corpus.shape_messages("holder-4096")
     holders = context.barrier(
@@ -1139,7 +1202,8 @@ def _active_lanes_full(context: CaseContext, corpus: Corpus) -> None:
         isinstance(probe.sent_ns, int)
         and probe.sent_ns < earliest_holder_completion,
         "probe.sent < min(holder.completed)",
-        f"probe.sent={probe.sent_ns}, earliest_holder_completion={earliest_holder_completion}, probe.first={probe.first_output_ns}",
+        f"probe.sent={probe.sent_ns}, earliest_holder_completion={earliest_holder_completion}, "
+        f"probe.first={probe.first_output_ns}",
     )
     context.notes["lane_drain"] = {
         "holders": 8,
@@ -1152,6 +1216,7 @@ def _active_lanes_full(context: CaseContext, corpus: Corpus) -> None:
 
 
 def _session_publication_order(context: CaseContext, corpus: Corpus) -> None:
+    """Verify a newer session child is not overwritten by an older late completion, then continue it."""
     parent = context.start(
         "parent",
         responses_request(context.model, "Create a session root.", 16, store=True),
@@ -1222,6 +1287,7 @@ def _require_transport_cancellation(
     handle: RequestHandle,
     cancel_ns: int,
 ) -> None:
+    """Require a cancelled handle to terminate by transport within five seconds and emit no terminal event."""
     result = handle.result
     completed_ns = handle.completed_ns
     terminal_events = (
@@ -1255,6 +1321,7 @@ def _require_transport_cancellation(
 
 
 def _cancel_before_first(context: CaseContext, corpus: Corpus) -> None:
+    """Cancel a long request after admission but before first output, then probe cleanup."""
     request = _chat_shape(context, corpus, "long-8k-32", "cancelled")
     request.wait_accepted(context.timeout)
     cancel_ns = request.cancel()
@@ -1270,6 +1337,7 @@ def _cancel_before_first(context: CaseContext, corpus: Corpus) -> None:
 
 
 def _cancel_after_first(context: CaseContext, corpus: Corpus) -> None:
+    """Cancel a decoding holder after first output and require ordered, clean transport cancellation."""
     holder = _chat_shape(context, corpus, "holder-4096", "cancelled-holder")
     holder.wait_first_output(context.timeout)
     cancel_ns = holder.cancel()
@@ -1294,6 +1362,7 @@ def _expect_rejection(
     status: int,
     code: str,
 ) -> None:
+    """Require a handle to fail with the given HTTP status and error code and record no TTFT."""
     handle.wait_done(context.timeout)
     record = handle.as_record()
     context.require(
@@ -1309,6 +1378,7 @@ def _expect_rejection(
 
 
 def _pending_overflow(context: CaseContext, corpus: Corpus) -> None:
+    """Fill all lanes, overflow the bounded queue with a 429, then complete the pending request."""
     messages = corpus.shape_messages("holder-4096")
     holders = context.barrier(
         (
@@ -1330,6 +1400,7 @@ def _pending_overflow(context: CaseContext, corpus: Corpus) -> None:
 
 
 def _pending_timeout(context: CaseContext, corpus: Corpus) -> None:
+    """Require a queued non-streaming request to be rejected with 503 while a holder decodes."""
     holder = _chat_shape(context, corpus, "holder-4096", "holder")
     holder.wait_first_output(context.timeout)
     messages = corpus.shape_messages("short-32")
@@ -1343,10 +1414,12 @@ def _pending_timeout(context: CaseContext, corpus: Corpus) -> None:
 
 
 def _context_exact(context: CaseContext, corpus: Corpus) -> None:
+    """Require success for a request that exactly fills the context window."""
     context.require_success(_chat_shape(context, corpus, "context-exact", "request"))
 
 
 def _context_over(context: CaseContext, corpus: Corpus) -> None:
+    """Require a prompt beyond max_context to be rejected with 400 and no TTFT."""
     request = context.start(
         "request",
         chat_request(context.model, corpus.shape_messages("context-over"), 16),
@@ -1358,6 +1431,7 @@ def _mixed_four_requests(
     context: CaseContext,
     corpus: Corpus,
 ) -> list[tuple[str, Any]]:
+    """Build the four mixed requests: seeded continuation, cold long, short, and image."""
     source_messages = corpus.shape_messages("long-8k-16")
     seed = context.start("seed", chat_request(context.model, source_messages, 16))
     context.require_success(seed)
@@ -1388,6 +1462,7 @@ def _mixed_four_requests(
 
 
 def _mixed_four_ordered(context: CaseContext, corpus: Corpus) -> None:
+    """Start the four mixed requests sequentially and require strictly increasing acceptance."""
     handles = [
         context.prepare(role, request)
         for role, request in _mixed_four_requests(context, corpus)
@@ -1405,12 +1480,16 @@ def _mixed_four_ordered(context: CaseContext, corpus: Corpus) -> None:
 
 
 def _mixed_four_concurrent(context: CaseContext, corpus: Corpus) -> None:
+    """Release the four mixed requests concurrently through a start barrier."""
     handles = context.barrier(_mixed_four_requests(context, corpus))
     _require_successes(context, handles)
 
 
 def _media_cold(name: str) -> CaseFunction:
+    """Build a case that sends one cold request for the named media fixture."""
+
     def run(context: CaseContext, corpus: Corpus) -> None:
+        """Send the named media fixture as a single cold request and require success."""
         request = context.start(
             "request",
             chat_request(context.model, corpus.media_messages(name), 32),
@@ -1421,6 +1500,7 @@ def _media_cold(name: str) -> CaseFunction:
 
 
 def _replace_first_image(messages: list[dict[str, Any]], replacement_url: str) -> None:
+    """Replace the URL of the first image part found in a message history."""
     for message in messages:
         content = message.get("content")
         if not isinstance(content, list):
@@ -1433,6 +1513,7 @@ def _replace_first_image(messages: list[dict[str, Any]], replacement_url: str) -
 
 
 def _media_prefix_continuation(context: CaseContext, corpus: Corpus) -> None:
+    """Continue an exact multimodal prefix with the source's generated reply appended."""
     source_messages = corpus.media_messages("image-chart")
     source = context.start("source", chat_request(context.model, source_messages, 32))
     context.require_success(source)
@@ -1445,6 +1526,7 @@ def _media_prefix_continuation(context: CaseContext, corpus: Corpus) -> None:
 
 
 def _media_prefix_append(context: CaseContext, corpus: Corpus) -> None:
+    """Reuse a media prefix and append one new suffix image to the history."""
     source_messages = corpus.media_messages("image-chart")
     source = context.start("source", chat_request(context.model, source_messages, 32))
     context.require_success(source)
@@ -1457,6 +1539,7 @@ def _media_prefix_append(context: CaseContext, corpus: Corpus) -> None:
 
 
 def _media_prefix_changed(context: CaseContext, corpus: Corpus) -> None:
+    """Continue after replacing the earlier image in a reused media prefix."""
     source_messages = corpus.media_messages("image-chart")
     source = context.start("source", chat_request(context.model, source_messages, 32))
     context.require_success(source)
@@ -1472,6 +1555,7 @@ def _media_prefix_changed(context: CaseContext, corpus: Corpus) -> None:
 
 
 def _media_preprocess_revisit(context: CaseContext, corpus: Corpus) -> None:
+    """Load images in an A-A-B-C-A sequence so the first image is revisited last."""
     for role, index in (("a-cold", 0), ("a-warm", 0), ("b", 1), ("c", 2), ("a-revisit", 0)):
         handle = context.start(
             role,
@@ -1481,6 +1565,7 @@ def _media_preprocess_revisit(context: CaseContext, corpus: Corpus) -> None:
 
 
 def _many_image(context: CaseContext, corpus: Corpus) -> None:
+    """Send one request carrying the many-image fixture and require its success."""
     request = context.start(
         "request",
         chat_request(context.model, corpus.media_messages("many-image-28-a"), 32),
@@ -1489,6 +1574,7 @@ def _many_image(context: CaseContext, corpus: Corpus) -> None:
 
 
 def _text_during_media_prepare(context: CaseContext, corpus: Corpus) -> None:
+    """Send a short text request after a media body is sent but before the media is accepted."""
     short = context.prepare(
         "short",
         chat_request(context.model, corpus.shape_messages("short-32"), 32),
@@ -1515,6 +1601,7 @@ def _text_during_media_prepare(context: CaseContext, corpus: Corpus) -> None:
 
 
 def _media_during_decode(context: CaseContext, corpus: Corpus) -> None:
+    """Arrive a heavy media request during holder decode and verify resumed holder output."""
     holder = _chat_shape(context, corpus, "holder-4096", "holder")
     holder.wait_first_output(context.timeout)
     media = context.start(
@@ -1525,6 +1612,7 @@ def _media_during_decode(context: CaseContext, corpus: Corpus) -> None:
 
 
 def _two_heavy_media(context: CaseContext, corpus: Corpus) -> None:
+    """Start two byte-distinct heavy media requests concurrently and require both successes."""
     handles = context.barrier(
         (
             (
@@ -1545,6 +1633,7 @@ def _two_heavy_media(context: CaseContext, corpus: Corpus) -> None:
 
 
 def _vision_disabled(context: CaseContext, corpus: Corpus) -> None:
+    """Require a media request on a text-only Serve to be rejected with vision_disabled."""
     request = context.start(
         "request",
         chat_request(context.model, corpus.media_messages("image-chart"), 32),
@@ -1553,6 +1642,7 @@ def _vision_disabled(context: CaseContext, corpus: Corpus) -> None:
 
 
 def _vision_envelope_over(context: CaseContext, corpus: Corpus) -> None:
+    """Require a many-image request beyond the Vision envelope to be rejected with 400."""
     request = context.start(
         "request",
         chat_request(context.model, corpus.media_messages("many-image-33"), 32),
@@ -1561,7 +1651,10 @@ def _vision_envelope_over(context: CaseContext, corpus: Corpus) -> None:
 
 
 def _resident_competition(order: str) -> CaseFunction:
+    """Build a case where resident decodes compete with a long prefill in the given order."""
+
     def run(context: CaseContext, corpus: Corpus) -> None:
+        """Run the decodes and prefill in the configured order and require the expected engine order."""
         decode_requests = [
             (f"decode-{label}", chat_request(context.model, _preemption_messages(corpus, marker), 512))
             for label, marker in (("a", "ALPHA"), ("b", "BRAVO"))
@@ -1603,7 +1696,10 @@ def _resident_competition(order: str) -> CaseFunction:
 
 
 def _mixed_arrival_trace(interval_ms: int) -> CaseFunction:
+    """Build a case that releases twelve mixed arrivals at a fixed millisecond interval."""
+
     def run(context: CaseContext, corpus: Corpus) -> None:
+        """Submit twelve mixed requests on the fixed schedule and require every success."""
         requests = []
         facts = {}
         classes = {}
@@ -1635,7 +1731,10 @@ def _mixed_arrival_trace(interval_ms: int) -> CaseFunction:
 
 
 def _agent_preempted_continuation(route: str) -> CaseFunction:
+    """Build an agent case whose growing continuation is preempted and restored by the route."""
+
     def run(context: CaseContext, corpus: Corpus) -> None:
+        """Grow an agent history against a contender, then retry and continue it after restoration."""
         history = _preemption_messages(corpus, "ALPHA")
         source = context.start("agent-source", chat_request(context.model, history, 32))
         context.require_success(source)
@@ -1645,7 +1744,8 @@ def _agent_preempted_continuation(route: str) -> CaseFunction:
         context.require_success(turn)
         history = [*history, _assistant(context, turn),
                    {"role": "developer", "content": "Keep the established names and facts unchanged."},
-                   {"role": "user", "content": "Continue the story in detail, including the next investigation and dialogue."}]
+                   {"role": "user",
+                    "content": "Continue the story in detail, including the next investigation and dialogue."}]
         context.notes.update({
             "mechanism_requirements": ["agent_preemption", "agent_restore"],
             "mechanism_role_requirements": {
@@ -1673,6 +1773,7 @@ def _agent_preempted_continuation(route: str) -> CaseFunction:
 
 
 def _host_history_pressure_cancel(context: CaseContext, corpus: Corpus) -> None:
+    """Compete two seeded histories with three growing requests and cancel one observed paused request."""
     histories = [_preemption_messages(corpus, marker) for marker in ("OMEGA", "SIGMA")]
     for index, history in enumerate(histories):
         for step in ("seed", "warm"):
@@ -1680,7 +1781,8 @@ def _host_history_pressure_cancel(context: CaseContext, corpus: Corpus) -> None:
                 f"history-{index}-{step}", chat_request(context.model, history, 16)))
     context.notes.update({
         "throughput_comparable": False,
-        "throughput_limitation": "A request-specific paused event triggers cancellation; completed work is conditional.",
+        "throughput_limitation":
+            "A request-specific paused event triggers cancellation; completed work is conditional.",
         "mechanism_requirements": ["preemption", "snapshot_restore", "pressure_cancellation"],
         "mechanism_observations": {"pressure_cancellation": "unavailable"},
         "workload_shape": {"histories": 2, "pressure_requests": 3, "pressure_input_tokens": 192,
@@ -1688,6 +1790,7 @@ def _host_history_pressure_cancel(context: CaseContext, corpus: Corpus) -> None:
     })
 
     def cancel_paused(sample: dict[str, Any], handles: list[RequestHandle]) -> None:
+        """Cancel the first request seen pausing once its wire id matches a live handle."""
         event = sample["event"]
         if event.get("event") != "request_scheduling" or "pressure_cancel" in context.notes:
             return
@@ -1739,6 +1842,7 @@ def _definition(
     *,
     symmetric_role_groups: tuple[SymmetricRoleGroup, ...] = (),
 ) -> CaseDefinition:
+    """Construct a case definition from explicit metadata and a run function."""
     return CaseDefinition(
         name,
         protocol,
@@ -1755,13 +1859,15 @@ _DEFINITIONS = (
     _definition(
         "shared-growth-recovery", "openai_chat", "shared-growth-recovery", "scheduling",
         ("state-2k-a", "interferer-256", "short-32"),
-        "Three growing shared-prefix branches and two fixed short arrivals, then two new short requests after Replay restoration.",
+        "Three growing shared-prefix branches and two fixed short arrivals, "
+        "then two new short requests after Replay restoration.",
         _shared_growth_recovery,
     ),
     _definition(
         "host-history-pressure-cancel", "openai_chat", "host-history-pressure", "scheduling",
         ("interferer-256",),
-        "Two retained histories compete with three growing requests in limited Host storage; cancel a specifically observed paused request.",
+        "Two retained histories compete with three growing requests in limited Host storage; "
+        "cancel a specifically observed paused request.",
         _host_history_pressure_cancel,
     ),
     _definition(
@@ -1808,17 +1914,106 @@ _DEFINITIONS = (
         "A frequently revisited prefix is interleaved with five one-use conversations.",
         _shared_state_hot_prefix,
     ),
-    _definition("cold-short", "openai_chat", "text-cold-8k", "workload", ("short-32",), "Short cold TTFT baseline.", _cold_shape("short-32")),
-    _definition("cold-long-8k", "openai_chat", "text-cold-8k", "workload", ("long-8k-32",), "8K cold prefill baseline.", _cold_shape("long-8k-32")),
-    _definition("cold-long-64k", "openai_chat", "text-cold-64k", "workload", ("long-64k-32",), "64K legal long-context input.", _cold_shape("long-64k-32")),
-    _definition("cold-long-256k", "openai_chat", "text-cold-256k", "workload", ("long-256k-32",), "Hardware-resident extreme context under the standard FP8 KV profile.", _cold_shape("long-256k-32")),
-    _definition("mixed-four-ordered", "openai_chat", "mixed-four", "workload", ("long-8k-16", "long-8k-independent-32", "short-32", "image-chart"), "Four legal heterogeneous arrivals submitted in observed Serve-acceptance order.", _mixed_four_ordered),
-    _definition("mixed-four-concurrent", "openai_chat", "mixed-four", "workload", ("long-8k-16", "long-8k-independent-32", "short-32", "image-chart"), "The same heterogeneous requests released concurrently without an artificial order.", _mixed_four_concurrent),
-    _definition("anonymous-hot-continuation", "openai_chat", "cache-hot", "private", ("long-8k-16",), "Anonymous full-history continuation.", _anonymous_hot),
-    _definition("session-hot-continuation", "openai_responses", "cache-hot", "session", ("long-8k-16",), "Named Responses session continuation.", _session_hot),
-    _definition("session-alternating", "openai_responses", "cache-pressure-device", "session", ("long-8k-16",), "Alternating named sessions.", _session_alternating),
-    _definition("session-alternating-64k-host-swap", "openai_responses", "cache-swap-64k-host", "resource", ("long-64k-32", "long-64k-independent-32"), "Two near-capacity sessions alternate through Host KV.", _session_alternating_64k_host_swap),
-    _definition("session-rotation-55k-host", "openai_responses", "cache-rotation-55k-host", "resource", tuple(f"rotation-55k-{index}" for index in range(6)), "Six early-divergent 55K Responses roots, one warm branch, then three sequential round-robin branch rounds under Device/Host KV pressure.", _session_rotation_55k_host),
+    _definition(
+        "cold-short",
+        "openai_chat",
+        "text-cold-8k",
+        "workload",
+        ("short-32",),
+        "Short cold TTFT baseline.",
+        _cold_shape("short-32"),
+    ),
+    _definition(
+        "cold-long-8k",
+        "openai_chat",
+        "text-cold-8k",
+        "workload",
+        ("long-8k-32",),
+        "8K cold prefill baseline.",
+        _cold_shape("long-8k-32"),
+    ),
+    _definition(
+        "cold-long-64k",
+        "openai_chat",
+        "text-cold-64k",
+        "workload",
+        ("long-64k-32",),
+        "64K legal long-context input.",
+        _cold_shape("long-64k-32"),
+    ),
+    _definition(
+        "cold-long-256k",
+        "openai_chat",
+        "text-cold-256k",
+        "workload",
+        ("long-256k-32",),
+        "Hardware-resident extreme context under the standard FP8 KV profile.",
+        _cold_shape("long-256k-32"),
+    ),
+    _definition(
+        "mixed-four-ordered",
+        "openai_chat",
+        "mixed-four",
+        "workload",
+        ("long-8k-16", "long-8k-independent-32", "short-32", "image-chart"),
+        "Four legal heterogeneous arrivals submitted in observed Serve-acceptance order.",
+        _mixed_four_ordered,
+    ),
+    _definition(
+        "mixed-four-concurrent",
+        "openai_chat",
+        "mixed-four",
+        "workload",
+        ("long-8k-16", "long-8k-independent-32", "short-32", "image-chart"),
+        "The same heterogeneous requests released concurrently without an artificial order.",
+        _mixed_four_concurrent,
+    ),
+    _definition(
+        "anonymous-hot-continuation",
+        "openai_chat",
+        "cache-hot",
+        "private",
+        ("long-8k-16",),
+        "Anonymous full-history continuation.",
+        _anonymous_hot,
+    ),
+    _definition(
+        "session-hot-continuation",
+        "openai_responses",
+        "cache-hot",
+        "session",
+        ("long-8k-16",),
+        "Named Responses session continuation.",
+        _session_hot,
+    ),
+    _definition(
+        "session-alternating",
+        "openai_responses",
+        "cache-pressure-device",
+        "session",
+        ("long-8k-16",),
+        "Alternating named sessions.",
+        _session_alternating,
+    ),
+    _definition(
+        "session-alternating-64k-host-swap",
+        "openai_responses",
+        "cache-swap-64k-host",
+        "resource",
+        ("long-64k-32", "long-64k-independent-32"),
+        "Two near-capacity sessions alternate through Host KV.",
+        _session_alternating_64k_host_swap,
+    ),
+    _definition(
+        "session-rotation-55k-host",
+        "openai_responses",
+        "cache-rotation-55k-host",
+        "resource",
+        tuple(f"rotation-55k-{index}" for index in range(6)),
+        "Six early-divergent 55K Responses roots, one warm branch, "
+        "then three sequential round-robin branch rounds under Device/Host KV pressure.",
+        _session_rotation_55k_host,
+    ),
     _definition(
         "session-rotation-55k-two-cohort-stream",
         "openai_responses",
@@ -1840,47 +2035,383 @@ _DEFINITIONS = (
             for round_index in range(1, 4)
         ),
     ),
-    _definition("unmarked-common-prefix-miss", "openai_chat", "cache-hot", "private", ("unmarked-common-a", "unmarked-common-b"), "Raw token commonality without a checkpoint.", _unmarked_common),
-    _definition("resume-after-interference-device", "openai_responses", "cache-pressure-device", "resource", ("long-8k-16", "interferer-256"), "Pressure graph with Device-resident source.", _pressure_graph, symmetric_role_groups=(SymmetricRoleGroup("interferers", ("interferer-b", "interferer-c")),)),
-    _definition("resume-after-interference-state-host", "openai_responses", "cache-pressure-state-host", "resource", ("long-8k-16", "interferer-256"), "Pressure graph with Host State restore.", _pressure_graph, symmetric_role_groups=(SymmetricRoleGroup("interferers", ("interferer-b", "interferer-c")),)),
-    _definition("resume-after-interference-kv-host", "openai_responses", "cache-pressure-kv-host", "resource", ("long-8k-16", "interferer-256"), "Pressure graph with Host KV restore.", _pressure_graph, symmetric_role_groups=(SymmetricRoleGroup("interferers", ("interferer-b", "interferer-c")),)),
-    _definition("resume-after-interference-both-host", "openai_responses", "cache-pressure-both-host", "resource", ("long-8k-16", "interferer-256"), "Pressure graph with State and KV restore.", _pressure_graph, symmetric_role_groups=(SymmetricRoleGroup("interferers", ("interferer-b", "interferer-c")),)),
-    _definition("resume-after-interference-evicted", "openai_responses", "cache-pressure-evict", "resource", ("long-8k-16", "interferer-256"), "Pressure graph with no legal retained replica.", _pressure_graph, symmetric_role_groups=(SymmetricRoleGroup("interferers", ("interferer-b", "interferer-c")),)),
-    _definition("continuation-cache-off", "openai_responses", "cache-off", "control", ("long-8k-16",), "Full-history Responses control with Engine reuse disabled.", _cache_off),
-    _definition("shared-sequential", "anthropic_messages", "shared-prefix", "shared", ("system-a",), "Marked Anthropic shared prefix sequential reuse.", _shared_sequential),
-    _definition("shared-openai-explicit", "openai_chat", "shared-prefix", "shared", ("system-a",), "OpenAI explicit system boundary shared by different suffixes.", _openai_explicit_shared),
-    _definition("shared-openai-implicit", "openai_chat", "prefix-competition", "shared", ("unmarked-common-a",), "OpenAI automatic-prefix reuse after an independent request.", _openai_implicit_shared),
-    _definition("unmarked-repeat-after-interference", "anthropic_messages", "prefix-competition", "private", ("unmarked-common-a",), "Repeat an unmarked prompt before and after an independent request.", _unmarked_repeat_after_interference),
-    _definition("shared-fanout", "anthropic_messages", "shared-prefix", "shared", ("system-a",), "Concurrent branches from a non-aligned shared prefix.", _shared_fanout, symmetric_role_groups=(SymmetricRoleGroup("branches", ("branch-b", "branch-c")),)),
-    _definition("shared-prefix-competition", "anthropic_messages", "prefix-competition", "shared", ("system-a", "system-b"), "Revisit a marked prefix after a competing prefix and an independent request.", _shared_prefix_competition),
-    _definition("shared-tool-prefix-competition", "anthropic_messages", "prefix-competition", "shared", ("system-a", "client-tools-32"), "A marked system prefix and tool prefix compete for Device storage.", _shared_tool_prefix_competition),
-    _definition("shared-tools-revisit", "anthropic_messages", "shared-prefix", "shared", ("client-tools-32",), "Stable 32-tool prefix reuse followed by an early tool identity change.", _shared_tools_revisit),
-    _definition("short-during-prefill-128", "openai_chat", "scheduler-prefill-128", "scheduling", ("long-8k-32", "short-32"), "Arrival during prefill with 128-token chunks.", _short_during_prefill),
-    _definition("short-during-prefill-1024", "openai_chat", "scheduler-overlap", "scheduling", ("long-8k-32", "short-32"), "Arrival during prefill with 1024-token chunks.", _short_during_prefill),
-    _definition("short-during-prefill-4096", "openai_chat", "scheduler-prefill-4096", "scheduling", ("long-8k-32", "short-32"), "Arrival during prefill with 4096-token chunks.", _short_during_prefill),
-    _definition("decode-with-short-arrival", "openai_chat", "scheduler-overlap", "scheduling", ("holder-4096", "short-32"), "Short arrival during decode; observe resumed holder output, cancel, then probe cleanup.", _decode_with_short_arrival),
-    _definition("short-behind-long", "openai_chat", "scheduler-kv-pressure", "scheduling", ("holder-4096", "long-8k-32", "short-32"), "Short arrival behind a long request while a holder is decoding.", _short_behind_long),
-    _definition("active-lanes-full-8", "openai_chat", "lane-limit-8", "scheduling", ("holder-4096", "short-32"), "Eight 256-output-limit holders, a queued short arrival, and natural lane release and drain.", _active_lanes_full, symmetric_role_groups=(SymmetricRoleGroup("holders", tuple(f"holder-{index}" for index in range(8))),)),
-    _definition("session-publication-order", "openai_responses", "session-order", "boundary", ("holder-4096",), "Older late completion cannot overwrite newer session binding.", _session_publication_order),
-    _definition("cancel-before-first", "openai_chat", "scheduler-overlap", "boundary", ("long-8k-32", "short-32"), "Cancellation after admission but before first output.", _cancel_before_first),
-    _definition("cancel-after-first", "openai_chat", "scheduler-overlap", "boundary", ("holder-4096", "short-32"), "Active cancellation after first output.", _cancel_after_first),
-    _definition("pending-overflow", "openai_chat", "lane-limit-8", "rejection", ("holder-4096", "short-32"), "Bounded FIFO overflow returns 429 without TTFT.", _pending_overflow),
-    _definition("pending-timeout", "openai_chat", "pending-timeout", "rejection", ("holder-4096", "short-32"), "Non-streaming pending request returns 503.", _pending_timeout),
-    _definition("context-exact", "openai_chat", "context-boundary", "boundary", ("context-exact",), "p+(o-1) exactly equals max_context.", _context_exact),
-    _definition("context-over", "openai_chat", "context-boundary", "rejection", ("context-over",), "Prompt beyond max_context returns 400 without TTFT.", _context_over),
-    _definition("media-cold-image", "openai_chat", "vision-cache", "media", ("image-chart",), "Single-image external TTFT.", _media_cold("image-chart")),
-    _definition("media-cold-image-video", "openai_chat", "vision-cache", "media", ("image-video",), "Interleaved image and video input.", _media_cold("image-video")),
-    _definition("media-prefix-continuation", "openai_chat", "vision-cache", "media", ("image-chart",), "Exact multimodal prefix continuation.", _media_prefix_continuation),
-    _definition("media-prefix-append", "openai_chat", "vision-cache", "media", ("image-chart", "load-image-01"), "Reused media prefix with new suffix image.", _media_prefix_append),
-    _definition("media-prefix-changed", "openai_chat", "vision-cache", "media", ("image-chart", "load-image-02"), "Earlier media identity change invalidates reuse.", _media_prefix_changed),
-    _definition("media-preprocess-revisit", "openai_chat", "media-cache-tight", "media", ("load-image-00", "load-image-01", "load-image-02"), "A-A-B-C-A media preparation: cold, warm, then revisit under cache pressure with context reuse off.", _media_preprocess_revisit),
-    _definition("many-image-28", "openai_chat", "vision-cache", "media", ("many-image-28-a",), "Legal high Vision and many-item request.", _many_image),
-    _definition("many-image-28-thread-1", "openai_chat", "vision-thread-1", "media", ("many-image-28-a",), "Single preprocessing worker control.", _many_image),
-    _definition("text-during-media-prepare", "openai_chat", "vision-concurrent", "media", ("many-image-28-a", "short-32"), "Text arrival while a complete media body is preparing.", _text_during_media_prepare),
-    _definition("media-during-decode", "openai_chat", "vision-concurrent", "media", ("holder-4096", "many-image-28-a"), "Heavy media arrival during decode; observe resumed holder output, cancel, then probe cleanup.", _media_during_decode),
-    _definition("two-heavy-media-arrivals", "openai_chat", "vision-concurrent", "media", ("many-image-28-a", "many-image-28-b"), "Two byte-distinct legal high-media arrivals.", _two_heavy_media, symmetric_role_groups=(SymmetricRoleGroup("media", ("media-a", "media-b")),)),
-    _definition("vision-disabled", "openai_chat", "text-cold-8k", "rejection", ("image-chart",), "Media on a text-only Serve is rejected.", _vision_disabled),
-    _definition("vision-envelope-over", "openai_chat", "vision-boundary", "rejection", ("many-image-33",), "Aggregate Vision envelope rejection.", _vision_envelope_over),
+    _definition(
+        "unmarked-common-prefix-miss",
+        "openai_chat",
+        "cache-hot",
+        "private",
+        ("unmarked-common-a", "unmarked-common-b"),
+        "Raw token commonality without a checkpoint.",
+        _unmarked_common,
+    ),
+    _definition(
+        "resume-after-interference-device",
+        "openai_responses",
+        "cache-pressure-device",
+        "resource",
+        ("long-8k-16", "interferer-256"),
+        "Pressure graph with Device-resident source.",
+        _pressure_graph,
+        symmetric_role_groups=(SymmetricRoleGroup("interferers", ("interferer-b", "interferer-c")),),
+    ),
+    _definition(
+        "resume-after-interference-state-host",
+        "openai_responses",
+        "cache-pressure-state-host",
+        "resource",
+        ("long-8k-16", "interferer-256"),
+        "Pressure graph with Host State restore.",
+        _pressure_graph,
+        symmetric_role_groups=(SymmetricRoleGroup("interferers", ("interferer-b", "interferer-c")),),
+    ),
+    _definition(
+        "resume-after-interference-kv-host",
+        "openai_responses",
+        "cache-pressure-kv-host",
+        "resource",
+        ("long-8k-16", "interferer-256"),
+        "Pressure graph with Host KV restore.",
+        _pressure_graph,
+        symmetric_role_groups=(SymmetricRoleGroup("interferers", ("interferer-b", "interferer-c")),),
+    ),
+    _definition(
+        "resume-after-interference-both-host",
+        "openai_responses",
+        "cache-pressure-both-host",
+        "resource",
+        ("long-8k-16", "interferer-256"),
+        "Pressure graph with State and KV restore.",
+        _pressure_graph,
+        symmetric_role_groups=(SymmetricRoleGroup("interferers", ("interferer-b", "interferer-c")),),
+    ),
+    _definition(
+        "resume-after-interference-evicted",
+        "openai_responses",
+        "cache-pressure-evict",
+        "resource",
+        ("long-8k-16", "interferer-256"),
+        "Pressure graph with no legal retained replica.",
+        _pressure_graph,
+        symmetric_role_groups=(SymmetricRoleGroup("interferers", ("interferer-b", "interferer-c")),),
+    ),
+    _definition(
+        "continuation-cache-off",
+        "openai_responses",
+        "cache-off",
+        "control",
+        ("long-8k-16",),
+        "Full-history Responses control with Engine reuse disabled.",
+        _cache_off,
+    ),
+    _definition(
+        "shared-sequential",
+        "anthropic_messages",
+        "shared-prefix",
+        "shared",
+        ("system-a",),
+        "Marked Anthropic shared prefix sequential reuse.",
+        _shared_sequential,
+    ),
+    _definition(
+        "shared-openai-explicit",
+        "openai_chat",
+        "shared-prefix",
+        "shared",
+        ("system-a",),
+        "OpenAI explicit system boundary shared by different suffixes.",
+        _openai_explicit_shared,
+    ),
+    _definition(
+        "shared-openai-implicit",
+        "openai_chat",
+        "prefix-competition",
+        "shared",
+        ("unmarked-common-a",),
+        "OpenAI automatic-prefix reuse after an independent request.",
+        _openai_implicit_shared,
+    ),
+    _definition(
+        "unmarked-repeat-after-interference",
+        "anthropic_messages",
+        "prefix-competition",
+        "private",
+        ("unmarked-common-a",),
+        "Repeat an unmarked prompt before and after an independent request.",
+        _unmarked_repeat_after_interference,
+    ),
+    _definition(
+        "shared-fanout",
+        "anthropic_messages",
+        "shared-prefix",
+        "shared",
+        ("system-a",),
+        "Concurrent branches from a non-aligned shared prefix.",
+        _shared_fanout,
+        symmetric_role_groups=(SymmetricRoleGroup("branches", ("branch-b", "branch-c")),),
+    ),
+    _definition(
+        "shared-prefix-competition",
+        "anthropic_messages",
+        "prefix-competition",
+        "shared",
+        ("system-a", "system-b"),
+        "Revisit a marked prefix after a competing prefix and an independent request.",
+        _shared_prefix_competition,
+    ),
+    _definition(
+        "shared-tool-prefix-competition",
+        "anthropic_messages",
+        "prefix-competition",
+        "shared",
+        ("system-a", "client-tools-32"),
+        "A marked system prefix and tool prefix compete for Device storage.",
+        _shared_tool_prefix_competition,
+    ),
+    _definition(
+        "shared-tools-revisit",
+        "anthropic_messages",
+        "shared-prefix",
+        "shared",
+        ("client-tools-32",),
+        "Stable 32-tool prefix reuse followed by an early tool identity change.",
+        _shared_tools_revisit,
+    ),
+    _definition(
+        "short-during-prefill-128",
+        "openai_chat",
+        "scheduler-prefill-128",
+        "scheduling",
+        ("long-8k-32", "short-32"),
+        "Arrival during prefill with 128-token chunks.",
+        _short_during_prefill,
+    ),
+    _definition(
+        "short-during-prefill-1024",
+        "openai_chat",
+        "scheduler-overlap",
+        "scheduling",
+        ("long-8k-32", "short-32"),
+        "Arrival during prefill with 1024-token chunks.",
+        _short_during_prefill,
+    ),
+    _definition(
+        "short-during-prefill-4096",
+        "openai_chat",
+        "scheduler-prefill-4096",
+        "scheduling",
+        ("long-8k-32", "short-32"),
+        "Arrival during prefill with 4096-token chunks.",
+        _short_during_prefill,
+    ),
+    _definition(
+        "decode-with-short-arrival",
+        "openai_chat",
+        "scheduler-overlap",
+        "scheduling",
+        ("holder-4096", "short-32"),
+        "Short arrival during decode; observe resumed holder output, cancel, then probe cleanup.",
+        _decode_with_short_arrival,
+    ),
+    _definition(
+        "short-behind-long",
+        "openai_chat",
+        "scheduler-kv-pressure",
+        "scheduling",
+        ("holder-4096", "long-8k-32", "short-32"),
+        "Short arrival behind a long request while a holder is decoding.",
+        _short_behind_long,
+    ),
+    _definition(
+        "active-lanes-full-8",
+        "openai_chat",
+        "lane-limit-8",
+        "scheduling",
+        ("holder-4096", "short-32"),
+        "Eight 256-output-limit holders, a queued short arrival, and natural lane release and drain.",
+        _active_lanes_full,
+        symmetric_role_groups=(SymmetricRoleGroup("holders", tuple(f"holder-{index}" for index in range(8))),),
+    ),
+    _definition(
+        "session-publication-order",
+        "openai_responses",
+        "session-order",
+        "boundary",
+        ("holder-4096",),
+        "Older late completion cannot overwrite newer session binding.",
+        _session_publication_order,
+    ),
+    _definition(
+        "cancel-before-first",
+        "openai_chat",
+        "scheduler-overlap",
+        "boundary",
+        ("long-8k-32", "short-32"),
+        "Cancellation after admission but before first output.",
+        _cancel_before_first,
+    ),
+    _definition(
+        "cancel-after-first",
+        "openai_chat",
+        "scheduler-overlap",
+        "boundary",
+        ("holder-4096", "short-32"),
+        "Active cancellation after first output.",
+        _cancel_after_first,
+    ),
+    _definition(
+        "pending-overflow",
+        "openai_chat",
+        "lane-limit-8",
+        "rejection",
+        ("holder-4096", "short-32"),
+        "Bounded FIFO overflow returns 429 without TTFT.",
+        _pending_overflow,
+    ),
+    _definition(
+        "pending-timeout",
+        "openai_chat",
+        "pending-timeout",
+        "rejection",
+        ("holder-4096", "short-32"),
+        "Non-streaming pending request returns 503.",
+        _pending_timeout,
+    ),
+    _definition(
+        "context-exact",
+        "openai_chat",
+        "context-boundary",
+        "boundary",
+        ("context-exact",),
+        "p+(o-1) exactly equals max_context.",
+        _context_exact,
+    ),
+    _definition(
+        "context-over",
+        "openai_chat",
+        "context-boundary",
+        "rejection",
+        ("context-over",),
+        "Prompt beyond max_context returns 400 without TTFT.",
+        _context_over,
+    ),
+    _definition(
+        "media-cold-image",
+        "openai_chat",
+        "vision-cache",
+        "media",
+        ("image-chart",),
+        "Single-image external TTFT.",
+        _media_cold("image-chart"),
+    ),
+    _definition(
+        "media-cold-image-video",
+        "openai_chat",
+        "vision-cache",
+        "media",
+        ("image-video",),
+        "Interleaved image and video input.",
+        _media_cold("image-video"),
+    ),
+    _definition(
+        "media-prefix-continuation",
+        "openai_chat",
+        "vision-cache",
+        "media",
+        ("image-chart",),
+        "Exact multimodal prefix continuation.",
+        _media_prefix_continuation,
+    ),
+    _definition(
+        "media-prefix-append",
+        "openai_chat",
+        "vision-cache",
+        "media",
+        ("image-chart", "load-image-01"),
+        "Reused media prefix with new suffix image.",
+        _media_prefix_append,
+    ),
+    _definition(
+        "media-prefix-changed",
+        "openai_chat",
+        "vision-cache",
+        "media",
+        ("image-chart", "load-image-02"),
+        "Earlier media identity change invalidates reuse.",
+        _media_prefix_changed,
+    ),
+    _definition(
+        "media-preprocess-revisit",
+        "openai_chat",
+        "media-cache-tight",
+        "media",
+        ("load-image-00", "load-image-01", "load-image-02"),
+        "A-A-B-C-A media preparation: cold, warm, then revisit under cache pressure with context reuse off.",
+        _media_preprocess_revisit,
+    ),
+    _definition(
+        "many-image-28",
+        "openai_chat",
+        "vision-cache",
+        "media",
+        ("many-image-28-a",),
+        "Legal high Vision and many-item request.",
+        _many_image,
+    ),
+    _definition(
+        "many-image-28-thread-1",
+        "openai_chat",
+        "vision-thread-1",
+        "media",
+        ("many-image-28-a",),
+        "Single preprocessing worker control.",
+        _many_image,
+    ),
+    _definition(
+        "text-during-media-prepare",
+        "openai_chat",
+        "vision-concurrent",
+        "media",
+        ("many-image-28-a", "short-32"),
+        "Text arrival while a complete media body is preparing.",
+        _text_during_media_prepare,
+    ),
+    _definition(
+        "media-during-decode",
+        "openai_chat",
+        "vision-concurrent",
+        "media",
+        ("holder-4096", "many-image-28-a"),
+        "Heavy media arrival during decode; observe resumed holder output, cancel, then probe cleanup.",
+        _media_during_decode,
+    ),
+    _definition(
+        "two-heavy-media-arrivals",
+        "openai_chat",
+        "vision-concurrent",
+        "media",
+        ("many-image-28-a", "many-image-28-b"),
+        "Two byte-distinct legal high-media arrivals.",
+        _two_heavy_media,
+        symmetric_role_groups=(SymmetricRoleGroup("media", ("media-a", "media-b")),),
+    ),
+    _definition(
+        "vision-disabled",
+        "openai_chat",
+        "text-cold-8k",
+        "rejection",
+        ("image-chart",),
+        "Media on a text-only Serve is rejected.",
+        _vision_disabled,
+    ),
+    _definition(
+        "vision-envelope-over",
+        "openai_chat",
+        "vision-boundary",
+        "rejection",
+        ("many-image-33",),
+        "Aggregate Vision envelope rejection.",
+        _vision_envelope_over,
+    ),
 )
 
 
@@ -1924,6 +2455,7 @@ if len(CASES) != len(_DEFINITIONS):
 
 
 def get_case(name: str) -> CaseDefinition:
+    """Return the case definition for the given name, raising for unknown names."""
     try:
         return CASES[name]
     except KeyError as error:
@@ -1936,6 +2468,7 @@ def run_case(
     corpus: Corpus | None,
     profile_label: str,
 ) -> dict[str, Any]:
+    """Run one case definition and assemble its run artifact, or reject a mismatched profile."""
     if profile_label != definition.profile:
         return {
             "artifact_type": "ninfer_serve_ttft_run",

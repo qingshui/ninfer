@@ -39,6 +39,8 @@ SOURCE_CACHE_BYTES = 2 * 1024 * 1024 * 1024
 
 @dataclass(frozen=True, slots=True)
 class MethodInput:
+    """One logical input: a parameter's source plus the uses that consume it."""
+
     parameter: str
     source: LogicalSource
     uses: tuple[UseKey, ...]
@@ -46,12 +48,15 @@ class MethodInput:
 
 @dataclass(frozen=True, slots=True)
 class AuxiliaryValue:
+    """An auxiliary payload: raw bytes tagged with a format and a shape."""
+
     format: str
     shape: tuple[int, ...]
     data: bytes
 
     @classmethod
     def activation_scale(cls, value: bytes | float) -> AuxiliaryValue:
+        """Build an fp32 scalar auxiliary from raw bytes or a positive finite float."""
         raw = value if isinstance(value, bytes) else struct.pack("<f", value)
         if len(raw) != 4 or not valid_positive_fp32_word(struct.unpack("<I", raw)[0]):
             raise ValueError("activation scale must be positive finite FP32")
@@ -60,12 +65,16 @@ class AuxiliaryValue:
 
 @dataclass(frozen=True, slots=True)
 class PreparedMethod:
+    """A prepared method's produce callable plus its auxiliary values."""
+
     produce: Callable[[TensorOutput], None]
     auxiliaries: Mapping[AuxiliaryKey, AuxiliaryValue] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
 class PrepareRequest:
+    """The target spec, inputs, policies, and runtime options given to a method."""
+
     target: TensorSpec
     inputs: tuple[MethodInput, ...]
     policies: Mapping[UseKey, str]
@@ -80,6 +89,7 @@ class PrepareRequest:
     source_offsets: tuple[int, ...] = field(init=False)
 
     def __post_init__(self) -> None:
+        """Compute cumulative logical element offsets across the ordered inputs."""
         values = [0]
         for item in self.inputs:
             values.append(values[-1] + prod(item.source.shape))
@@ -87,14 +97,17 @@ class PrepareRequest:
 
     @property
     def source(self) -> LogicalSource:
+        """Return the single input's source, or raise if there are multiple inputs."""
         if len(self.inputs) != 1:
             raise ValueError("this method has multiple inputs; use request.inputs")
         return self.inputs[0].source
 
     def job(self, *, produce, auxiliaries=None) -> PreparedMethod:
+        """Wrap a produce callable and optional auxiliaries into a PreparedMethod."""
         return PreparedMethod(produce, {} if auxiliaries is None else dict(auxiliaries))
 
     def chunk_rows(self, row_bytes: int, *, alignment: int = 1) -> int:
+        """Return the chunk row count for a row byte size, rounded down to alignment."""
         rows = self.rows_per_chunk or max(1, CHUNK_BYTES // row_bytes)
         return max(alignment, rows // alignment * alignment)
 
@@ -137,6 +150,7 @@ class PrepareRequest:
         return pieces[0] if len(pieces) == 1 else torch.cat(pieces)
 
     def encoded_rows(self, begin: int, end: int) -> EncodedRows:
+        """Read encoded rows [begin, end) across inputs with one shared format/scale."""
         pieces = []
         k = self.target.shape[-1]
         if not 0 <= begin < end <= self.source_offsets[-1] // k:
@@ -181,6 +195,7 @@ _DIRECT_DTYPES = {"bf16": torch.bfloat16, "fp32": torch.float32, "int32": torch.
 
 
 def _preflight(request: PrepareRequest, *, values: bool = True) -> None:
+    """Validate counts, chunk options, and optional source readability of a request."""
     if request.parameters:
         raise ValueError(
             f"{request.target.id}: this method accepts no numerical parameters"
@@ -213,6 +228,7 @@ def cast_direct(request: PrepareRequest) -> PreparedMethod:
     elements = prod(request.target.shape)
 
     def produce(output):
+        """Range-check int32 targets, cast each chunk to the dtype, and write values."""
         for begin, _, values in request.read_chunks(request.values, elements, chunk):
             if dtype == torch.int32 and (
                 bool((values < -(1 << 31)).any())
@@ -239,6 +255,7 @@ def grouped_absmax(request: PrepareRequest) -> PreparedMethod:
     chunk = request.chunk_rows(k * 4)
 
     def produce(output):
+        """Quantize each value chunk with the grouped absmax algorithm and write codes."""
         for begin, end, values in request.read_chunks(request.values, n * k, chunk * k):
             values = values.reshape((end - begin) // k, k)
             if not values.dtype.is_floating_point:
@@ -262,6 +279,7 @@ def fp8_row_maxabs(request: PrepareRequest) -> PreparedMethod:
     chunk = request.chunk_rows(k * 4)
 
     def produce(output):
+        """Round each chunk to BF16, quantize to row-scaled FP8, and write codes."""
         for begin, end, values in request.read_chunks(request.values, n * k, chunk * k):
             values = (
                 values.reshape((end - begin) // k, k)
@@ -285,6 +303,7 @@ def fp8_row_fp32_maxabs(request: PrepareRequest) -> PreparedMethod:
     chunk = request.chunk_rows(k * 4)
 
     def produce(output):
+        """Quantize each FP32 chunk to FP8 codes with FP32 row scales and write them."""
         for begin, end, values in request.read_chunks(request.values, n * k, chunk * k):
             values = (
                 values.reshape((end - begin) // k, k)
@@ -322,6 +341,7 @@ def fp8_block_maxabs(request: PrepareRequest) -> PreparedMethod:
     chunk = request.chunk_rows(k * 4, alignment=128)
 
     def produce(output):
+        """Quantize each matrix's chunks into 128-by-128 FP8 blocks and write codes."""
         for matrix in range(matrices):
             offset = matrix * n * k
             read = lambda begin, end: request.values(offset + begin, offset + end)
@@ -427,6 +447,7 @@ def import_encoded(request: PrepareRequest) -> PreparedMethod:
     )
 
     def produce(output):
+        """Stream each matrix's encoded rows and write codes, scales, and weight scale."""
         for matrix in range(matrices):
             read = lambda begin, end: request.encoded_rows(
                 matrix * n + begin, matrix * n + end
@@ -457,6 +478,7 @@ def stored_scale_mse(request: PrepareRequest) -> PreparedMethod:
     )
 
     def produce(output):
+        """Find the object amax over all chunks, then stored-scale-encode every chunk."""
         maximum = torch.zeros((), dtype=torch.float32, device=request.device)
         cached = [] if n * k * 4 <= request.source_cache_bytes else None
         for begin, end, values in request.read_chunks(request.values, n * k, chunk * k):

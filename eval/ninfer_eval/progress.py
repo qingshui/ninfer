@@ -1,3 +1,5 @@
+"""Progress rendering for run events, with Rich bars on a TTY and plain heartbeats otherwise."""
+
 from __future__ import annotations
 
 import sys
@@ -10,6 +12,8 @@ from .events import RunEvent
 
 @dataclass
 class _PlainState:
+    """Mutable per-key timing state for plain progress output: last print and start times."""
+
     last_print: float = 0.0
     started: float = 0.0
 
@@ -24,6 +28,7 @@ class ProgressRenderer:
         refresh_seconds: float = 1.0,
         stream=None,
     ):
+        """Store display settings and start a Rich progress bar when enabled on a TTY stream."""
         self.enabled = enabled
         self.heartbeat_seconds = heartbeat_seconds
         self.stream = stream or sys.stderr
@@ -58,6 +63,7 @@ class ProgressRenderer:
             self._rich.start()
 
     def handle(self, event: RunEvent) -> None:
+        """Render one event through the Rich display or the plain heartbeat stream."""
         if not self.enabled:
             return
         with self._lock:
@@ -67,6 +73,7 @@ class ProgressRenderer:
                 self._handle_plain(event)
 
     def _handle_rich(self, event: RunEvent) -> None:
+        """Create or advance Rich progress tasks for the event, one per job plus overall."""
         if event.job_id is None:
             job = "__overall__"
             description = "overall"
@@ -100,6 +107,7 @@ class ProgressRenderer:
                 self._rich.advance(overall, 1)
 
     def _handle_plain(self, event: RunEvent) -> None:
+        """Print the event line, throttled to heartbeats except for lifecycle events."""
         now = time.monotonic()
         key = event.job_id or "__overall__"
         state = self._plain.setdefault(key, _PlainState())
@@ -129,12 +137,14 @@ class ProgressRenderer:
             if event.total is not None and event.total >= event.completed:
                 timing += f" eta={(event.total - event.completed) / rate:.1f}s"
         print(
-            f"[{event.timestamp}] [{event.job_id or 'overall'}] {event.phase or event.kind}{count}{timing} {event.message}".rstrip(),
+            f"[{event.timestamp}] [{event.job_id or 'overall'}] "
+            f"{event.phase or event.kind}{count}{timing} {event.message}".rstrip(),
             file=self.stream,
             flush=True,
         )
 
     def close(self) -> None:
+        """Stop and discard the Rich progress display when one is active."""
         with self._lock:
             if self._rich is not None:
                 self._rich.stop()

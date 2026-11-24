@@ -10,6 +10,7 @@ Payload: TypeAlias = bytes | bytearray | memoryview | torch.Tensor
 
 
 def _payload_length(payload: Payload) -> int:
+    """Return payload byte length, validating tensor payloads are contiguous uint8 vectors."""
     if isinstance(payload, torch.Tensor):
         if (
             payload.dtype != torch.uint8
@@ -24,6 +25,7 @@ def _payload_length(payload: Payload) -> int:
 
 
 def _payload_tensor(payload: Payload, device: torch.device) -> torch.Tensor:
+    """Move a payload onto device as a uint8 tensor, wrapping byte buffers via frombuffer."""
     if isinstance(payload, torch.Tensor):
         _payload_length(payload)
         return payload if payload.device == device else payload.to(device)
@@ -37,6 +39,7 @@ def _payload_tensor(payload: Payload, device: torch.device) -> torch.Tensor:
 def _exact_uint8_matrix(
     tensor: torch.Tensor, shape: tuple[int, ...], label: str
 ) -> torch.Tensor:
+    """Return tensor as a contiguous CPU uint8 matrix with the exact shape."""
     if tensor.dtype != torch.uint8 or tuple(tensor.shape) != shape:
         raise TypeError(f"{label} must be uint8 with shape {shape}")
     return tensor.detach().contiguous().cpu()

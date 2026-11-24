@@ -79,6 +79,7 @@ import requests  # noqa: E402  (kept after docstring for fast --help)
 
 
 def build_prompt(tokenizer, target_tokens: int, nonce: str) -> str:
+    """Build a nonce-stamped prose prompt that encodes to roughly target_tokens."""
     head = f"Document {nonce}: "
     body_units = max(1, (target_tokens - 64) // 100 + 1)
     text = head + (_FILLER * (body_units // 1 + 1))
@@ -94,6 +95,7 @@ def build_prompt(tokenizer, target_tokens: int, nonce: str) -> str:
 
 
 def one_request(url: str, prompt: str, timeout: float) -> dict:
+    """Send one streaming request and return its TTFT, token usage and outcome."""
     payload = {
         "model": MODEL_ID,
         "max_tokens": OUT_TOKENS,
@@ -140,6 +142,7 @@ def one_request(url: str, prompt: str, timeout: float) -> dict:
 
 
 def run_point(url: str, tokenizer, ctx: int, conc: int, n: int, timeout: float) -> dict:
+    """Fire n requests at the given concurrency and return the point's metrics."""
     run_id = uuid.uuid4().hex[:8]
     prompts = [build_prompt(tokenizer, ctx, f"{run_id}-g-{i:04d}") for i in range(n)]
     t0 = time.perf_counter()
@@ -173,6 +176,7 @@ def run_point(url: str, tokenizer, ctx: int, conc: int, n: int, timeout: float) 
 
 
 def gpu_free_mib(gpu: int) -> int:
+    """Return the used memory reported by nvidia-smi for one GPU, in MiB."""
     out = subprocess.run(
         ["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits",
          "-i", str(gpu)],
@@ -181,12 +185,14 @@ def gpu_free_mib(gpu: int) -> int:
 
 
 def port_free(port: int) -> bool:
+    """Return whether nothing is listening on the loopback port."""
     with socket.socket() as s:
         s.settimeout(1)
         return s.connect_ex(("127.0.0.1", port)) != 0
 
 
 def free_port(base: int) -> int | None:
+    """Return the first free port from base through base+8, or None."""
     for offset in range(9):
         port = base + offset
         if port_free(port):
@@ -207,6 +213,7 @@ def pick_gpu(requested: int | None) -> int:
 
 
 def start_server(gpu: int, port: int, log_path: Path):
+    """Generate the serving config, launch ninfer-serve and wait for health."""
     if not SERVE.exists():
         sys.exit(f"environment error: {SERVE} not built")
     used = gpu_free_mib(gpu)
@@ -269,6 +276,7 @@ model_id = "{MODEL_ID}"
 
 
 def stop_server(proc) -> None:
+    """Terminate the ninfer-serve process, escalating to kill on failure."""
     if proc is None:
         return
     try:
@@ -279,6 +287,7 @@ def stop_server(proc) -> None:
 
 
 def main() -> int:
+    """Run the selected matrix against a started server and report gate metrics."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--matrix", choices=("smoke", "quick", "full"),
                         default=os.environ.get("GATE_MATRIX", "full"))

@@ -12,10 +12,12 @@ DFLASH2_STATE_IMAGE_BYTES = 195_897_344
 
 
 def _bytes(capacity_bytes: int) -> str:
+    """Format a byte count as a bare byte-count argument value."""
     return f"{capacity_bytes}B"
 
 
 def _args(*values: str | int) -> tuple[str, ...]:
+    """Convert the values into a tuple of command-line argument strings."""
     return tuple(str(value) for value in values)
 
 

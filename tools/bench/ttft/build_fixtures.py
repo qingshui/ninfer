@@ -33,10 +33,12 @@ ROTATION_55K_SECOND_LABELS = ("OMEGA", "SIGMA", "VIOLET", "THETA", "APPLE", "CHA
 
 
 def _json_text(value: Any) -> str:
+    """Serialize a value as indented UTF-8 JSON text ending with a newline."""
     return json.dumps(value, ensure_ascii=False, indent=2) + "\n"
 
 
 def _sha256(path: Path) -> str:
+    """Compute the hex SHA-256 digest of a file, streaming it in 1 MiB blocks."""
     digest = hashlib.sha256()
     with path.open("rb") as stream:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
@@ -45,10 +47,12 @@ def _sha256(path: Path) -> str:
 
 
 def _relative(path: Path) -> str:
+    """Return a file's path relative to the repository root in POSIX form."""
     return path.resolve().relative_to(REPO_ROOT.resolve()).as_posix()
 
 
 def _load_tokenizer(path: Path) -> Any:
+    """Load a fast Hugging Face tokenizer from a local directory without network access."""
     from transformers import AutoTokenizer
 
     return AutoTokenizer.from_pretrained(
@@ -57,6 +61,7 @@ def _load_tokenizer(path: Path) -> Any:
 
 
 def _template_ids(tokenizer: Any, messages: Sequence[dict[str, Any]], *, tools: Any = None) -> list[int]:
+    """Render messages and optional tools through the chat template as prompt token ids."""
     kwargs: dict[str, Any] = {
         "tokenize": True,
         "add_generation_prompt": True,
@@ -73,10 +78,12 @@ def _template_ids(tokenizer: Any, messages: Sequence[dict[str, Any]], *, tools: 
 
 
 def _prompt_tokens(tokenizer: Any, messages: Sequence[dict[str, Any]], *, tools: Any = None) -> int:
+    """Return the chat-templated prompt length in tokens."""
     return len(_template_ids(tokenizer, messages, tools=tools))
 
 
 def _source_ids(tokenizer: Any) -> list[int]:
+    """Encode the long_niah_64k haystack document as token ids without special tokens."""
     messages = json.loads(
         (REPO_ROOT / "examples/cli/messages/long_niah_64k.json").read_text(encoding="utf-8")
     )
@@ -94,6 +101,7 @@ def _fit_user_prompt(
     """Decode a meaningful token prefix whose complete chat prompt is exactly target tokens."""
 
     def candidate(take: int) -> tuple[list[dict[str, str]], int]:
+        """Return the messages for a take-token prefix and their full prompt length."""
         text = tokenizer.decode(
             list(source_ids[:take]),
             skip_special_tokens=False,
@@ -135,6 +143,7 @@ def _common_rendered_tokens(
     left: Sequence[dict[str, Any]],
     right: Sequence[dict[str, Any]],
 ) -> int:
+    """Count the leading chat-rendered tokens shared by two message lists."""
     common = 0
     for left_id, right_id in zip(_template_ids(tokenizer, left), _template_ids(tokenizer, right)):
         if left_id != right_id:
@@ -146,6 +155,7 @@ def _common_rendered_tokens(
 def _replace_rotation_label(
     messages: Sequence[dict[str, Any]], replacement: str
 ) -> list[dict[str, Any]]:
+    """Return a copy of the messages with the leading system label swapped for an equal-length one."""
     result = copy.deepcopy(list(messages))
     if not result or result[0].get("role") != "system":
         raise RuntimeError("55K rotation fixture has no leading system marker")
@@ -162,6 +172,7 @@ def _replace_rotation_label(
 def _common_prefix_messages(
     tokenizer: Any, source_ids: Sequence[int]
 ) -> tuple[list[dict[str, str]], list[dict[str, str]], int]:
+    """Build two user prompts that share a long prefix and return them with their common token count."""
     common_text = tokenizer.decode(
         list(source_ids[:4300]),
         skip_special_tokens=False,
@@ -184,6 +195,7 @@ def _common_prefix_messages(
 def _render_template(
     tokenizer: Any, messages: Sequence[dict[str, Any]], *, tools: Any = None
 ) -> str:
+    """Render messages and optional tools through the chat template as literal text."""
     kwargs: dict[str, Any] = {
         "tokenize": False,
         "add_generation_prompt": True,
@@ -198,6 +210,7 @@ def _render_template(
 
 
 def _stable_frontier(tokenizer: Any, rendered: str, character_boundary: int) -> int:
+    """Count the non-empty tokens that end before the given character boundary of a rendered prompt."""
     encoded = tokenizer(
         rendered,
         add_special_tokens=False,
@@ -210,6 +223,7 @@ def _stable_frontier(tokenizer: Any, rendered: str, character_boundary: int) -> 
 def _shared_system(
     tokenizer: Any, source_ids: Sequence[int], *, variant: str
 ) -> tuple[str, int, int]:
+    """Build a shared system prompt and return its text, non-aligned frontier, and total tokens."""
     user = {"role": "user", "content": "Use the stable reference and answer with one word."}
     for take in range(4140, 4400):
         body = tokenizer.decode(
@@ -232,6 +246,7 @@ def _shared_system(
 
 
 def _client_tools() -> list[dict[str, Any]]:
+    """Return 32 fixed benchmark tool schemas with an ephemeral cache marker on the last one."""
     tools: list[dict[str, Any]] = []
     for index in range(32):
         tools.append(
@@ -271,6 +286,7 @@ def _client_tools() -> list[dict[str, Any]]:
 
 
 def _normalized_tools(tools: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Convert internal tool schemas into OpenAI-style function tool definitions."""
     return [
         {
             "type": "function",
@@ -286,6 +302,7 @@ def _normalized_tools(tools: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _tool_frontier(tokenizer: Any, tools: Sequence[dict[str, Any]]) -> tuple[int, int]:
+    """Return the marked tool-boundary frontier token count and the full prompt length."""
     normalized = _normalized_tools(tools)
     messages = [{"role": "user", "content": "Inspect the repository and answer briefly."}]
     rendered = _render_template(tokenizer, messages, tools=normalized)
@@ -310,6 +327,7 @@ def _tool_frontier(tokenizer: Any, tools: Sequence[dict[str, Any]]) -> tuple[int
 
 
 def _draw_image(index: int) -> Any:
+    """Draw the indexed 1024x1024 synthetic image with color bands, rings, and a caption."""
     from PIL import Image, ImageDraw
 
     image = Image.new(
@@ -344,6 +362,7 @@ def _draw_image(index: int) -> Any:
 
 
 def _write_images() -> list[Path]:
+    """Write all generated load images under the media root and return their paths."""
     MEDIA_ROOT.mkdir(parents=True, exist_ok=True)
     paths = []
     for index in range(GENERATED_IMAGE_COUNT):
@@ -354,6 +373,7 @@ def _write_images() -> list[Path]:
 
 
 def _many_image_messages(paths: Sequence[Path], prompt: str) -> list[dict[str, Any]]:
+    """Build one user message with a relative image reference per path followed by a text prompt."""
     content: list[dict[str, str]] = [
         {"type": "image", "image": f"../media/{path.name}"} for path in paths
     ]
@@ -362,6 +382,7 @@ def _many_image_messages(paths: Sequence[Path], prompt: str) -> list[dict[str, A
 
 
 def _placeholder_messages(paths: Sequence[Path], prompt: str) -> list[dict[str, Any]]:
+    """Build one user message with a placeholder image entry per path followed by a text prompt."""
     content: list[dict[str, str]] = [
         {"type": "image", "image": "placeholder"} for _ in paths
     ]
@@ -370,16 +391,19 @@ def _placeholder_messages(paths: Sequence[Path], prompt: str) -> list[dict[str, 
 
 
 def _expanded_media_tokens(tokenizer: Any, paths: Sequence[Path], prompt: str) -> int:
+    """Return the prompt size with each image placeholder expanded to its vision token count."""
     rendered = _prompt_tokens(tokenizer, _placeholder_messages(paths, prompt))
     return rendered + len(paths) * (IMAGE_VISION_TOKENS - 1)
 
 
 def _write_json(path: Path, value: Any) -> None:
+    """Write value as JSON text to path, creating parent directories as needed."""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(_json_text(value), encoding="utf-8")
 
 
 def _file_record(path: Path, **facts: Any) -> dict[str, Any]:
+    """Return a manifest record with the file's repo-relative path, SHA-256, and extra facts."""
     return {"path": _relative(path), "sha256": _sha256(path), **facts}
 
 
@@ -390,6 +414,7 @@ def build_state_working_set(tokenizer: Any, source_ids: Sequence[int]) -> dict[s
     suffix = "\nInclude one more detail."
     for label in "abcdef":
         def candidate(take: int) -> list[dict[str, str]]:
+            """Return the labeled system-and-user candidate messages for a take-token source prefix."""
             body = tokenizer.decode(
                 list(source_ids[:take]), skip_special_tokens=False,
                 clean_up_tokenization_spaces=False,
@@ -437,6 +462,7 @@ def build_state_working_set(tokenizer: Any, source_ids: Sequence[int]) -> dict[s
 
 
 def _existing_case(case_name: str, prompt_tokens: int, max_output_tokens: int) -> dict[str, Any]:
+    """Return a manifest record for an existing examples/cli message case file."""
     path = REPO_ROOT / "examples" / "cli" / "messages" / f"{case_name}.json"
     return _file_record(
         path,
@@ -446,6 +472,7 @@ def _existing_case(case_name: str, prompt_tokens: int, max_output_tokens: int) -
 
 
 def build(tokenizer_path: Path) -> None:
+    """Generate every TTFT text, image, and tool fixture and write the corpus manifest."""
     tokenizer = _load_tokenizer(tokenizer_path)
     source_ids = _source_ids(tokenizer)
     TEXT_ROOT.mkdir(parents=True, exist_ok=True)
@@ -735,6 +762,7 @@ def build(tokenizer_path: Path) -> None:
 
 
 def check() -> None:
+    """Verify the committed fixtures exist, match their recorded hashes, and meet qualification bounds."""
     manifest_path = FIXTURE_ROOT / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if manifest.get("artifact_type") != "ninfer_serve_ttft_corpus":
@@ -813,6 +841,7 @@ def check() -> None:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    """Parse arguments and either check or rebuild the TTFT fixture corpus."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tokenizer", type=Path, default=DEFAULT_TOKENIZER)
     parser.add_argument("--check", action="store_true")

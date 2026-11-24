@@ -18,6 +18,7 @@ def load_qwen_resources(
     vision_config: Mapping[str, int] | None,
     overrides: Mapping[str, str | Path] | None,
 ):
+    """Load text and optional vision resources, checking processor geometry against the config."""
     roles = {"text": TEXT_RESOURCES}
     if vision_config is not None:
         roles["vision"] = VISION_RESOURCES

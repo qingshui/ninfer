@@ -18,6 +18,7 @@ def anthropic_request(
     tools: Sequence[dict[str, Any]] | None = None,
     stream: bool = True,
 ) -> ProtocolRequest:
+    """Build an Anthropic Messages ProtocolRequest with temperature 0 and optional system/tools."""
     if max_output_tokens <= 0:
         raise ValueError("Anthropic max_output_tokens must be positive")
     payload: dict[str, Any] = {
@@ -48,7 +49,10 @@ def anthropic_request(
 
 
 class AnthropicStreamAdapter:
+    """Translate Anthropic message stream events into ProtocolEvent records."""
+
     def consume(self, event: SseEvent) -> list[ProtocolEvent]:
+        """Convert one SSE event into protocol events, raising on malformed payloads."""
         try:
             payload = json.loads(event.data)
         except json.JSONDecodeError as error:

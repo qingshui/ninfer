@@ -27,6 +27,7 @@ class RowPlanes:
 
 
 def _pack_low_nibbles(codes: torch.Tensor) -> torch.Tensor:
+    """Pack pairs of low 4-bit code nibbles into one byte per two codes."""
     groups, group_size = codes.shape
     out = torch.empty((groups, group_size // 2), dtype=torch.uint8, device=codes.device)
     chunk = max(1, _PACK_TEMP_BYTES // max(1, group_size * 2))
@@ -38,6 +39,7 @@ def _pack_low_nibbles(codes: torch.Tensor) -> torch.Tensor:
 
 
 def _pack_high_bits(codes: torch.Tensor, bits: int) -> torch.Tensor:
+    """Pack the code bits above the low nibble into a dense high-bit plane."""
     groups, group_size = codes.shape
     high_bits = bits - 4
     bytes_per_group = group_size * high_bits // 8
@@ -64,6 +66,7 @@ def _pack_high_bits(codes: torch.Tensor, bits: int) -> torch.Tensor:
 def _pack_codes(
     codes: torch.Tensor, spec: QuantFormat
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Split grouped codes into packed low-nibble base and high-bit planes."""
     if spec.bits == 8:
         return (
             codes.contiguous().view(torch.uint8),
@@ -117,6 +120,7 @@ def encode_row_split(
 
 
 def _byte_view(payload: bytes | bytearray | memoryview) -> memoryview:
+    """Return a contiguous one-dimensional unsigned byte view of payload."""
     view = memoryview(payload)
     if not view.c_contiguous:
         raise TypeError("byte payloads must be contiguous")
@@ -153,6 +157,7 @@ def split_row_planes(
 
 
 def _plane_length(plane: Plane) -> int:
+    """Return plane byte length, validating tensor planes are contiguous uint8 vectors."""
     if isinstance(plane, torch.Tensor):
         if plane.dtype != torch.uint8 or plane.dim() != 1 or not plane.is_contiguous():
             raise TypeError(
@@ -163,6 +168,7 @@ def _plane_length(plane: Plane) -> int:
 
 
 def _validate_planes(planes: RowPlanes, geometry: RowSplitGeometry) -> None:
+    """Check plane row count and byte sizes against the row-split geometry."""
     if planes.rows != geometry.n:
         raise ValueError(
             f"row planes contain {planes.rows} rows, expected {geometry.n}"
@@ -228,6 +234,7 @@ def assemble_row_planes(
 
 
 def _plane_tensor(plane: Plane, device: torch.device) -> torch.Tensor:
+    """Move a plane onto device, wrapping byte buffers as uint8 tensors."""
     if isinstance(plane, torch.Tensor):
         _plane_length(plane)
         return plane if plane.device == device else plane.to(device)
@@ -243,6 +250,7 @@ def _planes_on_device(
     geometry: RowSplitGeometry,
     device: torch.device,
 ) -> RowPlanes:
+    """Return validated planes on device, splitting a full payload when needed."""
     if isinstance(source, RowPlanes):
         _validate_planes(source, geometry)
         return RowPlanes(
@@ -267,6 +275,7 @@ def _high_indices(
     bits: int,
     group_size: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return cached byte-index and shift tensors for gathering high bits on a device."""
     device = (
         torch.device(device_type)
         if device_index is None
@@ -286,6 +295,7 @@ def _unpack_codes(
     spec: QuantFormat,
     geometry: RowSplitGeometry,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Unpack plane tensors into float16 scales and signed int8 code groups."""
     assert isinstance(planes.base, torch.Tensor)
     assert isinstance(planes.high, torch.Tensor)
     assert isinstance(planes.scale, torch.Tensor)
@@ -347,10 +357,12 @@ def decode_row_split_codes(
 
 
 def _scales(scale: torch.Tensor) -> torch.Tensor:
+    """View scale bytes as float16 and widen them to a [groups, 1] float tensor."""
     return scale.view(torch.float16).reshape(-1, 1).float()
 
 
 def _low_g64(base: torch.Tensor, groups: int) -> torch.Tensor:
+    """Unpack 32 low-nibble bytes per group into 64 low 4-bit codes."""
     packed = base.reshape(groups, 32).to(torch.int16)
     return torch.stack((packed & 0x0F, (packed >> 4) & 0x0F), dim=-1).reshape(
         groups, 64
@@ -358,6 +370,7 @@ def _low_g64(base: torch.Tensor, groups: int) -> torch.Tensor:
 
 
 def _dequant4(base, _high, scale, _byte_indices, _shifts):
+    """Dequantize 4-bit planes to bfloat16 by scaling sign-extended low codes."""
     scales = _scales(scale)
     unsigned = _low_g64(base, scales.numel())
     codes = torch.where((unsigned & 8) != 0, unsigned - 16, unsigned).float()
@@ -365,6 +378,7 @@ def _dequant4(base, _high, scale, _byte_indices, _shifts):
 
 
 def _dequant5(base, high, scale, byte_indices, shifts):
+    """Dequantize 5-bit planes to bfloat16 using one gathered high bit per code."""
     scales = _scales(scale)
     groups = scales.numel()
     upper = (
@@ -376,6 +390,7 @@ def _dequant5(base, high, scale, byte_indices, shifts):
 
 
 def _dequant6(base, high, scale, byte_indices, shifts):
+    """Dequantize 6-bit planes to bfloat16 using two gathered high bits per code."""
     scales = _scales(scale)
     groups = scales.numel()
     upper = (
@@ -387,6 +402,7 @@ def _dequant6(base, high, scale, byte_indices, shifts):
 
 
 def _dequant8(base, _high, scale, _byte_indices, _shifts):
+    """Dequantize 8-bit planes to bfloat16 by scaling the raw int8 codes."""
     scales = _scales(scale)
     codes = base.view(torch.int8).reshape(scales.numel(), -1).float()
     return (codes * scales).to(torch.bfloat16)
@@ -402,6 +418,7 @@ _EAGER_DEQUANTIZERS = {
 
 @lru_cache(maxsize=4)
 def _compiled_dequantizer(bits: int):
+    """Return the cached torch.compile wrapper for the given bit width."""
     return torch.compile(_EAGER_DEQUANTIZERS[bits], dynamic=True, fullgraph=True)
 
 

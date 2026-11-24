@@ -72,12 +72,15 @@ def request_timing_analysis(request: dict[str, Any]) -> dict[str, Any]:
     }
 
     def seconds(value: Any) -> float | None:
+        """Coerce a raw value to a nonnegative finite float, or None when impossible."""
         return float(value) if type(value) in (int, float) and math.isfinite(value) and value >= 0 else None
 
     def read_seconds(source: Any, key: str) -> float | None:
+        """Read one seconds field from a dict, coercing it to a nonnegative finite float."""
         return seconds(source.get(key)) if isinstance(source, dict) else None
 
     def milliseconds(value: float | None) -> float | None:
+        """Convert seconds to milliseconds, passing None through unchanged."""
         return value * 1000 if value is not None else None
 
     admission = diagnostics.get("admission")
@@ -168,6 +171,7 @@ def request_timing_analysis(request: dict[str, Any]) -> dict[str, Any]:
 
 
 def _global_runtime_observations(events: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """Return interval observations enriched by the lone server_start event's startup facts."""
     starts = [event for event in events if event.get("event") == "server_start"]
     startup = starts[0] if len(starts) == 1 else {}
     return {
@@ -190,6 +194,7 @@ def _runtime_interval_observations(events: Sequence[dict[str, Any]]) -> dict[str
         return {"status": "unavailable", "reason": "unsupported_runtime_schema"}
 
     def values_at(path: Sequence[str | int], sources=intervals) -> list[int | float] | None:
+        """Collect the value at a path from every source, or None if any is missing or invalid."""
         values = []
         for event in sources:
             value: Any = event
@@ -206,6 +211,7 @@ def _runtime_interval_observations(events: Sequence[dict[str, Any]]) -> dict[str
         return values
 
     def sampled(path: Sequence[str | int], sources=intervals) -> dict[str, Any]:
+        """Sample the numeric values at a path, reporting their maximum and last value."""
         values = values_at(path, sources)
         return {
             "sampled_max": max(values) if values else None,
@@ -213,11 +219,13 @@ def _runtime_interval_observations(events: Sequence[dict[str, Any]]) -> dict[str
         }
 
     def total(*path: str) -> int | float | None:
+        """Return the sum of the numeric values at a path, or None when unavailable."""
         values = values_at(path)
         return sum(values) if values is not None else None
 
     fields = ("bytes", "seconds", "images", "page_groups", "copy_operations")
     def transfer_total(*path):
+        """Total transfer bytes and seconds per direction for one context-cache resource."""
         return {direction: {field: total(*path, direction, field) for field in fields}
                 for direction in TRANSFER_DIRECTIONS}
 
@@ -295,6 +303,7 @@ def _runtime_interval_observations(events: Sequence[dict[str, Any]]) -> dict[str
 
 
 def unavailable_diagnostics(reason: str, **identity: Any) -> dict[str, Any]:
+    """Build a per-request diagnostics stub that marks every mechanism unavailable."""
     return {
         "status": "unavailable", "reason": reason,
         "mechanisms": {name: "unavailable" for name in MECHANISM_COUNTERS},

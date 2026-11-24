@@ -13,6 +13,7 @@ SourceFactory = Callable[[SafetensorsSource, str | None], LogicalSource]
 
 @dataclass(frozen=True, slots=True)
 class Parameter:
+    """A frozen logical parameter with its checkpoint source, optional factory, and runtime inputs."""
     name: str
     shape: tuple[int, ...]
     source: LogicalSource
@@ -23,11 +24,13 @@ class Parameter:
 
     @property
     def projection(self) -> bool:
+        """Whether the parameter has runtime inputs and is therefore a projection."""
         return bool(self.inputs)
 
 
 @dataclass(slots=True)
 class Model:
+    """A model's components, logical parameters, resources, and packing groups under construction."""
     components: dict
     parameters: dict[str, Parameter] = field(default_factory=dict)
     resources: dict[str, bytes] = field(default_factory=dict)
@@ -41,9 +44,11 @@ class Model:
 
     @property
     def config(self) -> dict:
+        """The text component's configuration dictionary."""
         return self.components["text"]["config"]
 
     def add(self, parameter: Parameter) -> None:
+        """Register a logical parameter, rejecting duplicates and mismatched source shapes."""
         if parameter.name in self.parameters:
             raise ValueError(f"duplicate logical parameter {parameter.name}")
         if parameter.source.shape != parameter.shape:
@@ -55,6 +60,7 @@ class Model:
     def source(
         self, parameter: str, store: SafetensorsSource, format: str | None = None
     ) -> LogicalSource:
+        """Instantiate the parameter's logical source from a safetensors store and optional format."""
         item = self.parameters[parameter]
         if item.source_factory is None:
             raise ValueError(f"{parameter}: provide an explicit logical source")

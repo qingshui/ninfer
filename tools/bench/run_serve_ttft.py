@@ -32,6 +32,7 @@ class StderrProgress:
     """Serialize concurrent request milestones without putting stderr I/O on request workers."""
 
     def __init__(self, heartbeat_seconds: float = 5.0) -> None:
+        """Start the background progress thread and the heartbeat clock."""
         self._started_ns = time.perf_counter_ns()
         self._heartbeat_seconds = heartbeat_seconds
         self._events: queue.Queue[object] = queue.Queue()
@@ -45,11 +46,13 @@ class StderrProgress:
 
     @staticmethod
     def _value(value: object) -> str:
+        """Render a scalar field as fixed-point text or compact JSON."""
         if isinstance(value, float):
             return f"{value:.3f}"
         return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
     def _line(self, stage: str, occurred_ns: int, fields: dict[str, Any]) -> None:
+        """Print one staged progress line to stderr, dropping it when stderr fails."""
         elapsed_seconds = max(0.0, (occurred_ns - self._started_ns) / 1e9)
         details = " ".join(
             f"{name}={self._value(value)}"
@@ -68,6 +71,7 @@ class StderrProgress:
             pass
 
     def _consume(self) -> None:
+        """Print queued events and periodic heartbeats until the stop sentinel arrives."""
         active: dict[str, tuple[str, int]] = {}
         last_stage = "startup"
         last_event_ns = self._started_ns
@@ -113,13 +117,16 @@ class StderrProgress:
                     active.pop(key, None)
 
     def emit(self, stage: str, occurred_ns: int, fields: dict[str, Any]) -> None:
+        """Enqueue one milestone event unless the printer is closed."""
         if not self._closed:
             self._events.put((stage, occurred_ns, fields))
 
     def event(self, stage: str, **fields: Any) -> None:
+        """Emit a milestone stamped with the current monotonic time."""
         self.emit(stage, time.perf_counter_ns(), fields)
 
     def close(self) -> None:
+        """Stop the printer thread and wait for it to finish."""
         if self._closed:
             return
         self._closed = True
@@ -128,6 +135,7 @@ class StderrProgress:
 
 
 def _externalize_media(value: Any, directory: Path) -> Any:
+    """Replace data: URL strings with on-disk files and references, recursing through containers."""
     if isinstance(value, str) and value.startswith("data:"):
         encoded = value.encode("utf-8")
         digest = hashlib.sha256(encoded).hexdigest()
@@ -145,6 +153,7 @@ def _externalize_media(value: Any, directory: Path) -> Any:
 
 
 def _write(path: Path, value: dict[str, object]) -> None:
+    """Write one run artifact as JSON, externalizing media in request payloads."""
     path.parent.mkdir(parents=True, exist_ok=True)
     stored = {
         **value,
@@ -159,6 +168,7 @@ def _write(path: Path, value: dict[str, object]) -> None:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    """Run one TTFT case and write its run artifact, returning 0 only on a constructed run."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-url", required=True)
     parser.add_argument("--case", required=True, choices=sorted(CASES))

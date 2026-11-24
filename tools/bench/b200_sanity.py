@@ -83,6 +83,7 @@ def load_sglang_texts(path: Path) -> dict[int, list[str]]:
 
 
 def select_qids(candidates: set[int], count: int, seed: int) -> list[int]:
+    """Sample count qids from candidates with the seed and return them sorted."""
     if count > len(candidates):
         raise SanityError(f"requested {count} prompts but only {len(candidates)} have a recorded sglang output")
     return sorted(random.Random(seed).sample(sorted(candidates), count))
@@ -152,14 +153,17 @@ def _visible(text: str) -> str:
 
 
 def check_nonempty(texts: list[str]) -> bool:
+    """Require all n sampled texts to have nonempty visible content."""
     return len(texts) == SAMPLING["n"] and all(_visible(text) for text in texts)
 
 
 def check_no_replacement_char(texts: list[str]) -> bool:
+    """Report whether no text contains the Unicode replacement character."""
     return not any("\ufffd" in text for text in texts)
 
 
 def _collapsed(text: str) -> bool:
+    """Detect repetition collapse: long character runs, repeated units, or tiny alphabets."""
     visible = _visible(text)
     for match in _CHAR_RUN.finditer(visible):
         if unicodedata.category(match.group(1))[0] in "LN":
@@ -170,6 +174,7 @@ def _collapsed(text: str) -> bool:
 
 
 def check_no_repetition_collapse(texts: list[str]) -> bool:
+    """Report whether no text shows repetition collapse."""
     return not any(_collapsed(text) for text in texts)
 
 
@@ -185,6 +190,7 @@ def script_counts(texts: list[str]) -> Counter[str]:
 
 
 def check_script_consistent(ninfer_texts: list[str], sglang_texts: list[str]) -> bool:
+    """Check the dominant script matches the reference and no foreign script dominates."""
     ours, reference = script_counts(ninfer_texts), script_counts(sglang_texts)
     if not ours and not reference:
         return True
@@ -200,6 +206,7 @@ def check_script_consistent(ninfer_texts: list[str], sglang_texts: list[str]) ->
 
 
 def evaluate(qid: int, ninfer_texts: list[str], sglang_texts: list[str]) -> dict[str, Any]:
+    """Run all rule checks for one qid and return its verdict entry."""
     checks = {
         "nonempty": check_nonempty(ninfer_texts),
         "no_replacement_char": check_no_replacement_char(ninfer_texts),
@@ -216,6 +223,7 @@ def evaluate(qid: int, ninfer_texts: list[str], sglang_texts: list[str]) -> dict
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Build the CLI argument parser."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--ninfer-url", required=True, help="OpenAI base URL, e.g. http://127.0.0.1:30100/v1")
     parser.add_argument("--model", required=True, help="model id reported by /v1/models")
@@ -228,6 +236,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def run(args: argparse.Namespace) -> tuple[dict[str, Any], list[str]]:
+    """Run the sanity sweep, returning the result document and request errors."""
     examples = load_examples(args.data)
     sglang = load_sglang_texts(args.sglang_results)
     qids = select_qids({qid for qid in sglang if 1 <= qid <= len(examples)}, args.count, args.seed)
@@ -253,6 +262,7 @@ def run(args: argparse.Namespace) -> tuple[dict[str, Any], list[str]]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the sweep, write the JSON report, and print the summary."""
     args = build_parser().parse_args(argv)
     try:
         document, errors = run(args)
@@ -262,7 +272,10 @@ def main(argv: list[str] | None = None) -> int:
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(document, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     summary = document["summary"]
-    print(f"[b200_sanity] count={summary['count']} pass={summary['pass']} needs_review={summary['needs_review']} -> {args.out}")
+    print(
+        f"[b200_sanity] count={summary['count']} pass={summary['pass']} "
+        f"needs_review={summary['needs_review']} -> {args.out}"
+    )
     for error in errors:
         print(f"[b200_sanity] request failed: {error}", file=sys.stderr)
     return 1 if errors else 0

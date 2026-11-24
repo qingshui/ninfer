@@ -7,11 +7,13 @@ from dataclasses import dataclass
 
 
 class SseDecodeError(ValueError):
-    pass
+    """Raised when an SSE byte stream carries text that is not valid UTF-8."""
 
 
 @dataclass(frozen=True)
 class SseEvent:
+    """One decoded SSE event with the timestamp of the chunk that completed it."""
+
     event: str
     data: str
     received_ns: int
@@ -27,11 +29,13 @@ class SseDecoder:
     """
 
     def __init__(self) -> None:
+        """Initialize the incremental UTF-8 decoder with an empty line buffer."""
         self._decoder = codecs.getincrementaldecoder("utf-8")("strict")
         self._buffer = ""
         self._pending_cr = False
 
     def _normalize(self, text: str, *, final: bool) -> str:
+        """Normalize CRLF and lone-CR newlines to LF, deferring a trailing CR unless final."""
         if self._pending_cr:
             text = "\r" + text
             self._pending_cr = False
@@ -42,6 +46,7 @@ class SseDecoder:
 
     @staticmethod
     def _parse(block: str, received_ns: int) -> SseEvent | None:
+        """Parse one event block into an SseEvent, or None if it holds only defaults."""
         event_type = "message"
         data: list[str] = []
         event_id: str | None = None
@@ -71,6 +76,7 @@ class SseDecoder:
         )
 
     def feed(self, data: bytes, received_ns: int) -> list[SseEvent]:
+        """Decode a streamed chunk and return the events its blank lines complete."""
         try:
             text = self._decoder.decode(data, final=False)
         except UnicodeDecodeError as error:
@@ -89,6 +95,7 @@ class SseDecoder:
         return events
 
     def finish(self, received_ns: int) -> list[SseEvent]:
+        """Flush the decoder at EOF and dispatch one final unterminated event, if any."""
         try:
             tail = self._decoder.decode(b"", final=True)
         except UnicodeDecodeError as error:

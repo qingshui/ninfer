@@ -1,3 +1,5 @@
+"""Coordinator behavior tests: target capacity, resume, and run contract artifacts."""
+
 import json
 import tempfile
 import unittest
@@ -10,7 +12,10 @@ from ninfer_eval.coordinator import Coordinator, load_resume_config
 
 
 class CoordinatorTest(unittest.TestCase):
+    """Suite-run tests exercising the coordinator against the mock backend."""
+
     def make_config(self, root: Path) -> Path:
+        """Write a two-job mock suite config under root and return its path."""
         path = root / "suite.yaml"
         path.write_text(
             f"""
@@ -52,6 +57,7 @@ runtime:
         return path
 
     def test_run_enforces_target_capacity_and_writes_contracts(self):
+        """Run both jobs and check completion, combined in-flight capacity, and artifacts."""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             config = load_config(self.make_config(root))
@@ -70,6 +76,7 @@ runtime:
             self.assertTrue((run_dir / "summary.md").exists())
 
     def test_resume_skips_completed_jobs(self):
+        """Resume a completed run and verify both jobs are reported as skipped."""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             config = load_config(self.make_config(root))
@@ -87,9 +94,11 @@ runtime:
             self.assertEqual(skipped, {"first", "second"})
 
     def test_partial_result_is_persisted_and_retried_on_resume(self):
+        """Force a partial first run, then verify the resume reruns it to completion."""
         normalize = MockBackend.normalize
 
         def partial(backend, context, run):
+            """Run the original normalize and mark the result partial with an error."""
             result = normalize(backend, context, run)
             result.status = "partial"
             result.error = "incomplete"

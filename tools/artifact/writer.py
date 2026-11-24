@@ -86,10 +86,13 @@ def layout_directory(
 
 
 class _Coverage:
+    """Disjoint byte ranges of one object's written output, merged and checked for duplicates."""
     def __init__(self) -> None:
+        """Start with an empty list of covered ranges."""
         self.ranges: list[tuple[int, int]] = []
 
     def add(self, begin: int, end: int, label: str) -> None:
+        """Merge the range into coverage, rejecting overlaps and fusing adjacent ranges."""
         index = bisect_left(self.ranges, (begin, end))
         if index and self.ranges[index - 1][1] > begin:
             raise ArtifactError(
@@ -123,6 +126,7 @@ class ArtifactWriter:
         max_file_bytes: int = DEFAULT_MAX_FILE_BYTES,
         reproducible_identity: bool = False,
     ) -> None:
+        """Initialize the writer's planned objects, directory layout, temporary files, and per-object coverage."""
         self.path = Path(path)
         self.objects = plan_objects(specs)
         self.by_id = {obj.id: obj for obj in self.objects}
@@ -188,6 +192,7 @@ class ArtifactWriter:
             raise
 
     def _write_file(self, fd: int, offset: int, data: bytes | memoryview) -> None:
+        """Write data to a file descriptor at an offset in IO_CHUNK_BYTES-sized pwrites."""
         view = memoryview(data).cast("B")
         while view:
             count = os.pwrite(fd, view[:IO_CHUNK_BYTES], offset)
@@ -198,6 +203,7 @@ class ArtifactWriter:
             self._writeback.written(fd, count)
 
     def _write_range(self, offset: int, data: memoryview) -> None:
+        """Write a logical payload range, splitting it across segment files at their boundaries."""
         cursor = 0
         while cursor < len(data):
             index = bisect_right(self._prefixes, offset) - 1
@@ -214,6 +220,7 @@ class ArtifactWriter:
     def write_region(
         self, object_id: str, offset: int, data: bytes | bytearray | memoryview
     ) -> None:
+        """Write bytes into one output object at a relative offset and record the covered range."""
         if not self._fds or self._finished or self._failed:
             raise ArtifactError("writer is closed or has failed")
         try:
@@ -237,6 +244,7 @@ class ArtifactWriter:
             raise
 
     def write_zeros(self, object_id: str, offset: int, length: int) -> None:
+        """Fill length zero bytes into an object starting at offset, in bounded chunks."""
         integer(length, f"{object_id} zero length")
         self.write_region(object_id, offset, b"")
         zero = bytes(min(length, ZERO_CHUNK_BYTES))
@@ -247,6 +255,7 @@ class ArtifactWriter:
             length -= count
 
     def write_object(self, object_id: str, chunks: bytes | Iterable[bytes]) -> None:
+        """Write one object's payload from a chunk sequence at consecutive offsets."""
         if isinstance(chunks, (bytes, bytearray, memoryview)):
             chunks = (chunks,)
         offset = 0
@@ -255,6 +264,7 @@ class ArtifactWriter:
             offset += len(chunk)
 
     def finish(self) -> Directory:
+        """Verify full coverage and file sizes, then publish the files and return the directory."""
         if self._finished:
             return self.directory
         if self._failed or not self._fds:
@@ -287,6 +297,7 @@ class ArtifactWriter:
             raise
 
     def abort(self) -> None:
+        """Close descriptors and delete every temporary or published file, marking the writer failed."""
         while self._fds:
             os.close(self._fds.pop())
         if not self._finished:
@@ -297,9 +308,11 @@ class ArtifactWriter:
         self._failed = True
 
     def __enter__(self) -> ArtifactWriter:
+        """Return the writer itself for use as a context manager."""
         return self
 
     def __exit__(self, exc_type, exc_value, traceback) -> None:
+        """Finish the artifact on success and abort it on exception."""
         if exc_type is None:
             self.finish()
         else:

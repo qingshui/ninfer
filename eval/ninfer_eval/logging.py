@@ -1,3 +1,5 @@
+"""Per-run file logging helpers for evaluation runs."""
+
 from __future__ import annotations
 
 import logging
@@ -5,6 +7,7 @@ from pathlib import Path
 
 
 def create_run_logger(run_dir: Path, debug: bool = False) -> logging.Logger:
+    """Create a non-propagating logger writing to run_dir/run.log at DEBUG or INFO level."""
     logger = logging.getLogger(f"ninfer_eval.{run_dir.name}")
     logger.setLevel(logging.DEBUG if debug else logging.INFO)
     logger.propagate = False
@@ -21,6 +24,7 @@ def create_run_logger(run_dir: Path, debug: bool = False) -> logging.Logger:
 
 
 def close_logger(logger: logging.Logger) -> None:
+    """Flush, close, and detach every handler attached to logger."""
     for handler in list(logger.handlers):
         handler.flush()
         handler.close()

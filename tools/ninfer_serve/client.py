@@ -16,11 +16,13 @@ from tools.streaming_http.sse import SseDecodeError, SseDecoder, SseEvent
 
 
 class ServeProtocolError(RuntimeError):
+    """Raised for unsupported protocols and malformed or failed serve HTTP exchanges."""
     pass
 
 
 @dataclass(frozen=True)
 class ProtocolRequest:
+    """A frozen benchmark request: protocol, endpoint path, JSON payload, and streaming mode."""
     protocol: str
     path: str
     payload: dict[str, Any]
@@ -29,6 +31,7 @@ class ProtocolRequest:
 
 @dataclass(frozen=True)
 class ProtocolEvent:
+    """One normalized wire event with kind, event type, receive timestamp, and payload details."""
     kind: str
     event_type: str
     received_ns: int
@@ -40,11 +43,15 @@ class ProtocolEvent:
 
 
 class StreamAdapter(Protocol):
-    def consume(self, event: SseEvent) -> list[ProtocolEvent]: ...
+    """The protocol-specific SSE-to-ProtocolEvent conversion interface used by prepared exchanges."""
+    def consume(self, event: SseEvent) -> list[ProtocolEvent]:
+        """Normalize one SSE frame into zero or more protocol events."""
+        ...
 
 
 @dataclass
 class ServeExchangeResult:
+    """A completed exchange: the HTTP transport result plus decoded protocol events and errors."""
     protocol: str
     body_bytes: int
     http: HttpExchangeResult
@@ -55,6 +62,7 @@ class ServeExchangeResult:
 
 
 def _adapter(protocol: str) -> StreamAdapter:
+    """Return the lazy-imported stream adapter for a named protocol, raising ServeProtocolError when unsupported."""
     if protocol == "openai_chat":
         from tools.ninfer_serve.openai_chat import ChatStreamAdapter
 
@@ -71,6 +79,7 @@ def _adapter(protocol: str) -> StreamAdapter:
 
 
 def parse_http_error(protocol: str, status: int | None, body: bytes) -> tuple[str | None, str | None]:
+    """Extract an error code and message from a non-2xx JSON response body."""
     if status is None or 200 <= status < 300:
         return None, None
     try:
@@ -93,25 +102,30 @@ def parse_http_error(protocol: str, status: int | None, body: bytes) -> tuple[st
 
 
 class PreparedServeExchange:
+    """A prepared request exchange ready to execute against the streaming HTTP client."""
     def __init__(
         self,
         request: ProtocolRequest,
         body: bytes,
         exchange: PreparedExchange,
     ) -> None:
+        """Bind the serialized request body to its prepared low-level exchange."""
         self.request = request
         self.body = body
         self._exchange = exchange
 
     @property
     def body_bytes(self) -> int:
+        """The UTF-8 size of the serialized request body."""
         return len(self.body)
 
     @property
     def cancel_ns(self) -> int | None:
+        """The nanosecond timestamp at which cancellation was requested, if issued."""
         return self._exchange.cancel_ns
 
     def cancel(self) -> int:
+        """Request cancellation of the exchange and return its timestamp."""
         return self._exchange.cancel()
 
     def execute(
@@ -122,6 +136,7 @@ class PreparedServeExchange:
         on_headers: Callable[[HttpResponseHead], None] | None = None,
         on_event: Callable[[ProtocolEvent], None] | None = None,
     ) -> ServeExchangeResult:
+        """Execute the exchange, decode SSE frames into protocol events, and return the aggregate result."""
         adapter = _adapter(self.request.protocol)
         decoder = SseDecoder()
         events: list[ProtocolEvent] = []
@@ -129,11 +144,13 @@ class PreparedServeExchange:
         protocol_error: str | None = None
 
         def emit(event: ProtocolEvent) -> None:
+            """Record an event and forward it to the caller's on_event callback."""
             events.append(event)
             if on_event is not None:
                 on_event(event)
 
         def headers(value: HttpResponseHead) -> None:
+            """Capture response headers, enforce the SSE content type, and forward to on_headers."""
             nonlocal head, protocol_error
             head = value
             if on_headers is not None:
@@ -147,6 +164,7 @@ class PreparedServeExchange:
                     )
 
         def consume_frame(frame: SseEvent) -> None:
+            """Adapt one SSE frame into protocol events unless a protocol error already occurred."""
             nonlocal protocol_error
             if protocol_error is not None:
                 return
@@ -157,6 +175,7 @@ class PreparedServeExchange:
                 protocol_error = f"{type(error).__name__}: {error}"
 
         def chunk(data: bytes, received_ns: int) -> None:
+            """Feed a received chunk to the SSE decoder and adapt each completed frame."""
             nonlocal protocol_error
             if head is None or not (200 <= head.status < 300) or not self.request.stream:
                 return
@@ -221,11 +240,14 @@ class PreparedServeExchange:
 
 
 class NInferServeClient:
+    """A client for ninfer-serve's public wire protocols over one base URL."""
     def __init__(self, base_url: str, timeout_seconds: float, api_key: str | None = None) -> None:
+        """Initialize the client with a base URL, timeout, and optional bearer API key."""
         self._http = StreamingHttpClient(base_url, timeout_seconds)
         self._api_key = api_key
 
     def prepare(self, request: ProtocolRequest) -> PreparedServeExchange:
+        """Serialize a request to JSON and prepare its POST exchange with auth and accept headers."""
         body = json.dumps(
             request.payload,
             ensure_ascii=False,
@@ -241,6 +263,7 @@ class NInferServeClient:
         return PreparedServeExchange(request, body, exchange)
 
     def get_json(self, path: str) -> dict[str, Any]:
+        """GET a JSON object from a path, raising ServeProtocolError on failure."""
         headers = {"Accept": "application/json"}
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
@@ -260,6 +283,7 @@ class NInferServeClient:
         return value
 
     def discover_model(self) -> str:
+        """Return the single resident model id advertised by /v1/models."""
         value = self.get_json("/v1/models")
         entries = value.get("data")
         if not isinstance(entries, list) or len(entries) != 1:

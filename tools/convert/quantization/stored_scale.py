@@ -19,6 +19,7 @@ from .groupwise import QuantizedMatrix
 
 @lru_cache(maxsize=1)
 def _cuda_module():
+    """Build and cache the CUDA extension that runs the stored-scale MSE search."""
     from torch.utils.cpp_extension import load
 
     return load(
@@ -37,6 +38,7 @@ def _cuda_module():
 
 
 def _cpu_words(values: np.ndarray, divisor: float, nf4: bool):
+    """Brute-force every E4M3FN scale word on the CPU and return packed codes plus scales."""
     groups = values.reshape(-1, 16).astype(np.float64) * divisor
     codes = np.empty_like(groups, dtype=np.uint8)
     scales = np.empty(len(groups), dtype=np.uint8)
@@ -74,6 +76,7 @@ def _cpu_words(values: np.ndarray, divisor: float, nf4: bool):
 def quantize_stored_scale(
     weight: torch.Tensor, format: str, divisor: bytes, *, device="cuda"
 ) -> QuantizedMatrix:
+    """Quantize a floating [N,K] matrix by stored-scale MSE on CPU or CUDA."""
     if format not in ("nf4_g16_e4m3fn", "nvfp4"):
         raise ValueError("stored-scale MSE supports NF4 and NVFP4")
     if weight.ndim != 2 or weight.shape[1] % 16 or not weight.dtype.is_floating_point:

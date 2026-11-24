@@ -41,7 +41,10 @@ from .writer import ArtifactWriter
 
 
 class TensorOutput:
+    """Write one tensor object's payload, handling codecs, plane offsets, and padding."""
+
     def __init__(self, writer: ArtifactWriter, object_id: str):
+        """Bind to a tensor object in the writer and resolve its format."""
         obj = writer.by_id[object_id]
         if not isinstance(obj, TensorObject):
             raise TypeError(f"{object_id}: expected tensor output")
@@ -55,9 +58,11 @@ class TensorOutput:
         self._pages_written = 0
 
     def write_bytes(self, offset: int, data: bytes | memoryview) -> None:
+        """Write raw data at an absolute byte offset in the tensor object."""
         self.writer.write_region(self.object.id, offset, data)
 
     def write_values(self, element_begin: int, values: torch.Tensor) -> None:
+        """Encode direct-format values and write them starting at an element offset."""
         if not isinstance(self.format, DirectFormat):
             raise TypeError(
                 "choose the numerical encoder before writing quantized output"
@@ -67,6 +72,7 @@ class TensorOutput:
         )
 
     def _padding(self) -> None:
+        """Zero the inter-plane gaps once for this object's layout."""
         if self._padding_initialized:
             return
         obj = self.object
@@ -105,6 +111,7 @@ class TensorOutput:
     def write_csf_plane(
         self, name: str, byte_offset: int, data: bytes | bytearray | memoryview
     ) -> None:
+        """Write data into one named CSF plane at a byte offset within the plane."""
         if self.object.layout != "csf_32x2_v1":
             raise TypeError("CSF plane writes require a CSF tensor")
         g = csf32_geometry(
@@ -127,6 +134,7 @@ class TensorOutput:
         *,
         matrix: int = 0,
     ) -> None:
+        """Encode and write a row block of codes and scales for the object's format."""
         obj = self.object
         if obj.layout == "csf_32x2_v1":
             raise TypeError("CSF output requires compressed plane writes")
@@ -229,6 +237,7 @@ class TensorOutput:
             raise TypeError(f"{obj.id}: direct format does not accept quantized codes")
 
     def _write_nf4(self, row_begin, codes, scales, weight_divisor):
+        """Append consecutive NF4 rows, writing completed 4096-byte pages and the final divisor."""
         g = row_paged_geometry(self.format, self.object.shape)
         if row_begin != self._next_row:
             raise ValueError("NF4 streaming output requires consecutive rows")

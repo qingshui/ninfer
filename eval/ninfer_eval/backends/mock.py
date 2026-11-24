@@ -1,3 +1,5 @@
+"""Mock evaluation backend that simulates dataset scoring for pipeline testing."""
+
 from __future__ import annotations
 
 import json
@@ -13,6 +15,7 @@ from .base import BackendRun, RunContext, WorkPlan
 
 
 class MockBackend:
+    """A deterministic mock backend that evaluates synthetic items with configurable failures and delays."""
     name = "mock"
 
     _ALLOWED = {"items", "sleep_seconds", "wrong_every", "unknown_total", "fail_at"}
@@ -20,6 +23,7 @@ class MockBackend:
     def validate(
         self, job: JobConfig, target: ResolvedTarget | None, for_run: bool = False
     ) -> None:
+        """Check that the job's backend_args only contain known keys with a positive integer items count."""
         del target, for_run
         unknown = sorted(set(job.backend_args) - self._ALLOWED)
         if unknown:
@@ -33,6 +37,7 @@ class MockBackend:
             )
 
     def plan(self, job: JobConfig, target: ResolvedTarget | None) -> WorkPlan:
+        """Build the work plan from items times repeats, honouring the limit and unknown_total flags."""
         del target
         total = int(job.backend_args.get("items", 10)) * job.repeats
         if isinstance(job.limit, int):
@@ -46,6 +51,7 @@ class MockBackend:
         )
 
     def run(self, context: RunContext, events: EventSink) -> BackendRun:
+        """Evaluate the mock items on a thread pool, emitting progress events and persisting the result artifact."""
         start = time.monotonic()
         total = int(context.job.backend_args.get("items", 10)) * context.job.repeats
         if isinstance(context.job.limit, int):
@@ -62,6 +68,7 @@ class MockBackend:
         rows: list[dict] = []
 
         def evaluate(index: int) -> dict:
+            """Simulate evaluating one item, respecting cancellation, delay, and the configured failure index."""
             nonlocal in_flight, max_in_flight
             if context.cancel_event.is_set():
                 raise InterruptedError("run cancelled")
@@ -110,6 +117,7 @@ class MockBackend:
         return BackendRun(start, time.monotonic(), raw, [artifact])
 
     def normalize(self, context: RunContext, run: BackendRun) -> DatasetResult:
+        """Turn the mock run's rows into a DatasetResult with accuracy and max_in_flight metrics."""
         rows = run.raw_result["rows"]
         correct = sum(bool(row["correct"]) for row in rows)
         total = len(rows)

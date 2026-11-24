@@ -1,3 +1,5 @@
+"""Tests for EvalScope record summarization and resume archiving."""
+
 import json
 import tempfile
 import unittest
@@ -11,7 +13,10 @@ from ninfer_eval.backends.evalscope_records import (
 
 
 class EvalScopeRecordsTest(unittest.TestCase):
+    """Tests for summarizing and resuming EvalScope prediction and review records."""
+
     def write_records(self, root, kind, rows):
+        """Write rows as one JSONL record file for kind and return its path."""
         path = root / kind / "model" / "aime26_default.jsonl"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
@@ -20,6 +25,7 @@ class EvalScopeRecordsTest(unittest.TestCase):
         return path
 
     def test_counts_tokens_truncation_and_repeated_question_scores(self):
+        """Check token totals, truncation and repeated-question scoring in summarize_records."""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             self.write_records(
@@ -89,6 +95,7 @@ class EvalScopeRecordsTest(unittest.TestCase):
             self.assertEqual(questions[0]["correct"], 1)
 
     def test_resume_archives_only_infrastructure_failures(self):
+        """Check that prepare_resume archives only infrastructure-failure rows."""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             rows = [

@@ -23,6 +23,7 @@ from .recipe import Recipe, WeightJob
 
 
 def _json_default(value):
+    """Convert Path values to strings for JSON, raising TypeError otherwise."""
     if isinstance(value, Path):
         return str(value)
     raise TypeError(f"conversion report cannot serialize {type(value).__name__}")
@@ -41,6 +42,7 @@ def convert(
     max_file_bytes: int = DEFAULT_MAX_FILE_BYTES,
     progress: Callable[[int, int, WeightJob], None] | None = None,
 ) -> dict:
+    """Convert a configured model to a v3 artifact collection and write its conversion report."""
     path = Path(output)
     report_path = Path(str(path) + ".conversion.json")
     # 覆盖语义：裁判脚本（spark_gate.py）每次运行都用当前树重建产物，上一轮中断可能

@@ -18,6 +18,7 @@ def responses_request(
     previous_response_id: str | None = None,
     stream: bool = True,
 ) -> ProtocolRequest:
+    """Build an OpenAI Responses request payload for /v1/responses."""
     if max_output_tokens < 0:
         raise ValueError("Responses max_output_tokens must be non-negative")
     payload: dict[str, Any] = {
@@ -40,6 +41,7 @@ def responses_request(
 
 
 class ResponsesStreamAdapter:
+    """Classify Responses SSE events into accepted, output, terminal, error, or metadata events."""
     _OUTPUT_TYPES = {
         "response.output_text.delta",
         "response.reasoning_text.delta",
@@ -52,6 +54,7 @@ class ResponsesStreamAdapter:
     }
 
     def consume(self, event: SseEvent) -> list[ProtocolEvent]:
+        """Convert one SSE event into classified protocol events."""
         try:
             payload = json.loads(event.data)
         except json.JSONDecodeError as error:
@@ -101,7 +104,9 @@ class ResponsesStreamAdapter:
                         payload=payload,
                         response_id=response_id,
                         error_code=(
-                            error.get("code") if isinstance(error, dict) and isinstance(error.get("code"), str) else None
+                            error.get("code")
+                            if isinstance(error, dict) and isinstance(error.get("code"), str)
+                            else None
                         ),
                         error_message=(
                             error.get("message")

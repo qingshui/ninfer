@@ -1,3 +1,5 @@
+"""Run progress events and the sink that persists, logs, and redacts them."""
+
 from __future__ import annotations
 
 import json
@@ -12,11 +14,14 @@ EVENT_SCHEMA_VERSION = 1
 
 
 def utc_now() -> str:
+    """Return the current UTC time as an ISO-8601 string ending in Z."""
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 @dataclass(frozen=True)
 class RunEvent:
+    """One structured progress event emitted during an evaluation run."""
+
     kind: str
     run_id: str
     job_id: str | None = None
@@ -31,23 +36,36 @@ class RunEvent:
     schema_version: int = EVENT_SCHEMA_VERSION
 
     def to_dict(self) -> dict[str, Any]:
+        """Return the event serialized as a plain dict."""
         return asdict(self)
 
 
 class EventRenderer(Protocol):
-    def handle(self, event: RunEvent) -> None: ...
-    def close(self) -> None: ...
+    """Protocol for objects that display progress events as they arrive."""
+
+    def handle(self, event: RunEvent) -> None:
+        """Display one progress event."""
+        ...
+    def close(self) -> None:
+        """Release any resources held by the renderer."""
+        ...
 
 
 class NullRenderer:
+    """No-op renderer that accepts and discards events."""
+
     def handle(self, event: RunEvent) -> None:
+        """Discard the event without producing any output."""
         del event
 
     def close(self) -> None:
+        """Do nothing; this renderer holds no resources."""
         pass
 
 
 class EventSink:
+    """Persists redacted events to a JSONL file, logs them, and forwards them to a renderer."""
+
     def __init__(
         self,
         path: Path,
@@ -55,6 +73,7 @@ class EventSink:
         renderer: EventRenderer | None = None,
         secrets: list[str] | None = None,
     ):
+        """Open path for appended JSONL output and keep logger, renderer, and secret values."""
         self._path = path
         self._logger = logger
         self._renderer = renderer or NullRenderer()
@@ -64,6 +83,7 @@ class EventSink:
         self._file = path.open("a", encoding="utf-8")
 
     def emit(self, event: RunEvent) -> None:
+        """Append the redacted event to the JSONL file, log it, and hand it to the renderer."""
         safe = self._redact_event(event)
         with self._lock:
             self._file.write(json.dumps(safe.to_dict(), ensure_ascii=False) + "\n")
@@ -77,11 +97,13 @@ class EventSink:
             self._renderer.handle(safe)
 
     def close(self) -> None:
+        """Close the renderer and the underlying JSONL file."""
         with self._lock:
             self._renderer.close()
             self._file.close()
 
     def _redact_event(self, event: RunEvent) -> RunEvent:
+        """Return a copy of the event with every configured secret replaced by <redacted>."""
         data = event.to_dict()
         encoded = json.dumps(data, ensure_ascii=False)
         for secret in self._secrets:

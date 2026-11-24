@@ -11,6 +11,7 @@ from .fp8_row import quantize_fp32_rows
 
 @dataclass(frozen=True, slots=True)
 class BlockScaledFp8Words:
+    """Per-block quantization output: E4M3FN code words and one scale per 128-by-128 block."""
     codes: torch.Tensor
     scales: torch.Tensor
 

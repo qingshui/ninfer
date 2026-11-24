@@ -115,6 +115,7 @@ import requests  # noqa: E402  (kept after docstring for fast --help)
 
 
 def build_prompt(tokenizer, target_tokens: int, nonce: str) -> str:
+    """Build a nonce-stamped prompt trimmed to roughly target tokens with a long-summary tail."""
     head = f"Document {nonce}: "
     body_units = max(1, (target_tokens - 64) // 100 + 1)
     text = head + (_FILLER * (body_units // 1 + 1))
@@ -229,6 +230,7 @@ def sglang_request(url: str, prompt: str, timeout: float) -> dict:
 
 
 def run_point(url, tokenizer, ctx, conc, n, timeout, request_fn) -> dict:
+    """Run one (ctx, concurrency) request wave and reduce it to throughput and failure counts."""
     run_id = uuid.uuid4().hex[:8]
     prompts = [build_prompt(tokenizer, ctx, f"{run_id}-g-{i:04d}") for i in range(n)]
     t0 = time.perf_counter()
@@ -262,6 +264,7 @@ def run_point(url, tokenizer, ctx, conc, n, timeout, request_fn) -> dict:
 
 
 def gpu_free_mib(gpu: int) -> int:
+    """Return the MiB of memory nvidia-smi currently reports as used on the GPU."""
     out = subprocess.run(
         ["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits",
          "-i", str(gpu)],
@@ -270,12 +273,14 @@ def gpu_free_mib(gpu: int) -> int:
 
 
 def port_free(port: int) -> bool:
+    """Return True when no one is listening on the loopback port."""
     with socket.socket() as s:
         s.settimeout(1)
         return s.connect_ex(("127.0.0.1", port)) != 0
 
 
 def free_port(base: int) -> int | None:
+    """Scan nine ports upward from base and return the first unused one, or None."""
     for offset in range(9):
         port = base + offset
         if port_free(port):
@@ -296,6 +301,7 @@ def pick_gpu(requested: int | None) -> int:
 
 
 def wait_gpu_drained(gpu: int, limit_mib: int = 2000, timeout: float = 180.0):
+    """Block until the GPU's used memory falls to limit_mib, else exit with an error."""
     deadline = time.time() + timeout
     while time.time() < deadline:
         if gpu_free_mib(gpu) <= limit_mib:
@@ -345,6 +351,7 @@ def build_artifact(variant: str, gpu: int, log_path: Path) -> Path | None:
 
 
 def start_server(gpu: int, port: int, artifact: Path, log_path: Path):
+    """Launch ninfer-serve from a generated config and wait until /health responds."""
     if not SERVE.exists():
         sys.exit(f"environment error: {SERVE} not built")
     used = gpu_free_mib(gpu)
@@ -403,6 +410,7 @@ model_id = "{NINFER_MODEL_ID}"
 
 
 def stop_server(proc) -> None:
+    """Terminate the server, escalating to kill when SIGTERM does not exit in 30 s."""
     if proc is None:
         return
     try:
@@ -450,6 +458,7 @@ def measure_sglang(args, tokenizer, matrix) -> int:
 
 
 def gate_ninfer(args, tokenizer, matrix, baselines) -> int:
+    """Gate every variant's matrix points against the frozen baselines and write metrics."""
     out_dir = os.environ.get("AUTODEVX_ANALYZE_OUTPUT_DIR")
     base_log = Path(out_dir or tempfile.gettempdir())
     gpu = pick_gpu(args.gpu if args.gpu is not None
@@ -516,10 +525,12 @@ def gate_ninfer(args, tokenizer, matrix, baselines) -> int:
             "decode_ratio_min": min(decode_ratios) if decode_ratios else None,
             "points": points,
         }
+        prefill_min = variants_result[variant]["prefill_ratio_min"]
+        decode_min = variants_result[variant]["decode_ratio_min"]
         print(f"[gate] {variant}: prefill_ratio_min="
-              f"{variants_result[variant]['prefill_ratio_min'] and round(variants_result[variant]['prefill_ratio_min'], 3)} "
+              f"{prefill_min and round(prefill_min, 3)} "
               f"decode_ratio_min="
-              f"{variants_result[variant]['decode_ratio_min'] and round(variants_result[variant]['decode_ratio_min'], 3)}",
+              f"{decode_min and round(decode_min, 3)}",
               flush=True)
 
     mins = [min(v["prefill_ratio_min"] or float("inf"),
@@ -558,6 +569,7 @@ def gate_ninfer(args, tokenizer, matrix, baselines) -> int:
 
 
 def main() -> int:
+    """Parse arguments and dispatch to baseline measurement or the ninfer gate."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--matrix", choices=("smoke", "quick", "full"),
                         default=os.environ.get("GATE_MATRIX", "full"))

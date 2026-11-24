@@ -1,3 +1,5 @@
+"""Tests for the run summary writer and its stable JSON and Markdown output."""
+
 import json
 import tempfile
 import unittest
@@ -7,7 +9,9 @@ from ninfer_eval.result import DatasetResult, ResultCounts, write_summary
 
 
 class ReportTest(unittest.TestCase):
+    """Coverage for write_summary's stable JSON and Markdown outputs."""
     def test_writes_stable_json_and_markdown(self):
+        """Write a completed dataset result and assert the summary JSON fields and Markdown table row."""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             result = DatasetResult(

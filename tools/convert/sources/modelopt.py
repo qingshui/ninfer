@@ -26,9 +26,11 @@ class ModelOptSource:
     """Read exact codes/scales; only explicit value consumers decode weights."""
 
     def __init__(self, store: SafetensorsSource):
+        """Store the safetensors source that backs all ModelOpt weight reads."""
         self.store = store
 
     def names(self, prefix: str) -> tuple[str, ...]:
+        """Return the safetensors tensor names that make up the matrix at prefix."""
         names = [prefix + ".weight"]
         if self.store.has(prefix + ".weight_scale.csf32_bases"):
             names.extend(
@@ -43,6 +45,7 @@ class ModelOptSource:
 
     @lru_cache(maxsize=None)
     def scalar(self, name: str) -> bytes:
+        """Return the raw little-endian bytes of the positive finite FP32 scalar name."""
         info = self.store.describe(name)
         if info.dtype != "F32" or info.shape != ():
             raise ValueError(f"{name}: expected an FP32 scalar multiplier")
@@ -52,6 +55,7 @@ class ModelOptSource:
         return raw
 
     def matrix(self, prefix: str, shape: tuple[int, int]) -> LogicalSource:
+        """Return a LogicalSource for the encoded weight matrix at prefix with the given shape."""
         n, k = shape
         info = self.store.describe(prefix + ".weight")
         if info.dtype == "U8":
@@ -72,9 +76,11 @@ class ModelOptSource:
         raise ValueError(f"{prefix}: unsupported ModelOpt scale representation")
 
     def _fp8(self, prefix, shape, format, block_rows, block_columns):
+        """Return a LogicalSource for an FP8 matrix with row-group or 128x128 block scales."""
         n, k = shape
 
         def encoded(first, last):
+            """Read the encoded rows [first, last) as codes plus their scale blocks."""
             if not 0 <= first < last <= n or first % block_rows or last % block_rows:
                 raise ValueError(
                     f"{prefix}: encoded rows must contain complete scale blocks"
@@ -92,6 +98,7 @@ class ModelOptSource:
             )
 
         def values(begin, end):
+            """Decode the value range [begin, end) to float32 with scales expanded per element."""
             if begin == end:
                 return torch.empty(0, dtype=torch.float32)
             width = block_rows * k
@@ -120,6 +127,7 @@ class ModelOptSource:
         )
 
     def _nvfp4(self, prefix, shape):
+        """Return a LogicalSource for a native NVFP4 matrix with plain or CSF32-compressed scales."""
         n, k = shape
         multiplier = lambda: self.scalar(prefix + ".weight_scale_2")
         activation = (
@@ -154,6 +162,7 @@ class ModelOptSource:
                     raise ValueError(f"{fields[name]}: expected {dtypes[name]}")
 
             def plane(name, begin, end):
+                """Read the native byte range [begin, end) of one CSF32 plane as uint8."""
                 item = info[name]
                 word = {"U8": 1, "U16": 2, "U32": 4, "F32": 4}[item.dtype]
                 if not 0 <= begin <= end <= item.bytes or begin % word or end % word:
@@ -175,6 +184,7 @@ class ModelOptSource:
                 raise ValueError(f"{prefix}: unexpected NVFP4 scale geometry/type")
 
             def encoded(first, last):
+                """Read rows [first, last) as packed NVFP4 codes, scales, and the multiplier."""
                 if not 0 <= first < last <= n:
                     raise ValueError(f"{prefix}: encoded row range exceeds matrix")
                 codes = self.store.read_flat(
@@ -191,6 +201,7 @@ class ModelOptSource:
                 )
 
         def values(begin, end):
+            """Decode the value range [begin, end) to float64 through the NVFP4 code table."""
             if begin == end:
                 return torch.empty(0, dtype=torch.float64)
             first, last = begin // k, (end + k - 1) // k

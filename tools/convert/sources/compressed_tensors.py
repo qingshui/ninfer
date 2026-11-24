@@ -24,6 +24,7 @@ _ROW_FORMATS = ("fp8_e4m3fn_row_bf16", "fp8_e4m3fn_row_fp32")
 
 
 def _divisor_word(store: SafetensorsSource, name: str) -> bytes:
+    """Read a finite positive FP32 scalar tensor and return its raw bytes."""
     info = store.describe(name)
     if info.dtype != "F32" or prod(info.shape) != 1:
         raise ValueError(f"{name}: expected a source FP32 scalar")
@@ -45,6 +46,7 @@ def compressed_matrix_source(
         raise ValueError(f"{prefix}: NVFP4 source K must be divisible by 16")
 
     def signature(name: str, expected: tuple[int, ...], dtype: str) -> None:
+        """Check one source tensor's shape and dtype against the expectation."""
         info = store.describe(name)
         if info.shape != expected or info.dtype != dtype:
             raise ValueError(
@@ -52,9 +54,11 @@ def compressed_matrix_source(
             )
 
     def divisor(suffix: str) -> bytes:
+        """Return the validated bytes of the named global-scale scalar."""
         return _divisor_word(store, f"{prefix}.{suffix}")
 
     def encoded(begin: int, end: int) -> EncodedRows:
+        """Read rows [begin, end) encoded in the checkpoint's compressed format."""
         if not 0 <= begin < end <= n:
             raise ValueError(f"{prefix}: invalid encoded rows [{begin},{end})")
         if format == "nvfp4":
@@ -104,6 +108,7 @@ def compressed_matrix_source(
         return EncodedRows(format, codes, scales)
 
     def read(begin: int, end: int) -> torch.Tensor:
+        """Decode the covered rows and slice out the requested flat elements."""
         if begin == end:
             return torch.empty(0, dtype=torch.float32)
         first, last = begin // k, (end + k - 1) // k
@@ -168,6 +173,7 @@ def matrix_source(
     resolved: LogicalSource | None = None
 
     def resolve() -> LogicalSource:
+        """Detect the checkpoint's encoding on first use and build the source."""
         nonlocal resolved
         if resolved is None:
             actual = format
@@ -198,12 +204,14 @@ def matrix_source(
         return resolved
 
     def encoded(begin: int, end: int) -> EncodedRows:
+        """Delegate to the resolved source's encoded-row reader."""
         reader = resolve().read_encoded
         if reader is None:
             raise ValueError(f"{name}: selected source does not provide encoded rows")
         return reader(begin, end)
 
     def divisor(which: str) -> bytes:
+        """Return the resolved source's weight or activation global-scale bytes."""
         read = getattr(resolve(), which)
         if read is None:
             raise ValueError(f"{name}: selected source does not provide {which}")

@@ -54,6 +54,7 @@ class ReportError(RuntimeError):
 
 
 def read_json(path: Path, what: str) -> dict[str, Any]:
+    """Load a JSON object from path, raising ReportError when unreadable or not an object."""
     try:
         document = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -64,12 +65,14 @@ def read_json(path: Path, what: str) -> dict[str, Any]:
 
 
 def finite_number(value: Any, name: str) -> float:
+    """Return value as a float, raising ReportError unless it is a finite number."""
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
         raise ReportError(f"{name} must be a finite number, got {value!r}")
     return float(value)
 
 
 def load_metrics(path: Path) -> dict[str, float]:
+    """Load metrics.json and validate every required metric key as a finite number."""
     document = read_json(path, "metrics")
     missing = [key for key in METRIC_KEYS if key not in document]
     if missing:
@@ -112,7 +115,12 @@ def compare_ppl_ref(ref_path: Path, ppl: float, artifact_id: str) -> dict[str, A
         ref_path.write_text(
             json.dumps({"perplexity": ppl, "artifact_id": artifact_id}, indent=2) + "\n", encoding="utf-8"
         )
-        return {"ppl_ref": None, "ppl_ref_status": "initialized_from_this_run", "ppl_delta_pct": None, "ppl_within_1pct": None}
+        return {
+            "ppl_ref": None,
+            "ppl_ref_status": "initialized_from_this_run",
+            "ppl_delta_pct": None,
+            "ppl_within_1pct": None,
+        }
     reference = read_json(ref_path, "ppl reference")
     ref = finite_number(reference.get("perplexity"), "ppl reference perplexity")
     if ref <= 0.0:
@@ -132,7 +140,9 @@ def compare_ppl_ref(ref_path: Path, ppl: float, artifact_id: str) -> dict[str, A
 
 
 def git_state() -> tuple[str, bool]:
+    """Return the repository's HEAD commit and whether the work tree is dirty."""
     def run(*args: str) -> str:
+        """Run a git command in the repository root, raising ReportError on failure."""
         try:
             done = subprocess.run(
                 ["git", *args], cwd=REPO_ROOT, capture_output=True, text=True, check=True
@@ -145,6 +155,7 @@ def git_state() -> tuple[str, bool]:
 
 
 def gpu_name(index: int) -> str:
+    """Return the nvidia-smi product name of the GPU at index, raising ReportError on failure."""
     try:
         done = subprocess.run(
             ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader", "-i", str(index)],
@@ -161,6 +172,7 @@ def gpu_name(index: int) -> str:
 
 
 def build_report(args: argparse.Namespace) -> dict[str, Any]:
+    """Assemble the full report dict from validated metrics, perplexity, git, and GPU state."""
     metrics = load_metrics(args.metrics)
     ppl, artifact_id = load_perplexity(args.perplexity_report, args.artifact)
     comparison = compare_ppl_ref(args.ppl_ref, ppl, artifact_id)
@@ -196,6 +208,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def render_markdown(report: dict[str, Any]) -> str:
+    """Render the report dict as the Markdown report page."""
     build, gpu, artifact = report["build"], report["gpu"], report["artifact"]
     target = report["tuning_target"]
     ref_status = report["ppl_ref_status"]
@@ -252,6 +265,7 @@ def render_markdown(report: dict[str, Any]) -> str:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Build the CLI parser describing every required report input."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--metrics", type=Path, required=True, help="metrics.json from ninfer_bench.sh")
     parser.add_argument("--perplexity-report", type=Path, required=True, help="ninfer-perplexity report.json")
@@ -266,6 +280,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Build and write the reports, returning a non-zero status on ReportError or gate failure."""
     args = build_parser().parse_args(argv)
     try:
         report = build_report(args)

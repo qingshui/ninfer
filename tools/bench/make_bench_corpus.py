@@ -128,10 +128,12 @@ PARAGRAPHS: tuple[str, ...] = (
 
 
 def build_text(paragraphs: Sequence[str]) -> str:
+    """Join paragraphs with blank lines and end the corpus text with one more."""
     return "\n\n".join(paragraphs) + "\n\n"
 
 
 def rotate(paragraphs: Sequence[str], by: int) -> list[str]:
+    """Rotate the paragraph order by `by` positions, wrapping around the end."""
     if not paragraphs:
         return []
     k = by % len(paragraphs)
@@ -139,6 +141,7 @@ def rotate(paragraphs: Sequence[str], by: int) -> list[str]:
 
 
 def resolve_tokenizer_path(cli_path: str | None) -> Path:
+    """Return the tokenizer directory from the flag or env var, exiting if invalid."""
     raw = cli_path or os.environ.get("NINFER_TOKENIZER_PATH")
     if not raw:
         raise SystemExit(
@@ -151,6 +154,7 @@ def resolve_tokenizer_path(cli_path: str | None) -> Path:
 
 
 def load_tokenizer(tokenizer_path: Path) -> Any:
+    """Load the local HF fast tokenizer, exiting if transformers is not installed."""
     try:
         from transformers import AutoTokenizer
     except ImportError as exc:
@@ -166,10 +170,12 @@ def load_tokenizer(tokenizer_path: Path) -> Any:
 
 
 def sha256_text(text: str) -> str:
+    """Return the hex sha256 digest of the UTF-8 encoding of text."""
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def encode(tokenizer: Any, text: str) -> list[int]:
+    """Encode text to token ids without special tokens, exiting on any invalid id."""
     ids = tokenizer.encode(text, add_special_tokens=False)
     for value in ids:
         if not isinstance(value, int) or value < 0:
@@ -193,6 +199,7 @@ def bake_ids(tokenizer: Any, paragraphs: Sequence[str], tokens: int) -> list[int
 
 
 def load_source_paragraphs(source_files: Sequence[str]) -> tuple[list[str], list[dict[str, str]]]:
+    """Read each --source-text file as one paragraph and record its name and sha256."""
     paragraphs: list[str] = []
     provenance: list[dict[str, str]] = []
     for raw in source_files:
@@ -208,6 +215,7 @@ def load_source_paragraphs(source_files: Sequence[str]) -> tuple[list[str], list
 
 
 def format_ids(ids: Sequence[int], per_line: int = 32) -> str:
+    """Render ids as whitespace-separated decimals, per_line ids per output line."""
     lines = [
         " ".join(str(v) for v in ids[i : i + per_line])
         for i in range(0, len(ids), per_line)
@@ -216,6 +224,7 @@ def format_ids(ids: Sequence[int], per_line: int = 32) -> str:
 
 
 def parse_ids_text(text: str) -> list[int]:
+    """Parse whitespace-separated decimal ids, exiting on empty input or bad tokens."""
     tokens = text.split()
     if not tokens:
         raise SystemExit("committed .ids is empty")
@@ -230,6 +239,7 @@ def parse_ids_text(text: str) -> list[int]:
 def build_manifest(
     ids: Sequence[int], ids_text: str, tokens: int, source_provenance: list[dict[str, str]]
 ) -> dict[str, Any]:
+    """Build the corpus manifest describing tokenizer, counts, source, and ids hash."""
     return {
         "artifact_type": "ninfer_bench_corpus",
         "schema_version": 1,
@@ -253,6 +263,7 @@ def write_outputs(
     out_path: Path, manifest_path: Path, ids: Sequence[int], tokens: int,
     source_provenance: list[dict[str, str]]
 ) -> None:
+    """Write the formatted ids file and its JSON manifest to the output paths."""
     ids_text = format_ids(ids)
     manifest = build_manifest(ids, ids_text, tokens, source_provenance)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -299,6 +310,7 @@ def check_outputs(out_path: Path, manifest_path: Path) -> int:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    """Check the committed corpus, or bake and write a new one from the chosen source."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tokenizer-path", default=None)
     repo_root = Path(__file__).resolve().parents[2]

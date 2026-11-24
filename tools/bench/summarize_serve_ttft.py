@@ -16,6 +16,7 @@ from tools.bench.ttft.report import ReportError
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    """Summarize one TTFT campaign, printing coverage and report file locations."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("campaign_dir", type=Path)
     parser.add_argument(

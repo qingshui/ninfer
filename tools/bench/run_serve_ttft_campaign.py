@@ -87,10 +87,13 @@ CAMPAIGNS = {
 
 
 class CampaignError(RuntimeError):
+    """RuntimeError raised when a campaign setup, startup, or runner step fails."""
+
     pass
 
 
 def _write_json(path: Path, value: object) -> None:
+    """Write value as pretty-printed UTF-8 JSON to path, creating parent directories."""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(value, ensure_ascii=False, indent=2) + "\n",
@@ -99,10 +102,12 @@ def _write_json(path: Path, value: object) -> None:
 
 
 def _stamp() -> str:
+    """Return the current local time as a filename-friendly timestamp string."""
     return dt.datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
 
 
 def _tail(path: Path, limit: int = 3000) -> str:
+    """Return the last limit characters of a text file, or an empty string on read errors."""
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
@@ -111,6 +116,7 @@ def _tail(path: Path, limit: int = 3000) -> str:
 
 
 def _ensure_port_free() -> None:
+    """Raise CampaignError when something is already listening on the campaign port."""
     connection = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     connection.settimeout(0.2)
     try:
@@ -123,7 +129,10 @@ def _ensure_port_free() -> None:
 
 
 class RunningServe:
+    """Context manager that launches one fresh ninfer-serve process and waits for readiness."""
+
     def __init__(self, command: Sequence[str], log_path: Path, startup_timeout: float) -> None:
+        """Store the launch command, log path, and startup timeout for the serve process."""
         self.command = list(command)
         self.log_path = log_path
         self.startup_timeout = startup_timeout
@@ -131,6 +140,7 @@ class RunningServe:
         self._log: Any = None
 
     def __enter__(self) -> "RunningServe":
+        """Start serve in a new session with output logged, wait until ready, and return self."""
         _ensure_port_free()
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         self._log = self.log_path.open("wb")
@@ -149,9 +159,11 @@ class RunningServe:
             raise
 
     def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        """Stop the serve process when the with-block exits."""
         self.stop()
 
     def _wait_ready(self) -> None:
+        """Poll the health endpoint until serve is ready, raising CampaignError on exit or timeout."""
         if self.process is None:
             raise CampaignError("ninfer-serve was not started")
         started = time.monotonic()
@@ -198,6 +210,7 @@ class RunningServe:
             time.sleep(0.1)
 
     def stop(self) -> None:
+        """Terminate (or kill) the serve process and close its log file handle."""
         process = self.process
         if process is not None and process.poll() is None:
             process.terminate()
@@ -218,6 +231,7 @@ def _server_command(
     common_args: Sequence[str],
     profile_args: Sequence[str],
 ) -> list[str]:
+    """Build the ninfer-serve launch command with campaign host, port, and stats cadence."""
     return [
         str(serve),
         str(weights),
@@ -245,6 +259,7 @@ def _without_stats_interval(arguments: Sequence[str]) -> list[str]:
 
 
 def _load_profiles(path: Path | None) -> tuple[tuple[str, ...], dict[str, tuple[str, ...]]]:
+    """Return common and per-profile launch arguments from path, or the built-in defaults."""
     if path is None:
         return COMMON_ARGS, dict(PROFILE_ARGS)
 
@@ -259,6 +274,7 @@ def _load_profiles(path: Path | None) -> tuple[tuple[str, ...], dict[str, tuple[
         raise CampaignError("profile config profiles must be a nonempty name-to-argument-list map")
 
     def arguments(raw: Any, name: str) -> tuple[str, ...]:
+        """Validate that raw is a list of strings for name and return it as a tuple."""
         if not isinstance(raw, list) or not all(isinstance(arg, str) for arg in raw):
             raise CampaignError(f"profile config {name} must be a list of argument strings")
         return tuple(raw)
@@ -273,6 +289,7 @@ def _load_profiles(path: Path | None) -> tuple[tuple[str, ...], dict[str, tuple[
 
 
 def _option_value(arguments: Sequence[str], option: str) -> str | None:
+    """Return the last value given for option in the argument list, or None if absent."""
     result = None
     for index, argument in enumerate(arguments):
         if argument == option and index + 1 < len(arguments):
@@ -288,6 +305,7 @@ def _runner_command(
     request_timeout: float,
     request_log_jsonl: Path,
 ) -> list[str]:
+    """Build the TTFT runner command line for one case sample writing to raw_path."""
     return [
         sys.executable,
         str(RUNNER),
@@ -307,6 +325,7 @@ def _runner_command(
 
 
 def _run_client(command: Sequence[str], progress_path: Path) -> int:
+    """Run the TTFT runner, teeing its stderr to progress_path, and return its exit code."""
     progress_path.parent.mkdir(parents=True, exist_ok=True)
     with progress_path.open("w", encoding="utf-8") as progress:
         process = subprocess.Popen(
@@ -338,6 +357,7 @@ def _run_client(command: Sequence[str], progress_path: Path) -> int:
 
 
 def _read_run(path: Path) -> dict[str, Any]:
+    """Load a runner artifact JSON from path, raising CampaignError unless it is valid."""
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
@@ -348,6 +368,7 @@ def _read_run(path: Path) -> dict[str, Any]:
 
 
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
+    """Parse and validate the campaign CLI arguments, resolving file paths."""
     parser = argparse.ArgumentParser(
         description=__doc__,
         epilog=(
@@ -401,6 +422,11 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    """Plan and execute the TTFT campaign, writing per-run artifacts and summary outputs.
+
+    Each planned sample launches a fresh serve process, runs the TTFT runner against it,
+    and records failures; returns a non-zero status when any run fails or is interrupted.
+    """
     args = _parse_args(argv)
     for required in (args.serve, args.artifact, RUNNER):
         if not required.is_file():

@@ -16,7 +16,7 @@ DEFAULT_MANIFEST = REPO_ROOT / "bench" / "fixtures" / "ttft" / "manifest.json"
 
 
 class CorpusError(RuntimeError):
-    pass
+    """Raised when the TTFT corpus manifest or one of its fixture files is invalid."""
 
 
 def full_length_kv_tokens(prompt_tokens: int, max_output_tokens: int) -> int:
@@ -28,6 +28,7 @@ def full_length_kv_tokens(prompt_tokens: int, max_output_tokens: int) -> int:
 
 
 def _sha256(path: Path) -> str:
+    """Compute the hex SHA-256 digest of a file, streaming it in 1 MiB blocks."""
     digest = hashlib.sha256()
     with path.open("rb") as stream:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
@@ -36,7 +37,10 @@ def _sha256(path: Path) -> str:
 
 
 class Corpus:
+    """Reader for the frozen Serve TTFT corpus described by its manifest."""
+
     def __init__(self, manifest_path: Path = DEFAULT_MANIFEST) -> None:
+        """Load and validate the TTFT corpus manifest at manifest_path."""
         self.manifest_path = manifest_path.resolve()
         try:
             self.manifest = json.loads(self.manifest_path.read_text(encoding="utf-8"))
@@ -50,6 +54,7 @@ class Corpus:
         self.validate()
 
     def _path(self, record_or_path: dict[str, Any] | str) -> Path:
+        """Resolve a manifest record or relative path to a file inside the repository."""
         relative = record_or_path["path"] if isinstance(record_or_path, dict) else record_or_path
         if not isinstance(relative, str) or not relative:
             raise CorpusError("corpus path is missing")
@@ -61,6 +66,7 @@ class Corpus:
         return path
 
     def _records(self) -> Iterable[dict[str, Any]]:
+        """Yield every shape, shared, and media record stored in the manifest."""
         yield from self.manifest["shapes"].values()
         yield from self.manifest["shared"].values()
         media = self.manifest["media"]
@@ -71,6 +77,7 @@ class Corpus:
                 yield value
 
     def validate(self) -> None:
+        """Verify all fixture files, hashes, and frozen shape and pressure invariants."""
         for record in self._records():
             path = self._path(record)
             if not path.is_file():
@@ -208,24 +215,28 @@ class Corpus:
 
     @staticmethod
     def _read_json(path: Path) -> Any:
+        """Parse a corpus JSON file, raising CorpusError on read or decode failures."""
         try:
             return json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as error:
             raise CorpusError(f"cannot read corpus JSON {path}: {error}") from error
 
     def shape(self, name: str) -> dict[str, Any]:
+        """Return a deep copy of the named shape record from the manifest."""
         try:
             return copy.deepcopy(self.manifest["shapes"][name])
         except KeyError as error:
             raise CorpusError(f"unknown TTFT shape: {name}") from error
 
     def shape_messages(self, name: str) -> list[dict[str, Any]]:
+        """Load and return the messages array stored for the named shape."""
         value = self._read_json(self._path(self.shape(name)))
         if not isinstance(value, list) or not value:
             raise CorpusError(f"shape {name} is not a non-empty messages array")
         return value
 
     def shared_system(self, name: str) -> str:
+        """Return the text of the named shared system fixture."""
         try:
             record = self.manifest["shared"][name]
         except KeyError as error:
@@ -233,6 +244,7 @@ class Corpus:
         return self._path(record).read_text(encoding="utf-8")
 
     def state_messages(self, label: str, turn: int = 0) -> list[dict[str, Any]]:
+        """Return a state working-set conversation extended to the given probe turn."""
         facts = self.shape(f"state-2k-{label}")
         if not 0 <= turn < len(facts["probe_prompt_tokens"]):
             raise CorpusError("state working-set turn exceeds the frozen sequence")
@@ -241,6 +253,7 @@ class Corpus:
         return messages
 
     def client_tools(self, *, changed_first: bool = False) -> list[dict[str, Any]]:
+        """Return the 32 frozen client tools, optionally changing the first description."""
         record = self.manifest["shared"]["client-tools-32"]
         tools = self._read_json(self._path(record))
         if not isinstance(tools, list) or len(tools) != 32:
@@ -251,6 +264,7 @@ class Corpus:
 
     @staticmethod
     def _media_type(path: Path) -> str:
+        """Map a fixture media file extension to its MIME type."""
         suffix = path.suffix.lower()
         if suffix == ".png":
             return "image/png"
@@ -261,6 +275,7 @@ class Corpus:
         raise CorpusError(f"unsupported fixture media extension: {path.suffix}")
 
     def data_url(self, relative: str) -> str:
+        """Return the fixture file as a base64 data URL, caching the result."""
         cached = self._data_urls.get(relative)
         if cached is not None:
             return cached
@@ -274,7 +289,10 @@ class Corpus:
         return value
 
     def _inline_messages(self, messages: list[dict[str, Any]], media_root: Path) -> list[dict[str, Any]]:
+        """Return a copy of messages with image and video references inlined as data URLs."""
+
         def inline_source(source: str) -> str:
+            """Convert one media source to a data URL unless it is already absolute."""
             if source.startswith(("data:", "http://", "https://")):
                 return source
             path = (media_root / source.removeprefix("file://")).resolve()
@@ -314,6 +332,7 @@ class Corpus:
         return result
 
     def media_messages(self, name: str) -> list[dict[str, Any]]:
+        """Load the named media fixture and return its messages with media inlined as data URLs."""
         try:
             record = self.manifest["media"][name]
         except KeyError as error:
@@ -324,6 +343,7 @@ class Corpus:
         return self._inline_messages(messages, self._path(record).parent)
 
     def load_image_messages(self, index: int, *, prompt: str = "Answer with the image number.") -> list[dict[str, Any]]:
+        """Build a single-image user message from the indexed generated load image."""
         images = self.manifest["media"]["load-images"]
         if index < 0 or index >= len(images):
             raise CorpusError(f"load image index is outside [0,{len(images)})")

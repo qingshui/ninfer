@@ -28,6 +28,7 @@ class Artifact:
     """Own file handles; opening the entry does not open unused continuation files."""
 
     def __init__(self, path: str | Path) -> None:
+        """Open the entry file, validate its header and directory, and index its objects."""
         self.path = Path(path)
         self._fds: dict[int, int] = {}
         self._validated: set[str] = set()
@@ -72,14 +73,17 @@ class Artifact:
 
     @classmethod
     def open(cls, path: str | Path) -> Artifact:
+        """Open the artifact entry at path and return the initialized Artifact."""
         return cls(path)
 
     @property
     def objects(self) -> tuple[ArtifactObject, ...]:
+        """Return every object recorded in the artifact directory."""
         return self.directory.objects
 
     @property
     def payload_bytes(self) -> int:
+        """Return the total logical payload bytes declared by the directory."""
         return self.directory.payload_bytes
 
     @property
@@ -92,6 +96,7 @@ class Artifact:
         )
 
     def _file(self, index: int) -> int:
+        """Return the fd of a continuation file, opening and validating it on first use."""
         if 0 not in self._fds:
             raise ArtifactError("artifact is closed")
         if index in self._fds:
@@ -155,9 +160,11 @@ class Artifact:
             offset += count
 
     def read_range(self, offset: int, length: int) -> bytes:
+        """Read a logical payload range and return it as a single bytes value."""
         return b"".join(self.iter_range(offset, length))
 
     def object(self, object_id: str) -> ArtifactObject:
+        """Return the object with object_id, validating its encoding on first lookup."""
         try:
             obj = self.by_id[object_id]
         except KeyError as error:
@@ -170,20 +177,25 @@ class Artifact:
     def iter_object(
         self, object_id: str, *, chunk_bytes: int = READ_CHUNK_BYTES
     ) -> Iterator[bytes]:
+        """Yield an object's payload bytes in bounded chunks."""
         obj = self.object(object_id)
         yield from self.iter_range(obj.offset, obj.bytes, chunk_bytes=chunk_bytes)
 
     def read_object(self, object_id: str) -> bytes:
+        """Read an object's full payload and return it as one bytes value."""
         return b"".join(self.iter_object(object_id))
 
     def close(self) -> None:
+        """Drop OS caches and close every open file descriptor."""
         for fd in self._fds.values():
             discard_cached_pages(fd)
             os.close(fd)
         self._fds.clear()
 
     def __enter__(self) -> Artifact:
+        """Return self so the artifact can be used as a context manager."""
         return self
 
     def __exit__(self, exc_type, exc_value, traceback) -> None:
+        """Close the artifact when the with-block exits."""
         self.close()

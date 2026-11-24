@@ -17,10 +17,12 @@ TEXT_RESOURCES = (
 def token_domain(
     tokenizer: dict, config: dict, vocab_size: int
 ) -> tuple[int, tuple[int, ...]]:
+    """Validate the merged token vocabulary and return its size and special-token ids."""
     ids: dict[int, str] = {}
     special: dict[int, bool] = {}
 
     def add(index: object, content: object) -> None:
+        """Record one token id and content pair, rejecting conflicting duplicates."""
         if (
             type(index) is not int
             or not 0 <= index < vocab_size
@@ -34,6 +36,7 @@ def token_domain(
         ids[index] = content
 
     def add_special(index: int, token: dict) -> None:
+        """Record one token's special flag, rejecting conflicting duplicates."""
         flag = token.get("special", False)
         if type(flag) is not bool:
             raise ValueError(f"token {index}: special must be boolean")
@@ -68,6 +71,7 @@ def load_resources(
     roles: Mapping[str, Sequence[str]],
     overrides: Mapping[str, str | Path] | None = None,
 ) -> tuple[dict[str, dict[str, str]], dict[str, bytes], int, tuple[int, ...]]:
+    """Read every selected resource file and return references, payloads, and the token domain."""
     overrides = {} if overrides is None else dict(overrides)
     allowed = {role for names in roles.values() for role in names}
     if overrides.keys() - allowed:

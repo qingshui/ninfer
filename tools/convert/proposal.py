@@ -18,6 +18,7 @@ DEFAULT_RANKING = (
 
 
 def select_shortlist(total: np.ndarray, n: int, force_include=()) -> np.ndarray:
+    """Return the n highest-count token ids, force-including given ids, sorted by descending count."""
     counts = np.asarray(total, dtype=np.int64)
     if counts.ndim != 1 or not 0 < n <= counts.size:
         raise ValueError("shortlist size is outside the frequency domain")
@@ -109,6 +110,7 @@ def add_proposal(
 def add_official_proposal(
     recipe: Recipe, *, ranking=DEFAULT_RANKING, rows: int | None = 131072
 ) -> None:
+    """Configure the official proposal head per the model's declared proposal domain."""
     if recipe.model.proposal_domain == "full":
         rows = None
     elif recipe.model.proposal_domain != "indexed":

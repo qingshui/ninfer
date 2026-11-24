@@ -1,3 +1,5 @@
+"""Suite execution coordination: scheduling, state persistence, and run artifacts."""
+
 from __future__ import annotations
 
 import json
@@ -26,11 +28,15 @@ from .secrets import ResolvedTarget, resolve_target
 
 
 def _utc_compact() -> str:
+    """Return the current UTC time as a compact timestamp like 20260101T120000Z."""
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
 class TargetReservations:
+    """Thread-safe accounting of per-target concurrency slots shared across jobs."""
+
     def __init__(self, capacities: dict[str, int]):
+        """Initialize one availability pool per target name from capacities."""
         self._capacities = capacities
         self._available = dict(capacities)
         self._condition = threading.Condition()
@@ -38,6 +44,11 @@ class TargetReservations:
     def acquire(
         self, target: str | None, requested: int, cancel: threading.Event
     ) -> int:
+        """Block until target has capacity, then deduct and return up to requested slots.
+
+        Targets given as None bypass reservation and receive the full requested amount.
+        Raises InterruptedError if cancel is set while waiting.
+        """
         if target is None:
             return requested
         with self._condition:
@@ -52,6 +63,7 @@ class TargetReservations:
             return grant
 
     def release(self, target: str | None, granted: int) -> None:
+        """Return granted slots to target and wake waiters; raise if capacity is exceeded."""
         if target is None:
             return
         with self._condition:
@@ -62,6 +74,8 @@ class TargetReservations:
 
 
 class RunState:
+    """The lock-guarded run state persisted to state.json inside the run directory."""
+
     def __init__(
         self,
         path: Path,
@@ -69,6 +83,7 @@ class RunState:
         jobs: tuple[JobConfig, ...],
         existing: dict | None = None,
     ):
+        """Initialize from existing state or a fresh running state for jobs, then write it."""
         self.path = path
         self._lock = threading.Lock()
         self.data = existing or {
@@ -80,24 +95,29 @@ class RunState:
         self.write()
 
     def update_job(self, job_id: str, **values: Any) -> None:
+        """Merge values into a job's state entry and persist atomically."""
         with self._lock:
             self.data["jobs"].setdefault(job_id, {}).update(values)
             self._write_unlocked()
 
     def update_run(self, **values: Any) -> None:
+        """Merge values into run-level state and persist atomically."""
         with self._lock:
             self.data.update(values)
             self._write_unlocked()
 
     def write(self) -> None:
+        """Persist the current state to disk while holding the lock."""
         with self._lock:
             self._write_unlocked()
 
     def _write_unlocked(self) -> None:
+        """Atomically write state to disk; the caller must already hold the lock."""
         _atomic_json(self.path, self.data)
 
 
 def validate_suite(config: AppConfig, suite_name: str, for_run: bool = False) -> None:
+    """Validate every job in the suite, resolving targets only when for_run is true."""
     suite = config.suite(suite_name)
     for job in suite.jobs:
         target_cfg = config.target(job.target)
@@ -122,6 +142,7 @@ def validate_suite(config: AppConfig, suite_name: str, for_run: bool = False) ->
 def plan_suite(
     config: AppConfig, suite_name: str, for_run: bool = False
 ) -> list[dict[str, Any]]:
+    """Return a plan dict per job in the suite after validating it."""
     validate_suite(config, suite_name, for_run=for_run)
     plans = []
     for job in config.suite(suite_name).jobs:
@@ -154,12 +175,15 @@ def plan_suite(
 
 
 class Coordinator:
+    """Executes one suite run: run directory setup, job scheduling, state, and events."""
+
     def __init__(
         self,
         config: AppConfig,
         suite_name: str,
         cancel_event: threading.Event | None = None,
     ):
+        """Store the parsed config, the named suite, and a cancel event created if omitted."""
         self.config = config
         self.suite = config.suite(suite_name)
         self.suite_name = suite_name
@@ -170,6 +194,12 @@ class Coordinator:
         resume_dir: Path | None = None,
         on_started: Callable[[Path], None] | None = None,
     ) -> Path:
+        """Run the suite (resuming resume_dir when given) and return the run directory.
+
+        Creates or resumes the run directory, then executes still-pending jobs in a
+        thread pool under target reservations, persisting state, summaries, and events.
+        Calls on_started(run_dir) once the run directory is ready, before jobs execute.
+        """
         validate_suite(self.config, self.suite_name, for_run=True)
         fingerprint = self.config.fingerprint(self.suite_name)
         if resume_dir is None:
@@ -347,6 +377,11 @@ class Coordinator:
         events: EventSink,
         resume: bool,
     ) -> DatasetResult:
+        """Run one job through its backend under reserved capacity and return its result.
+
+        Plans, acquires target slots, emits job lifecycle events, and persists the
+        job result; cancelled or failing jobs return a failed DatasetResult.
+        """
         backend = get_backend(job.backend)
         plan = backend.plan(job, target)
         target_cfg = target.config if target else None
@@ -468,6 +503,7 @@ class Coordinator:
         planned: int | None = None,
         duration: float = 0.0,
     ) -> DatasetResult:
+        """Build a DatasetResult that marks the job cancelled or failed with the given error."""
         return DatasetResult(
             job_id=job.id,
             backend=job.backend,
@@ -481,6 +517,7 @@ class Coordinator:
         )
 
     def _make_manifest(self, run_id: str, fingerprint: str) -> dict[str, Any]:
+        """Build the run manifest with suite identity, environment, and target metadata."""
         return {
             "schema_version": 1,
             "run_id": run_id,
@@ -512,11 +549,13 @@ class Coordinator:
 
 
 def load_resume_config(run_dir: Path) -> tuple[AppConfig, str]:
+    """Load the effective config and suite name recorded in a run directory's manifest."""
     manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
     return load_config(run_dir / "effective-config.yaml"), manifest["suite"]
 
 
 def _package_version(name: str) -> str | None:
+    """Return the installed version of a package, or None when it is not installed."""
     try:
         return version(name)
     except PackageNotFoundError:
@@ -524,6 +563,7 @@ def _package_version(name: str) -> str | None:
 
 
 def _git_identity() -> dict[str, Any]:
+    """Return the repository commit and dirty flag from git, or nulls if git is unavailable."""
     try:
         root = Path(__file__).resolve().parents[2]
         commit = subprocess.run(
@@ -548,6 +588,7 @@ def _git_identity() -> dict[str, Any]:
 
 
 def _configured_backend_secrets(jobs: tuple[JobConfig, ...]) -> list[str]:
+    """Collect secret values from environment variables named by *_env backend args."""
     values: list[str] = []
     for job in jobs:
         for key, env_name in job.backend_args.items():

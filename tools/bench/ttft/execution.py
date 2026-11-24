@@ -19,6 +19,7 @@ from tools.streaming_http.client import HttpResponseHead
 
 
 class CaseExecutionError(RuntimeError):
+    """Raised when case execution invariants break, such as request timeouts or a handle started twice."""
     pass
 
 
@@ -27,11 +28,13 @@ ProgressCallback = Callable[[str, int, dict[str, Any]], None]
 
 @dataclass(frozen=True)
 class FailedCondition:
+    """A failed case condition with its source expression, observed detail, and failure dimension."""
     expression: str
     detail: str
     dimension: str = "construction"
 
     def as_json(self) -> dict[str, str]:
+        """Return the failed condition as a JSON-serializable dict."""
         return {
             "expression": self.expression,
             "detail": self.detail,
@@ -80,6 +83,7 @@ def _event_metadata(event: ProtocolEvent) -> dict[str, Any]:
 
 
 def _usage_counts(protocol: str, usage: dict[str, Any]) -> dict[str, int]:
+    """Normalize protocol usage names to input_tokens/output_tokens, keeping only non-negative integer counts."""
     names = (
         ("prompt_tokens", "completion_tokens")
         if protocol == "openai_chat"
@@ -93,6 +97,7 @@ def _usage_counts(protocol: str, usage: dict[str, Any]) -> dict[str, int]:
 
 
 class RequestHandle:
+    """A single in-flight request with wire timestamps, streamed events, usage totals, and wait helpers."""
     def __init__(
         self,
         role: str,
@@ -100,6 +105,7 @@ class RequestHandle:
         prepared: PreparedServeExchange,
         on_progress: ProgressCallback | None,
     ) -> None:
+        """Initialize the handle's role, serialized order, prepared exchange, and progress callback."""
         self.role = role
         self.order = order
         self.protocol = prepared.request.protocol
@@ -139,6 +145,7 @@ class RequestHandle:
         occurred_ns: int | None = None,
         **fields: Any,
     ) -> None:
+        """Invoke the progress callback for a stage with a timestamp and extra fields."""
         if self._on_progress is None:
             return
         self._on_progress(
@@ -149,24 +156,29 @@ class RequestHandle:
 
     @property
     def is_done(self) -> bool:
+        """Whether the worker thread has terminated, successfully or not."""
         return self._done.is_set()
 
     @property
     def output_text(self) -> str:
+        """Return the model output text accumulated from streamed events so far."""
         with self._lock:
             return "".join(self._output_parts)
 
     @property
     def result(self) -> ServeExchangeResult | None:
+        """Return the completed exchange result, or None while the worker is still running."""
         with self._lock:
             return self._result
 
     def _on_sent(self, timestamp: int) -> None:
+        """Record the transport timestamp for the request leaving the client."""
         with self._lock:
             self.sent_ns = timestamp
         self._sent.set()
 
     def _on_body_sent(self, timestamp: int) -> None:
+        """Record the body-sent timestamp and report the sent and body_sent progress stages."""
         with self._lock:
             self.body_sent_ns = timestamp
             sent_ns = self.sent_ns
@@ -184,10 +196,12 @@ class RequestHandle:
         )
 
     def _on_headers(self, head: HttpResponseHead) -> None:
+        """Capture the server-assigned request id from the response headers."""
         with self._lock:
             self._wire_request_id = head.headers.get("x-request-id") or head.headers.get("request-id")
 
     def _on_event(self, event: ProtocolEvent) -> None:
+        """Fold one protocol event into timestamps, output text, usage, and the trace, then report first milestones."""
         with self._lock:
             is_output = event.kind == "model_output" and bool(event.output)
             first_accepted = event.kind == "accepted" and self.accepted_ns is None
@@ -252,6 +266,7 @@ class RequestHandle:
             )
 
     def _run(self, gate: threading.Event | None) -> None:
+        """Execute the prepared exchange in the worker thread, optionally gated, and publish the finished record."""
         if gate is not None:
             self._progress("request.gate_wait")
             gate.wait()
@@ -306,6 +321,7 @@ class RequestHandle:
             )
 
     def start(self, gate: threading.Event | None = None) -> None:
+        """Launch the worker thread, optionally synchronized on a release gate."""
         with self._lock:
             if self._thread is not None:
                 raise CaseExecutionError(f"request {self.role} was started twice")
@@ -318,6 +334,7 @@ class RequestHandle:
             self._thread.start()
 
     def cancel(self, *, only_if_unrequested: bool = False) -> int | None:
+        """Cancel the exchange and return the cancel timestamp, or None when skipping an already-cancelled request."""
         with self._lock:
             if only_if_unrequested and (
                 self.cancel_ns is not None or self._prepared.cancel_ns is not None
@@ -351,6 +368,7 @@ class RequestHandle:
         return timestamp
 
     def _wait_for(self, event: threading.Event, field: str, timeout: float) -> int:
+        """Wait for a timestamped event and return its value, raising CaseExecutionError on timeout or early end."""
         target = field.removesuffix("_ns")
         report_wait = target not in {"sent", "body_sent"}
         wait_started_ns = time.perf_counter_ns()
@@ -390,21 +408,27 @@ class RequestHandle:
         return value
 
     def wait_sent(self, timeout: float) -> int:
+        """Wait until the request has been sent and return the sent timestamp."""
         return self._wait_for(self._sent, "sent_ns", timeout)
 
     def wait_body_sent(self, timeout: float) -> int:
+        """Wait until the full request body has been sent and return its timestamp."""
         return self._wait_for(self._body_sent, "body_sent_ns", timeout)
 
     def wait_accepted(self, timeout: float) -> int:
+        """Wait for the accepted event and return its timestamp."""
         return self._wait_for(self._accepted, "accepted_ns", timeout)
 
     def wait_first_output(self, timeout: float) -> int:
+        """Wait for the first model output and return its timestamp."""
         return self._wait_for(self._first_output, "first_output_ns", timeout)
 
     def wait_completed(self, timeout: float) -> int:
+        """Wait for the terminal event and return the completed timestamp."""
         return self._wait_for(self._completed, "completed_ns", timeout)
 
     def wait_done(self, timeout: float) -> None:
+        """Wait for the worker thread to terminate and then join it."""
         wait_started_ns = time.perf_counter_ns()
         if not self._done.is_set():
             self._progress("request.wait", target="worker_done", timeout_s=timeout)
@@ -426,6 +450,7 @@ class RequestHandle:
         )
 
     def outcome(self) -> str:
+        """Classify the request outcome from transport, protocol, and stream event state."""
         with self._lock:
             result = self._result
             thread_error = self._thread_error
@@ -458,6 +483,7 @@ class RequestHandle:
         return "success"
 
     def as_record(self, *, freeze_input: bool = False) -> dict[str, Any]:
+        """Return the full benchmark record for this request, optionally freezing the exact sent payload."""
         with self._lock:
             result = self._result
             event_trace = list(self._event_trace)
@@ -507,7 +533,9 @@ class RequestHandle:
             "output_gap_ns": output_gaps,
             "max_output_gap_ns": max(output_gaps) if output_gaps else None,
             "terminal_tail_ns": terminal - last_output if terminal is not None and last_output is not None else None,
-            "unterminated_tail_ns": ended - last_output if terminal is None and ended is not None and last_output is not None else None,
+            "unterminated_tail_ns": ended - last_output
+                if terminal is None and ended is not None and last_output is not None
+                else None,
             "outcome": self.outcome(),
             "http_status": http.status if http is not None else None,
             "http_reason": http.reason if http is not None else None,
@@ -525,6 +553,7 @@ class RequestHandle:
 
 
 class CaseContext:
+    """Per-case shared state: the client, request handles, condition failures, notes, and progress."""
     def __init__(
         self,
         client: NInferServeClient,
@@ -532,6 +561,7 @@ class CaseContext:
         timeout_seconds: float,
         on_progress: ProgressCallback | None = None,
     ) -> None:
+        """Initialize the case with its client, model name, timeout, and optional progress callback."""
         self.client = client
         self.model = model
         self.timeout = timeout_seconds
@@ -542,12 +572,14 @@ class CaseContext:
         self.notes: dict[str, Any] = {}
 
     def progress(self, stage: str, **fields: Any) -> None:
+        """Emit a case-level progress event with the current timestamp."""
         if self._on_progress is not None:
             self._on_progress(stage, time.perf_counter_ns(), fields)
 
     def prepare(self, role: str, request: ProtocolRequest) -> RequestHandle:
         # A case may maintain background streaming loops while the main thread submits the
         # workload under test. Serialize handle creation so roles retain one exact request order.
+        """Prepare a request under a role with the next serialized order and register the returned handle."""
         with self._handles_lock:
             order = len(self.handles)
             self.progress(
@@ -580,11 +612,13 @@ class CaseContext:
         return handle
 
     def start(self, role: str, request: ProtocolRequest) -> RequestHandle:
+        """Prepare a request and immediately start its worker thread."""
         handle = self.prepare(role, request)
         handle.start()
         return handle
 
     def barrier(self, requests: Iterable[tuple[str, ProtocolRequest]]) -> list[RequestHandle]:
+        """Start all requests behind one gate, release them together, and require the send spread within 5 ms."""
         request_list = list(requests)
         self.progress(
             "barrier.prepare",
@@ -615,11 +649,13 @@ class CaseContext:
     def require(
         self, condition: bool, expression: str, detail: str, *, dimension: str = "construction"
     ) -> None:
+        """Record a FailedCondition for the expression when it does not hold."""
         if not condition:
             self.failures.append(FailedCondition(expression, detail, dimension))
             self.progress("case.condition_failed", expression=expression, detail=detail, dimension=dimension)
 
     def require_success(self, handle: RequestHandle, *, prerequisite: bool = True) -> None:
+        """Wait for a handle to finish and require success, raising for failed prerequisites."""
         handle.wait_completed(self.timeout)
         handle.wait_done(self.timeout)
         outcome = handle.outcome()
@@ -633,6 +669,7 @@ class CaseContext:
                 raise CaseExecutionError(f"prerequisite {handle.role} failed: {outcome}")
 
     def wait_all(self, handles: Iterable[RequestHandle] | None = None) -> None:
+        """Wait for every handle, or the given subset, to terminate."""
         if handles is not None:
             selected = list(handles)
         else:
@@ -644,6 +681,7 @@ class CaseContext:
         self.progress("case.wait_all_done", roles=[handle.role for handle in selected])
 
     def cancel_live(self) -> None:
+        """Cancel and join every still-running handle, recording cleanup failures as conditions."""
         with self._handles_lock:
             handles = list(self.handles)
         live = [handle.role for handle in handles if not handle.is_done]
@@ -667,6 +705,7 @@ class CaseContext:
                     )
 
     def records(self) -> list[dict[str, Any]]:
+        """Return the frozen case records for all handles ordered by request order."""
         with self._handles_lock:
             handles = list(self.handles)
         return [handle.as_record(freeze_input=True)

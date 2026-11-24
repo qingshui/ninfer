@@ -16,6 +16,7 @@ import matplotlib.pyplot as plt
 
 
 def table(headers, rows):
+    """Render one markdown table from the given headers and rows."""
     return "\n".join(
         [
             "| " + " | ".join(headers) + " |",
@@ -26,6 +27,7 @@ def table(headers, rows):
 
 
 def report_text(reports, summary, output):
+    """Assemble the markdown report from the measured points and write it to output/report.md."""
     lines = [
         "# Serve performance report",
         "",
@@ -119,7 +121,8 @@ def report_text(reports, summary, output):
                 "Repeated suffix flags (retained in the measurements):",
                 "",
                 *(
-                    f"- {row['fixture']}, seed {row['seed']}: a {row['repeated_suffix_characters']}-character suffix repeated at least four times."
+                    f"- {row['fixture']}, seed {row['seed']}: "
+                    f"a {row['repeated_suffix_characters']}-character suffix repeated at least four times."
                     for row in point["repetitive_suffix_requests"]
                 ),
                 "",
@@ -131,6 +134,7 @@ def report_text(reports, summary, output):
 
 
 def main() -> None:
+    """Plot every measured point group and write the markdown report."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("summary", type=Path)
     parser.add_argument("--output", type=Path, required=True)
@@ -149,6 +153,7 @@ def main() -> None:
         title = " / ".join(key)
 
         def save(fig, name):
+            """Title the figure, grid its axes, and save it as SVG and PNG."""
             fig.suptitle(title)
             for axis in fig.axes:
                 axis.grid(axis="y", alpha=0.2)

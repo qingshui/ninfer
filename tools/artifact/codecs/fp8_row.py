@@ -17,12 +17,14 @@ from .direct import decode_direct, encode_direct
 
 
 def _exact_bf16_vector(tensor: torch.Tensor, length: int, label: str) -> torch.Tensor:
+    """Return tensor as a contiguous CPU BF16 vector of the given length."""
     if tensor.dtype != torch.bfloat16 or tuple(tensor.shape) != (length,):
         raise TypeError(f"{label} must be BF16 with shape ({length},)")
     return tensor.detach().contiguous().cpu()
 
 
 def validate_fp8_row_words(codes: torch.Tensor, scales: torch.Tensor) -> None:
+    """Validate finite E4M3FN codes against nonnegative finite BF16 row scales."""
     if bool(((codes & 0x7F) == 0x7F).any()):
         raise ValueError("row-scaled FP8 codes must be finite E4M3FN words")
     scale_words = scales.view(torch.int16).to(torch.int32) & 0xFFFF
@@ -98,12 +100,14 @@ def dequantize_fp8_row_scaled(
 
 
 def _exact_fp32_vector(tensor: torch.Tensor, length: int, label: str) -> torch.Tensor:
+    """Return tensor as a contiguous CPU FP32 vector of the given length."""
     if tensor.dtype != torch.float32 or tuple(tensor.shape) != (length,):
         raise TypeError(f"{label} must be FP32 with shape ({length},)")
     return tensor.detach().contiguous().cpu()
 
 
 def validate_fp8_row_fp32_words(codes: torch.Tensor, scales: torch.Tensor) -> None:
+    """Validate finite E4M3FN codes against nonnegative finite FP32 row scales."""
     if bool(((codes & 0x7F) == 0x7F).any()):
         raise ValueError("row-scaled FP8 codes must be finite E4M3FN words")
     if scales.dtype != torch.float32:

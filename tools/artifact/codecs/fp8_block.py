@@ -18,6 +18,7 @@ from .direct import decode_direct, encode_direct
 
 
 def validate_fp8_block_words(codes: torch.Tensor, scales: torch.Tensor) -> None:
+    """Reject non-finite codes, wrong scale dtypes, negative scales, and nonzero codes in zero-scale blocks."""
     if bool(((codes & 0x7F) == 0x7F).any()):
         raise ValueError("block-scaled FP8 codes must be finite E4M3FN words")
     if scales.dtype not in (torch.bfloat16, torch.float32):
@@ -39,6 +40,7 @@ def encode_fp8_block_scaled(
     shape: Sequence[int],
     format: str = "fp8_e4m3fn_block128x128_bf16",
 ) -> bytes:
+    """Pack validated codes and block scales into the format's code and scale planes as payload bytes."""
     geometry = fp8_block_geometry(format, shape)
     spec = get_format(format)
     assert isinstance(spec, Fp8BlockFormat)
@@ -60,6 +62,7 @@ def encode_fp8_block_scaled(
 def decode_fp8_block_scaled_words(
     payload: Payload, shape: Sequence[int], format: str = "fp8_e4m3fn_block128x128_bf16"
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Decode payload bytes back into validated FP8 codes and their block scales for the shape."""
     geometry = fp8_block_geometry(format, shape)
     spec = get_format(format)
     assert isinstance(spec, Fp8BlockFormat)
@@ -82,6 +85,7 @@ def dequantize_fp8_block_scaled(
     dtype: torch.dtype = torch.float32,
     format: str = "fp8_e4m3fn_block128x128_bf16",
 ) -> torch.Tensor:
+    """Decode the payload and multiply FP8 codes by their up-expanded block scales, returning dtype values."""
     codes, scales = decode_fp8_block_scaled_words(payload, shape, format)
     multipliers = scales.double().repeat_interleave(128, -2).repeat_interleave(128, -1)
     return (codes.view(torch.float8_e4m3fn).double() * multipliers).to(dtype)

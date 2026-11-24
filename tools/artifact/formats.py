@@ -54,6 +54,7 @@ class Fp8RowFormat:
 
     @property
     def scale_bytes(self) -> int:
+        """Width of one stored row multiplier in bytes."""
         return 2 if self.scale_dtype == "bf16" else 4
 
 
@@ -68,6 +69,7 @@ class Fp8BlockFormat:
 
     @property
     def scale_bytes(self) -> int:
+        """Width of one stored block multiplier in bytes."""
         return 2 if self.scale_format == "bf16" else 4
 
 

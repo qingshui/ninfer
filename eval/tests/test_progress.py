@@ -1,3 +1,5 @@
+"""Tests for non-TTY progress rendering and secret redaction in event artifacts."""
+
 import io
 import logging
 import tempfile
@@ -9,12 +11,17 @@ from ninfer_eval.progress import ProgressRenderer
 
 
 class NonTTY(io.StringIO):
+    """A StringIO that reports itself as a non-TTY stream."""
     def isatty(self):
+        """Return False so renderers take the non-TTY path."""
         return False
 
 
 class ProgressTest(unittest.TestCase):
+    """Lifecycle rendering and secret redaction tests for eval progress reporting."""
+
     def test_non_tty_prints_lifecycle_and_does_not_invent_total(self):
+        """Assert non-TTY output shows unknown totals and never an invented percentage."""
         stream = NonTTY()
         renderer = ProgressRenderer(enabled=True, heartbeat_seconds=60, stream=stream)
         renderer.handle(
@@ -39,6 +46,7 @@ class ProgressTest(unittest.TestCase):
         self.assertNotIn("%", output)
 
     def test_event_artifacts_redact_known_secrets(self):
+        """Check emitted event files and logs redact configured secret values."""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             logger = logging.getLogger(f"redaction-{id(self)}")

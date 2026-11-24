@@ -1,3 +1,5 @@
+"""Command-line entry point for running repository-local model capability evaluations."""
+
 from __future__ import annotations
 
 import argparse
@@ -24,6 +26,7 @@ EXIT_CANCELLED = 6
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Build the ninfer-eval argument parser with its subcommands."""
     parser = argparse.ArgumentParser(
         prog="ninfer-eval",
         description="Run repository-local model capability evaluations",
@@ -65,6 +68,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Dispatch the parsed subcommand and map failures to exit codes."""
     args = build_parser().parse_args(argv)
     console = Console()
     try:
@@ -118,10 +122,12 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _run(config, suite: str, console: Console, resume_dir: Path | None = None) -> int:
+    """Run one suite with graceful Ctrl-C handling and return its exit code."""
     cancel = threading.Event()
     old_handler = signal.getsignal(signal.SIGINT)
 
     def request_cancel(signum, frame):
+        """Set the cancel event on the first Ctrl-C and raise KeyboardInterrupt on the next."""
         del signum, frame
         if cancel.is_set():
             raise KeyboardInterrupt
@@ -145,6 +151,7 @@ def _run(config, suite: str, console: Console, resume_dir: Path | None = None) -
 
 
 def _show_plan(plans: list[dict], console: Console) -> None:
+    """Render evaluation plans as a rich table with per-job warnings."""
     table = Table(title="Evaluation plan")
     for column in (
         "Job",
@@ -175,16 +182,19 @@ def _show_plan(plans: list[dict], console: Console) -> None:
 
 
 def _print_stderr(message: str) -> None:
+    """Print message to stderr through a rich console."""
     Console(stderr=True).print(message)
 
 
 def _show_json(path: Path, console: Console) -> int:
+    """Pretty-print a JSON file and return its status exit code."""
     payload = json.loads(path.read_text(encoding="utf-8"))
     console.print_json(data=payload)
     return _status_exit(payload.get("status"))
 
 
 def _status_exit(status: str | None) -> int:
+    """Map a run status string to its process exit code."""
     return {
         "completed": EXIT_OK,
         "partial": EXIT_PARTIAL,

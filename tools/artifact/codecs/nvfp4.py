@@ -68,6 +68,11 @@ def unswizzle_nvfp4_scales(
 def matrix_scale_words(
     value: torch.Tensor | bytes | bytearray | memoryview, count: int
 ) -> bytes:
+    """Return little-endian FP32 bytes for count matrix scalars, validating every word.
+
+    Accepts a float32 tensor with exactly count elements or raw bytes of 4*count;
+    each word must be a finite positive FP32 value.
+    """
     if isinstance(value, torch.Tensor):
         if value.dtype != torch.float32 or value.numel() != count:
             raise TypeError("NVFP4 requires one FP32 weight scalar per matrix")

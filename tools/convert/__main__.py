@@ -28,11 +28,13 @@ class SourceInputs(Mapping):
     """Named optional sources are opened only when a recipe or component requests one."""
 
     def __init__(self, base, paths, stack):
+        """Store the base source and named paths, opening other sources lazily."""
         self._sources = {"base": base}
         self._paths = dict(paths)
         self._stack = stack
 
     def __getitem__(self, name):
+        """Return an opened source by name, opening it from its path on first use."""
         if name not in self._sources:
             if name not in self._paths:
                 raise ValueError(
@@ -44,12 +46,15 @@ class SourceInputs(Mapping):
         return self._sources[name]
 
     def __iter__(self):
+        """Iterate base and named source names without duplicates."""
         return iter(dict.fromkeys((*self._sources, *self._paths)))
 
     def __len__(self):
+        """Return the count of known base and named sources."""
         return len(set(self._sources) | set(self._paths))
 
     def provenance(self):
+        """Return per-source path records merged with their source manifests."""
         result = {}
         for name, source in self._sources.items():
             record = {"path": str(source.path)}
@@ -68,6 +73,7 @@ class SourceInputs(Mapping):
 
 
 def _pairs(values, label):
+    """Parse NAME=PATH entries into a dict of unique names."""
     result = {}
     for value in values:
         name, separator, path = value.partition("=")
@@ -78,6 +84,7 @@ def _pairs(values, label):
 
 
 def _function(value: str):
+    """Resolve a recipe name or file:function string into a callable."""
     if value in RECIPES:
         return RECIPES[value]
     filename, separator, function = value.rpartition(":")
@@ -101,6 +108,7 @@ def _function(value: str):
 
 
 def main(argv=None):
+    """Convert a selected checkpoint into a NInfer v3 artifact per the CLI arguments."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--model",
@@ -214,6 +222,7 @@ def main(argv=None):
             _function(args.override)(model, recipe, sources)
 
         def progress(index, total, job):
+            """Print one conversion job's index, parameters, format, and shape."""
             label = job.parameters[0]
             if len(job.parameters) > 1:
                 label += f" (+{len(job.parameters)-1})"

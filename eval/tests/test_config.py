@@ -1,3 +1,5 @@
+"""Tests that eval config loading is strict and resolves API keys only from the environment."""
+
 import os
 import tempfile
 import unittest
@@ -27,12 +29,16 @@ runtime:
 
 
 class ConfigTest(unittest.TestCase):
+    """Tests for strict config loading and environment-only API key resolution."""
+
     def write(self, text: str, root: Path) -> Path:
+        """Write config text to config.yaml under root and return its path."""
         path = root / "config.yaml"
         path.write_text(text, encoding="utf-8")
         return path
 
     def test_loads_strict_configuration(self):
+        """Load a full configuration and verify its target, job, and generation fields."""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             text = BASE.replace(
@@ -47,6 +53,7 @@ class ConfigTest(unittest.TestCase):
             )
 
     def test_rejects_literal_api_key(self):
+        """Reject an inline literal api_key as an unknown field."""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             text = BASE.replace(
@@ -56,6 +63,7 @@ class ConfigTest(unittest.TestCase):
                 load_config(self.write(text.format(runs_dir=root / "runs"), root))
 
     def test_optional_key_is_resolved_only_from_environment(self):
+        """Resolve api_key_env from the environment only and fail while the variable is unset."""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             text = BASE.replace(

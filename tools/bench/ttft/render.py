@@ -16,6 +16,7 @@ from tools.bench.ttft.report import ReportError, load_campaign, summarize_campai
 
 
 def _atomic_write(path: Path, text: str) -> None:
+    """Write text to path atomically via a temporary same-directory file."""
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
     try:
@@ -26,10 +27,12 @@ def _atomic_write(path: Path, text: str) -> None:
 
 
 def _cell(value: object) -> str:
+    """Escape pipes and flatten newlines so a value is safe in a Markdown cell."""
     return str(value).replace("|", "\\|").replace("\n", " ")
 
 
 def _milliseconds(value: object, *, signed: bool = False) -> str:
+    """Format a numeric millisecond value with adaptive precision, or an em dash."""
     if not isinstance(value, (int, float)):
         return "—"
     prefix = "+" if signed and value > 0 else ""
@@ -39,14 +42,17 @@ def _milliseconds(value: object, *, signed: bool = False) -> str:
 
 
 def _ratio(value: object) -> str:
+    """Format a numeric ratio with three decimals and a times sign, or an em dash."""
     return f"{float(value):.3f}×" if isinstance(value, (int, float)) else "—"
 
 
 def _percent(value: object) -> str:
+    """Format a fraction as a percentage with one decimal, or an em dash."""
     return f"{float(value) * 100:.1f}%" if isinstance(value, (int, float)) else "—"
 
 
 def _link(label: str, path: object) -> str:
+    """Build a Markdown link with escaped spaces and parentheses, or an em dash."""
     if not isinstance(path, str) or not path:
         return "—"
     target = path.replace(" ", "%20").replace(")", "%29")
@@ -54,6 +60,7 @@ def _link(label: str, path: object) -> str:
 
 
 def _table(headers: Iterable[str], rows: Iterable[Iterable[object]]) -> list[str]:
+    """Render headers and rows as an escaped Markdown table, one list entry per line."""
     header = list(headers)
     result = [
         "| " + " | ".join(header) + " |",
@@ -65,6 +72,7 @@ def _table(headers: Iterable[str], rows: Iterable[Iterable[object]]) -> list[str
 
 
 def _comparison_markdown(summary: dict[str, Any]) -> list[str]:
+    """Render the available subject-vs-baseline comparisons, grouped by section."""
     sections: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in summary["comparisons"]:
         if row.get("available") is True:
@@ -104,6 +112,7 @@ def _comparison_markdown(summary: dict[str, Any]) -> list[str]:
 
 
 def _cross_campaign_markdown(summary: dict[str, Any]) -> list[str]:
+    """Render cross-campaign comparisons and rejected contracts against the baseline."""
     rows = summary.get("cross_campaign_comparisons", [])
     rejected = summary.get("cross_campaign_rejected", [])
     if not rows and not rejected:
@@ -162,6 +171,7 @@ def _cross_campaign_markdown(summary: dict[str, Any]) -> list[str]:
 
 
 def _ttft_markdown(summary: dict[str, Any]) -> list[str]:
+    """Render median TTFT per case and role, grouped by architecture area."""
     categories: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in summary["ttft_groups"]:
         categories[str(row["category"])].append(row)
@@ -192,6 +202,7 @@ def _ttft_markdown(summary: dict[str, Any]) -> list[str]:
 
 
 def _symmetric_markdown(summary: dict[str, Any]) -> list[str]:
+    """Render symmetric-role within-run rank statistics as a Markdown table."""
     rows = summary["symmetric_order_statistics"]
     if not rows:
         return []
@@ -227,6 +238,7 @@ def _symmetric_markdown(summary: dict[str, Any]) -> list[str]:
 
 
 def _rejection_markdown(summary: dict[str, Any]) -> list[str]:
+    """Render boundary-rejected requests as a Markdown table, or no lines."""
     rows = summary["boundary_rejections"]
     if not rows:
         return []
@@ -251,6 +263,7 @@ def _rejection_markdown(summary: dict[str, Any]) -> list[str]:
 
 
 def _variability_markdown(summary: dict[str, Any]) -> list[str]:
+    """Render the fifteen observations with the largest relative span."""
     rows = summary["variability"][:15]
     if not rows:
         return []
@@ -282,6 +295,7 @@ def _variability_markdown(summary: dict[str, Any]) -> list[str]:
 
 
 def _short_error(value: object) -> str:
+    """Return an error's first line, ellipsized beyond 180 characters."""
     if not isinstance(value, str) or not value:
         return "—"
     first = value.splitlines()[0]
@@ -289,6 +303,7 @@ def _short_error(value: object) -> str:
 
 
 def _diagnostic_links(row: dict[str, Any]) -> str:
+    """Join one run's raw, progress, serve and request artifact links, or an em dash."""
     links = []
     for label, field in (
         ("raw", "raw"),
@@ -303,6 +318,7 @@ def _diagnostic_links(row: dict[str, Any]) -> str:
 
 
 def _issues_markdown(summary: dict[str, Any]) -> list[str]:
+    """Merge failed, not-constructed, missing and invalid runs into one issues table."""
     failures = summary["failures"]
     not_constructed = summary["not_constructed_runs"]
     missing = summary["missing_runs"]
@@ -314,6 +330,7 @@ def _issues_markdown(summary: dict[str, Any]) -> list[str]:
     merged: dict[tuple[object, object], dict[str, Any]] = {}
 
     def entry(row: dict[str, Any]) -> dict[str, Any]:
+        """Return the issue record for one run, creating it keyed by case and sample."""
         key = (row.get("case"), row.get("sample"))
         value = merged.setdefault(
             key,
@@ -375,6 +392,7 @@ def _issues_markdown(summary: dict[str, Any]) -> list[str]:
 
 
 def _lifecycle_markdown(summary: dict[str, Any]) -> list[str]:
+    """Render pooled request latency, streaming progress and workload phase tables."""
     lines = [
         "## Request latency and streaming progress", "",
         "Constructed runs are grouped by declared request class, or by role when no class is",
@@ -382,6 +400,7 @@ def _lifecycle_markdown(summary: dict[str, Any]) -> list[str]:
         "output-event gaps. Outcomes include later failures and intentional cancellations.", "",
     ]
     def metric(row: dict[str, Any], name: str, stat: str) -> str:
+        """Format one named nanosecond statistic of a lifecycle row as milliseconds."""
         value = row[name][stat + "_ns"]
         return _milliseconds(value / 1e6 if value is not None else None)
     lines.extend(_table(
@@ -414,6 +433,7 @@ def _lifecycle_markdown(summary: dict[str, Any]) -> list[str]:
 
 
 def _stream_markdown(summary: dict[str, Any]) -> list[str]:
+    """Render per-request observations, workload completion and scheduling evidence."""
     lines = [
         "## Complete request observations", "",
         "TTFT remains observable after a later failure. Gaps are between nonempty output events,",
@@ -422,6 +442,7 @@ def _stream_markdown(summary: dict[str, Any]) -> list[str]:
         "closure without a protocol terminal. Bytes and events are not token counts.", "",
     ]
     def ms(row: dict[str, Any], key: str) -> str:
+        """Format a nanosecond field of row as milliseconds, or an em dash when unset."""
         value = row.get(key)
         return _milliseconds(value / 1e6 if isinstance(value, (int, float)) else None)
     lines.extend(_table(
@@ -445,15 +466,20 @@ def _stream_markdown(summary: dict[str, Any]) -> list[str]:
         "and dynamic backgrounds; they are not matched-input throughput comparisons.", "",
     ])
     lines.extend(_table(
-        ("Case", "Sample", "Arrival", "Input dependency", "Matched-input eligible", "Success/all", "Outcomes", "Makespan ms", "Completed tokens", "Observed tokens/s", "Limitation"),
+        ("Case", "Sample", "Arrival", "Input dependency", "Matched-input eligible",
+         "Success/all", "Outcomes", "Makespan ms", "Completed tokens", "Observed tokens/s",
+         "Limitation"),
         (
             (row["case"], row["sample"], row["arrival_mode"],
              row["input_dependency"], row["matched_input_eligible"],
              f"{row['successful_requests']}/{row['requests']}",
              json.dumps(row["request_outcomes"], sort_keys=True), ms(row, "duration_ns"),
              row["measured_completed_output_tokens"],
-             f"{row['observed_completed_output_tokens_per_second']:.3f}" if row["observed_completed_output_tokens_per_second"] is not None else "—",
-             row.get("throughput_limitation") or (f"Missing usage: {row['missing_success_usage']}" if row["missing_success_usage"] else "—"))
+             f"{row['observed_completed_output_tokens_per_second']:.3f}"
+                 if row["observed_completed_output_tokens_per_second"] is not None
+                 else "—",
+             row.get("throughput_limitation")
+             or (f"Missing usage: {row['missing_success_usage']}" if row["missing_success_usage"] else "—"))
             for row in summary["workload_metrics"]
         ),
     ))
@@ -540,6 +566,7 @@ def _stream_markdown(summary: dict[str, Any]) -> list[str]:
 
 
 def _runtime_markdown(summary: dict[str, Any]) -> list[str]:
+    """Render global runtime costs, physical transfers and resource occupancy."""
     rows = summary["global_runtime_observations"]
     lines = [
         "## Global runtime costs", "",
@@ -551,10 +578,12 @@ def _runtime_markdown(summary: dict[str, Any]) -> list[str]:
     ]
 
     def seconds(value: Any) -> str:
+        """Format a numeric seconds value with six decimals, or an em dash."""
         return f"{value:.6f}" if isinstance(value, (float, int)) else "—"
 
     lines.extend(_table(
-        ("Case", "Sample", "Status", "Intervals", "Shutdown tail", "Reported seconds", "Host seconds", "Device wait seconds", "Reason"),
+        ("Case", "Sample", "Status", "Intervals", "Shutdown tail", "Reported seconds",
+         "Host seconds", "Device wait seconds", "Reason"),
         ((row["case"], row["sample"], row["status"], row.get("intervals", "—"),
           row.get("shutdown_tail", "—"), seconds(row.get("reported_interval_seconds")),
           seconds(row.get("host_work", {}).get("elapsed_seconds", {}).get("total")),
@@ -599,6 +628,7 @@ def _runtime_markdown(summary: dict[str, Any]) -> list[str]:
 
 
 def _request_timing_markdown(summary: dict[str, Any]) -> list[str]:
+    """Render mean first-output latency partitions per case as a Markdown table."""
     groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in summary["request_timing_analysis"]:
         groups[str(row["case"])].append(row)
@@ -615,6 +645,7 @@ def _request_timing_markdown(summary: dict[str, Any]) -> list[str]:
     ]
 
     def mean(rows: list[dict[str, Any]], field: str) -> str:
+        """Format the mean of a field across non-null rows, or an em dash when empty."""
         values = [row[field] for row in rows if row.get(field) is not None]
         return f"{statistics.mean(values):.3f}" if values else "—"
 
@@ -634,6 +665,7 @@ def _request_timing_markdown(summary: dict[str, Any]) -> list[str]:
 
 
 def render_markdown(summary: dict[str, Any]) -> str:
+    """Render the full campaign summary report as Markdown text."""
     campaign = summary["campaign"]
     coverage = summary["coverage"]
     lines = [
@@ -781,10 +813,12 @@ CSV_FIELDS = (
 
 
 def _csv_row(kind: str, values: dict[str, Any]) -> dict[str, Any]:
+    """Build one full CSV record for a kind, defaulting missing fields to None."""
     return {"kind": kind, **{field: values.get(field) for field in CSV_FIELDS if field != "kind"}}
 
 
 def render_csv(summary: dict[str, Any]) -> str:
+    """Render TTFT groups, observations, comparisons, symmetric stats and rejections as CSV."""
     stream = io.StringIO(newline="")
     writer = csv.DictWriter(stream, fieldnames=CSV_FIELDS)
     writer.writeheader()
@@ -856,6 +890,7 @@ def render_csv(summary: dict[str, Any]) -> str:
 
 
 def render_request_analysis_csv(summary: dict[str, Any]) -> str:
+    """Render per-request timing rows as CSV, extending columns with any extra keys."""
     fields = ["case", "profile_label", "sample", "request_role", "outcome", "constructed",
               "wire_request_id", "engine_request_id", *request_timing_analysis({})]
     fields.extend(sorted({key for row in summary["request_timing_analysis"] for key in row
@@ -871,6 +906,7 @@ def render_request_analysis_csv(summary: dict[str, Any]) -> str:
 def write_campaign_summary(
     campaign_dir: Path, baseline_dir: Path | None = None
 ) -> tuple[dict[str, Any], dict[str, Path]]:
+    """Write the four summary artifacts under the campaign root and return summary and paths."""
     campaign = load_campaign(campaign_dir)
     baseline = load_campaign(baseline_dir) if baseline_dir is not None else None
     summary = summarize_campaign(campaign, baseline)

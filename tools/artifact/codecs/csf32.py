@@ -22,6 +22,7 @@ def scale_blocks(rows: int, columns: int) -> Iterator[tuple[int, int, int, int]]
 
 
 def _plane(value: object, dtype: str, count: int, name: str) -> np.ndarray:
+    """Coerce tensor, buffer, or array input into a flat array of the expected dtype and count."""
     if isinstance(value, torch.Tensor):
         value = value.detach().contiguous().cpu().numpy()
     if isinstance(value, (bytes, bytearray, memoryview)):

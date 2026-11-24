@@ -32,6 +32,8 @@ _DTYPES = {
 
 @dataclass(frozen=True, slots=True)
 class TensorInfo:
+    """One indexed tensor: its file, shape, dtype and byte range."""
+
     file: Path
     shape: tuple[int, ...]
     dtype: str
@@ -43,6 +45,7 @@ class SafetensorsSource:
     """Read bounded flat regions; retain only a small set of file descriptors."""
 
     def __init__(self, path: str | Path) -> None:
+        """Resolve the checkpoint location and build the tensor weight map."""
         self.path = Path(path)
         self.root = self.path if self.path.is_dir() else self.path.parent
         config_path = self.root / "config.json"
@@ -79,6 +82,7 @@ class SafetensorsSource:
                     raise FileNotFoundError(self.path)
 
     def _header(self, file: Path) -> dict[str, TensorInfo]:
+        """Parse and cache a file's safetensors header with validated ranges."""
         if file in self._headers:
             return self._headers[file]
         with file.open("rb") as stream:
@@ -105,6 +109,7 @@ class SafetensorsSource:
         return result
 
     def has(self, name: str) -> bool:
+        """Return whether the source publishes the tensor name."""
         return name in self.weight_map
 
     def names(self) -> tuple[str, ...]:
@@ -116,6 +121,7 @@ class SafetensorsSource:
         return frozenset(self._read_names)
 
     def describe(self, name: str) -> TensorInfo:
+        """Return the tensor's TensorInfo, raising ValueError when missing."""
         try:
             file = self.weight_map[name]
             return self._header(file)[name]
@@ -123,6 +129,7 @@ class SafetensorsSource:
             raise ValueError(f"{self.path}: missing source tensor {name!r}") from error
 
     def _file(self, path: Path) -> int:
+        """Return a cached descriptor for path, keeping at most four open."""
         if path in self._fds:
             self._fds.move_to_end(path)
             return self._fds[path]
@@ -137,6 +144,7 @@ class SafetensorsSource:
     def read_flat(
         self, name: str, begin: int = 0, end: int | None = None
     ) -> torch.Tensor:
+        """Read a flat element range of one tensor directly from its file."""
         info = self.describe(name)
         elements = prod(info.shape)
         end = elements if end is None else end
@@ -168,15 +176,18 @@ class SafetensorsSource:
         return torch.frombuffer(raw, dtype=dtype)
 
     def close(self) -> None:
+        """Close and drop every retained file descriptor."""
         while self._fds:
             _, fd = self._fds.popitem()
             discard_cached_pages(fd)
             os.close(fd)
 
     def __enter__(self) -> SafetensorsSource:
+        """Return self for use as a context manager."""
         return self
 
     def __exit__(self, exc_type, exc_value, traceback) -> None:
+        """Close the source when the context exits."""
         self.close()
 
 
@@ -188,9 +199,11 @@ def tensor_source(
     offset: int = 0,
     source_shape: tuple[int, ...] | None = None,
 ) -> LogicalSource:
+    """Return a LogicalSource reading a shaped slice of one safetensors tensor."""
     expected = shape if source_shape is None else source_shape
 
     def read(begin: int, end: int) -> torch.Tensor:
+        """Verify the source shape, then read the slice's flat elements."""
         info = store.describe(name)
         if info.shape != expected:
             raise ValueError(

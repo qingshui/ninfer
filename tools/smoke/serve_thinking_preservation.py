@@ -15,16 +15,20 @@ from typing import Any
 
 
 class TestFailure(RuntimeError):
+    """Error raised when a smoke-test expectation is not met."""
+
     pass
 
 
 def free_port() -> int:
+    """Pick an unused loopback TCP port."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
         return int(sock.getsockname()[1])
 
 
 def request_json(base_url: str, method: str, path: str, payload: Any | None = None) -> dict[str, Any]:
+    """Send a JSON HTTP request and return the decoded object, raising TestFailure on errors."""
     body = None
     headers = {"Accept": "application/json"}
     if payload is not None:
@@ -45,6 +49,7 @@ def request_json(base_url: str, method: str, path: str, payload: Any | None = No
 
 
 def wait_for_server(base_url: str, process: subprocess.Popen[str], timeout: float) -> None:
+    """Poll /health until the server is healthy, the process exits, or the timeout passes."""
     deadline = time.monotonic() + timeout
     last_error: Exception | None = None
     while time.monotonic() < deadline:
@@ -60,6 +65,7 @@ def wait_for_server(base_url: str, process: subprocess.Popen[str], timeout: floa
 
 
 def chat_payload(model: str, fixture: dict[str, Any], messages_key: str) -> dict[str, Any]:
+    """Copy the fixture's chat request with the chosen messages and model."""
     payload = dict(fixture["chat"]["request"])
     payload["model"] = model
     payload["messages"] = fixture["chat"][messages_key]
@@ -67,6 +73,7 @@ def chat_payload(model: str, fixture: dict[str, Any], messages_key: str) -> dict
 
 
 def chat_choice(response: dict[str, Any]) -> dict[str, Any]:
+    """Return the single Chat Completions choice, raising TestFailure otherwise."""
     choices = response.get("choices")
     if not isinstance(choices, list) or len(choices) != 1 or not isinstance(choices[0], dict):
         raise TestFailure("Chat Completions response does not contain one choice")
@@ -74,6 +81,7 @@ def chat_choice(response: dict[str, Any]) -> dict[str, Any]:
 
 
 def chat_prompt_tokens(response: dict[str, Any]) -> int:
+    """Return the prompt token count from a Chat Completions response."""
     usage = response.get("usage")
     if not isinstance(usage, dict) or not isinstance(usage.get("prompt_tokens"), int):
         raise TestFailure("Chat Completions response does not contain prompt token usage")
@@ -81,6 +89,7 @@ def chat_prompt_tokens(response: dict[str, Any]) -> int:
 
 
 def response_payload(model: str, input_text: str, preserve: bool | None) -> dict[str, Any]:
+    """Build a Responses API payload with optional preserve_thinking template kwargs."""
     payload: dict[str, Any] = {
         "model": model,
         "input": input_text,
@@ -94,6 +103,7 @@ def response_payload(model: str, input_text: str, preserve: bool | None) -> dict
 
 
 def read_events(path: Path) -> list[dict[str, Any]]:
+    """Load JSON objects from a JSONL request log, one per nonempty line."""
     events: list[dict[str, Any]] = []
     for line in path.read_text(encoding="utf-8").splitlines():
         if line:
@@ -104,6 +114,7 @@ def read_events(path: Path) -> list[dict[str, Any]]:
 
 
 def protocol_events(events: list[dict[str, Any]], event: str, protocol: str) -> list[dict[str, Any]]:
+    """Filter request log events by event name and request protocol."""
     return [
         item
         for item in events
@@ -112,11 +123,13 @@ def protocol_events(events: list[dict[str, Any]], event: str, protocol: str) -> 
 
 
 def require(condition: bool, message: str) -> None:
+    """Assert condition, raising TestFailure with message when it does not hold."""
     if not condition:
         raise TestFailure(message)
 
 
 def exercise(base_url: str, fixture: dict[str, Any], log_path: Path, backend: str) -> dict[str, Any]:
+    """Run the fixture's Chat and Responses scenarios and return the verification summary."""
     models = request_json(base_url, "GET", "/v1/models")
     entries = models.get("data")
     require(isinstance(entries, list) and len(entries) == 1, "server did not expose one model")
@@ -260,6 +273,7 @@ def exercise(base_url: str, fixture: dict[str, Any], log_path: Path, backend: st
 
 
 def main() -> None:
+    """Start ninfer-serve, run the thinking-preservation exercise, and print the result."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--artifact", type=Path, required=True)
     parser.add_argument("--backend", choices=("mtp", "dflash"), required=True)

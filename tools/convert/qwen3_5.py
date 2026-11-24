@@ -26,12 +26,14 @@ _TEXT_ARCHITECTURES = {
 
 
 def _positive(value, name):
+    """Return value unchanged after checking it is a positive integer."""
     if type(value) is not int or value <= 0:
         raise ValueError(f"{name}: expected a positive integer")
     return value
 
 
 def _f32(value, name):
+    """Coerce value to F32, requiring the result to be positive and finite."""
     if type(value) not in (float, int):
         raise ValueError(f"{name}: expected a real value")
     try:
@@ -44,6 +46,7 @@ def _f32(value, name):
 
 
 def _fixed(config, key, value, label):
+    """Require config[key] to equal the fixed expected value when the key is present."""
     if key in config and (
         config[key] != value
         or isinstance(value, bool)
@@ -53,6 +56,7 @@ def _fixed(config, key, value, label):
 
 
 def _rope_source(raw: dict, label: str) -> dict:
+    """Merge rope_scaling and rope_parameters into one dict, rejecting scaled RoPE."""
     rope = {}
     for field in ("rope_scaling", "rope_parameters"):
         value = raw.get(field)
@@ -72,6 +76,7 @@ def _rope_source(raw: dict, label: str) -> dict:
 
 
 def text_config(source: dict, *, mtp: bool) -> dict:
+    """Build the validated text config from a Qwen3.5 source configuration."""
     architectures = source.get("architectures")
     if (
         not isinstance(architectures, list)
@@ -188,6 +193,7 @@ def text_config(source: dict, *, mtp: bool) -> dict:
 
 
 def vision_config(source: dict, text: dict) -> dict:
+    """Build the validated vision config from the source's vision_config section."""
     raw = source.get("vision_config")
     if not isinstance(raw, dict):
         raise ValueError("Vision requires vision_config")
@@ -219,6 +225,7 @@ def vision_config(source: dict, text: dict) -> dict:
 
 
 def draft_config(raw: dict, target: dict, backend: str) -> dict:
+    """Build the validated DFlash/DFlash2 draft config from a companion source."""
     architecture = "DFlash2DraftModel" if backend == "dflash2" else "DFlashDraftModel"
     _fixed(raw, "architectures", [architecture], backend)
     _fixed(raw, "model_type", "qwen3", backend)
@@ -321,6 +328,7 @@ def draft_config(raw: dict, target: dict, backend: str) -> dict:
 
 
 def _has_model_config(source: SafetensorsSource) -> bool:
+    """Report whether the source config holds keys beyond pure checkpoint metadata."""
     return bool(
         source.config.keys()
         - {
@@ -368,6 +376,7 @@ def _text_source_name(selected: SafetensorsSource, source_name: str) -> str:
 
 
 def _check_source_fields(name, actual, expected, fields):
+    """Raise when any tracked field differs between an additional source and the model."""
     for field in sorted(fields):
         if actual.get(field) != expected.get(field):
             raise ValueError(
@@ -376,10 +385,14 @@ def _check_source_fields(name, actual, expected, fields):
 
 
 class _Builder:
+    """Register Qwen3.5 parameters and packing groups onto a Model."""
+
     def __init__(self, model: Model):
+        """Bind the builder to the target Model."""
         self.model = model
 
     def validate_source(self, selected, original, name):
+        """Validate an additional source's config against the model for one parameter."""
         if selected is original or not _has_model_config(selected):
             return
         component = name.split("/", 1)[0]
@@ -481,10 +494,12 @@ class _Builder:
         rows=None,
         transpose=None,
     ):
+        """Add one parameter with its source name, shape, and mapping factory."""
         shape = tuple(shape)
         original = shape if source_shape is None else tuple(source_shape)
 
         def factory(selected, format=None):
+            """Build the source reference for a selected store, applying transpose, rows, or offset."""
             self.validate_source(selected, store, name)
             selected_name = source_name
             if name.startswith("text/") and _has_model_config(selected):
@@ -516,9 +531,11 @@ class _Builder:
         )
 
     def group(self, *names):
+        """Record a packing group of parameter names."""
         self.model.packing_groups.append(tuple(names))
 
     def attention(self, prefix, source_prefix, store, config):
+        """Add one block's full-attention parameters, including QK norms and packing groups."""
         h, d = config["hidden_size"], config["head_dim"]
         q, k = config["num_attention_heads"] * d, config["num_key_value_heads"] * d
         for role, gate in (("query", False), ("gate", True)):
@@ -565,6 +582,7 @@ class _Builder:
         self.group(*roles[2:])
 
     def gdn(self, prefix, source_prefix, store, config):
+        """Add one block's gated delta net parameters, projections, and packing groups."""
         h = config["hidden_size"]
         kg = config["linear_num_key_heads"] * config["linear_key_head_dim"]
         vg = config["linear_num_value_heads"] * config["linear_value_head_dim"]
@@ -638,6 +656,7 @@ class _Builder:
         self.group(prefix + "gdn/a_projection", prefix + "gdn/b_projection")
 
     def dense(self, prefix, source_prefix, store, h, intermediate, *, draft=False):
+        """Add one block's dense MLP gate, up, and down projections."""
         stem_input = prefix + ("mlp_input" if draft else "ffn_input")
         for role in ("gate", "up"):
             self.add(
@@ -657,6 +676,7 @@ class _Builder:
         self.group(prefix + "mlp/gate", prefix + "mlp/up")
 
     def moe(self, prefix, source_prefix, store, config):
+        """Add one block's MoE router, per-expert, and shared-expert parameters."""
         h, e = config["hidden_size"], config["num_experts"]
         ir, shared = (
             config["moe_intermediate_size"],
@@ -764,6 +784,7 @@ class _Builder:
         self.group(p + "shared/gate", p + "shared/up")
 
     def block(self, prefix, source_prefix, store, config, mixer):
+        """Add one block's norms plus its attention or GDN mixer and MoE or dense MLP."""
         h = config["hidden_size"]
         self.add(
             prefix + "input_norm", store, source_prefix + "input_layernorm.weight", (h,)
@@ -784,6 +805,7 @@ class _Builder:
             self.dense(prefix, source_prefix, store, h, config["intermediate_size"])
 
     def vision(self, store, config, output_width):
+        """Add the vision component: patch and position embeddings, blocks, and merger."""
         h, intermediate = config["hidden_size"], config["intermediate_size"]
         ps, pt = config["patch_size"], config["temporal_patch_size"]
         self.add(
@@ -880,6 +902,7 @@ class _Builder:
             )
 
     def draft(self, store, config, target, backend):
+        """Add the DFlash/DFlash2 draft parameters: projections, layers, and selector."""
         h, d = target["hidden_size"], config["head_dim"]
         q, k = config["num_attention_heads"] * d, config["num_key_value_heads"] * d
         draft = config["dflash_config"]
@@ -978,6 +1001,7 @@ def build_model(
     companions: Mapping[str, SafetensorsSource] | None = None,
     resource_overrides: Mapping[str, str | Path] | None = None,
 ) -> Model:
+    """Build the Qwen3.5 Model for the selected components from a checkpoint source."""
     selected = set(components)
     if "text" not in selected or selected - {
         "text",

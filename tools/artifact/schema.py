@@ -19,6 +19,7 @@ class ArtifactError(ValueError):
 
 
 def integer(value: object, label: str, *, positive: bool = False) -> int:
+    """Validate an integer in the u64 range and return it."""
     minimum = 1 if positive else 0
     if type(value) is not int or not minimum <= value <= U64_MAX:
         raise ArtifactError(f"{label}: expected integer in [{minimum},{U64_MAX}]")
@@ -26,6 +27,7 @@ def integer(value: object, label: str, *, positive: bool = False) -> int:
 
 
 def identifier(value: object, label: str) -> str:
+    """Validate a nonempty NUL-free UTF-8 string and return it."""
     if not isinstance(value, str) or not value or "\0" in value:
         raise ArtifactError(f"{label}: expected nonempty string without NUL")
     try:
@@ -36,6 +38,7 @@ def identifier(value: object, label: str) -> str:
 
 
 def shape(value: object, label: str) -> tuple[int, ...]:
+    """Validate a shape of positive integers with a u64 element count."""
     if not isinstance(value, (list, tuple)) or len(value) > 16:
         raise ArtifactError(f"{label}: expected shape with rank 0 through 16")
     result = tuple(integer(dim, label, positive=True) for dim in value)
@@ -49,6 +52,7 @@ def members(
     optional: set[str],
     label: str,
 ) -> dict:
+    """Validate an object's keys against the required and optional sets, and return it."""
     if not isinstance(value, dict):
         raise ArtifactError(f"{label}: expected object")
     missing = required - value.keys()
@@ -62,6 +66,8 @@ def members(
 
 @dataclass(frozen=True, slots=True)
 class TensorSpec:
+    """A planned tensor: identity, shape, format and layout before placement."""
+
     id: str
     shape: tuple[int, ...]
     format: str
@@ -71,6 +77,8 @@ class TensorSpec:
 
 @dataclass(frozen=True, slots=True)
 class ResourceSpec:
+    """A planned resource: identity, byte count and encoding."""
+
     id: str
     bytes: int
     encoding: str = RAW_BYTES_V1
@@ -78,6 +86,8 @@ class ResourceSpec:
 
 @dataclass(frozen=True, slots=True)
 class TensorObject:
+    """A placed tensor with its aligned offset and byte range in the payload."""
+
     id: str
     shape: tuple[int, ...]
     format: str
@@ -88,6 +98,7 @@ class TensorObject:
     kind: ClassVar[str] = "tensor"
 
     def to_json(self) -> dict:
+        """Return the JSON descriptor with the shape as a list and the kind set."""
         result = {**asdict(self), "shape": list(self.shape), "kind": self.kind}
         if self.layout_parameters is None:
             del result["layout_parameters"]
@@ -96,6 +107,8 @@ class TensorObject:
 
 @dataclass(frozen=True, slots=True)
 class ResourceObject:
+    """A placed opaque resource with its encoding and byte range in the payload."""
+
     id: str
     encoding: str
     offset: int
@@ -103,6 +116,7 @@ class ResourceObject:
     kind: ClassVar[str] = "resource"
 
     def to_json(self) -> dict:
+        """Return the JSON descriptor with the resource kind set."""
         return {**asdict(self), "kind": self.kind}
 
 
@@ -112,12 +126,16 @@ ArtifactObject: TypeAlias = TensorObject | ResourceObject
 
 @dataclass(frozen=True, slots=True)
 class FileRecord:
+    """One payload file: the entry file has a null path, parts have names."""
+
     path: str | None
     payload_bytes: int
 
 
 @dataclass(frozen=True, slots=True)
 class Directory:
+    """A parsed v3 directory: components, objects, bindings, uses and files."""
+
     components: dict
     objects: tuple[ArtifactObject, ...]
     bindings: dict
@@ -128,9 +146,11 @@ class Directory:
 
     @property
     def payload_bytes(self) -> int:
+        """Total payload bytes across every recorded file."""
         return sum(file.payload_bytes for file in self.files)
 
     def to_json(self) -> dict:
+        """Return the JSON object form with objects and files as plain records."""
         return {
             "components": self.components,
             "objects": [obj.to_json() for obj in self.objects],
@@ -164,6 +184,7 @@ def validate_encoding(obj: ArtifactObject) -> None:
 
 
 def plan_objects(specs: Sequence[ObjectSpec]) -> tuple[ArtifactObject, ...]:
+    """Place specs at aligned offsets and return validated artifact objects."""
     result = []
     seen = set()
     offset = 0
@@ -203,6 +224,7 @@ def plan_objects(specs: Sequence[ObjectSpec]) -> tuple[ArtifactObject, ...]:
 
 
 def _parse_object(value: object) -> ArtifactObject:
+    """Parse and validate one JSON object descriptor."""
     if not isinstance(value, dict):
         raise ArtifactError("object descriptor must be an object")
     common = {"id", "kind", "offset", "bytes"}
@@ -253,6 +275,7 @@ def binding_parts(
         raise ArtifactError(f"{label}: expected Binding object")
 
     def tensor(name: object) -> TensorObject:
+        """Resolve a referenced name to a placed tensor object."""
         name = identifier(name, label)
         obj = objects.get(name)
         if not isinstance(obj, TensorObject):
@@ -285,6 +308,7 @@ def binding_parts(
 
 
 def _files(values: object, entry_name: str | None) -> tuple[FileRecord, ...]:
+    """Validate the payload file list, with the null-path entry file first."""
     if not isinstance(values, list) or not values:
         raise ArtifactError("files must be a nonempty array")
     result = []
@@ -312,6 +336,7 @@ def _files(values: object, entry_name: str | None) -> tuple[FileRecord, ...]:
 
 
 def parse_directory(value: object, *, entry_name: str | None = None) -> Directory:
+    """Validate a complete directory JSON value and return its Directory."""
     root = members(
         value,
         {"components", "objects", "bindings", "uses", "files"},
@@ -411,6 +436,7 @@ def parse_directory(value: object, *, entry_name: str | None = None) -> Director
 
 
 def _unique_members(pairs: list[tuple[str, object]]) -> dict:
+    """Build a dict from key-value pairs, rejecting duplicate member names."""
     result = {}
     for key, value in pairs:
         if key in result:
@@ -420,10 +446,12 @@ def _unique_members(pairs: list[tuple[str, object]]) -> dict:
 
 
 def _nonfinite(value: str) -> None:
+    """Reject a NaN or Infinity JSON constant."""
     raise ArtifactError(f"nonfinite JSON number {value}")
 
 
 def decode_directory(data: bytes, *, entry_name: str | None = None) -> Directory:
+    """Decode directory bytes as strict JSON and parse it into a Directory."""
     try:
         value = json.loads(
             data.decode("utf-8"),
@@ -436,6 +464,7 @@ def decode_directory(data: bytes, *, entry_name: str | None = None) -> Directory
 
 
 def encode_directory(directory: Directory | dict) -> bytes:
+    """Serialize a Directory or raw mapping to compact UTF-8 directory JSON."""
     value = directory.to_json() if isinstance(directory, Directory) else directory
     try:
         return json.dumps(

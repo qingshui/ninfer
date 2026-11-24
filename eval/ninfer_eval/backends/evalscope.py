@@ -1,3 +1,5 @@
+"""EvalScope-based backend that plans, runs, and normalizes EvalScope benchmark jobs."""
+
 from __future__ import annotations
 
 import importlib.util
@@ -79,6 +81,7 @@ _IFBENCH_METRICS = {
 
 
 class EvalScopeBackend:
+    """Backend that runs EvalScope benchmarks against an OpenAI-compatible target and normalizes their reports."""
     name = "evalscope"
     _serpapi_lock = threading.Lock()
 
@@ -104,6 +107,7 @@ class EvalScopeBackend:
     def validate(
         self, job: JobConfig, target: ResolvedTarget | None, for_run: bool = False
     ) -> None:
+        """Verify the target, protocol, backend_args, and dataset-specific requirements for a job."""
         if target is None:
             raise ConfigError(f"EvalScope job {job.id} requires a target")
         if target.config.protocol != "openai_chat":
@@ -130,6 +134,7 @@ class EvalScopeBackend:
             self._require_package("evalscope", _EVALSCOPE_VERSION)
 
     def _validate_bfcl(self, job: JobConfig, for_run: bool) -> None:
+        """Validate BFCL-v4 subsets plus run-time packages and their SerpAPI/network acknowledgements."""
         subsets = set(job.backend_args.get("subset_list") or _DATASET_COUNTS["bfcl_v4"])
         unknown = sorted(subsets - set(_DATASET_COUNTS["bfcl_v4"]))
         if unknown:
@@ -156,6 +161,7 @@ class EvalScopeBackend:
 
     @staticmethod
     def _require_package(package: str, expected: str) -> None:
+        """Raise BackendDependencyError unless the package is installed at the exact expected version."""
         try:
             installed = version(package)
         except PackageNotFoundError as exc:
@@ -168,6 +174,7 @@ class EvalScopeBackend:
             )
 
     def plan(self, job: JobConfig, target: ResolvedTarget | None) -> WorkPlan:
+        """Compute the work plan with total samples, subsets, requirements, and warnings for a job."""
         del target
         counts = _DATASET_COUNTS.get(job.dataset)
         if job.dataset == "needle_haystack":
@@ -215,6 +222,7 @@ class EvalScopeBackend:
         )
 
     def run(self, context: RunContext, events: EventSink) -> BackendRun:
+        """Execute the EvalScope task, emit progress events, and persist raw plus report artifacts."""
         if importlib.util.find_spec("evalscope") is None:
             raise RuntimeError("EvalScope is not installed")
         from evalscope import TaskConfig, run_task
@@ -284,6 +292,7 @@ class EvalScopeBackend:
         return BackendRun(start, finish, raw, artifacts)
 
     def _task_dict(self, context: RunContext) -> dict[str, Any]:
+        """Build the EvalScope TaskConfig mapping from the job, target, and backend arguments."""
         assert context.target is not None
         job = context.job
         args = job.backend_args
@@ -347,6 +356,7 @@ class EvalScopeBackend:
         stop: threading.Event,
         started_wall: float,
     ) -> None:
+        """Poll progress.json and emit throttled progress events until stopped or cancelled."""
         path = context.job_dir / "progress.json"
         last: tuple[Any, ...] | None = None
         last_emit = 0.0
@@ -383,6 +393,7 @@ class EvalScopeBackend:
                 continue
 
     def normalize(self, context: RunContext, run: BackendRun) -> DatasetResult:
+        """Normalize the raw run output into a DatasetResult with metrics, counts, artifacts, and status."""
         report = self._report_dict(context, run.raw_result)
         score = report.get("score")
         num = int(report.get("num") or 0)
@@ -483,6 +494,7 @@ class EvalScopeBackend:
 
     @staticmethod
     def _named_metrics(report: dict[str, Any], names: set[str]) -> dict[str, float]:
+        """Collect the named metric scores from the report, dropping the mean_ prefix."""
         values: dict[str, float] = {}
         for metric in report.get("metrics", []):
             name = str(metric.get("name", "")).lower()
@@ -535,6 +547,7 @@ class EvalScopeBackend:
         return weighted_score / total, total, breakdown
 
     def _report_dict(self, context: RunContext, raw: Any) -> dict[str, Any]:
+        """Locate the dataset's report dict from the raw result or the written report file."""
         if isinstance(raw, dict):
             candidate = raw.get(context.job.dataset)
             if isinstance(candidate, dict) and (
@@ -552,11 +565,13 @@ class EvalScopeBackend:
 
     @staticmethod
     def _find_report_file(root: Path, dataset: str) -> Path | None:
+        """Return the first report JSON file for the dataset under the reports directory, if any."""
         candidates = sorted(root.glob(f"reports/**/{dataset}.json"))
         return candidates[0] if candidates else None
 
     @staticmethod
     def _bfcl_metrics(report: dict[str, Any]) -> dict[str, float]:
+        """Extract the official BFCL aggregate scores from the report's category subsets."""
         values: dict[str, float] = {}
         for metric in report.get("metrics", []):
             for category in metric.get("categories", []):
@@ -571,6 +586,7 @@ class EvalScopeBackend:
     @classmethod
     @contextmanager
     def _bfcl_environment(cls, job: JobConfig):
+        """Context manager exporting the job's SerpAPI key as SERPAPI_API_KEY under a lock."""
         env_name = (
             job.backend_args.get("serpapi_api_key_env")
             if job.dataset == "bfcl_v4"
@@ -594,6 +610,7 @@ class EvalScopeBackend:
 
     @staticmethod
     def _apply_sample_retention(job_dir: Path, policy: str) -> None:
+        """Apply the sample retention policy to predictions and reviews after normalization."""
         if policy == "all":
             return
         for dirname in ("predictions", "reviews"):

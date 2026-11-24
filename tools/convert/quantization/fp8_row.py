@@ -12,6 +12,7 @@ _BF16_MIN_SUBNORMAL_WORD = np.uint16(0x0001)
 
 
 def _positive_e4m3fn_values() -> np.ndarray:
+    """Return every positive E4M3FN value in increasing order, as binary32."""
     words = torch.arange(0x7F, dtype=torch.uint8)
     return words.view(torch.float8_e4m3fn).float().numpy()
 
@@ -21,6 +22,8 @@ _POSITIVE_E4M3FN_VALUES = _positive_e4m3fn_values()
 
 @dataclass(frozen=True, slots=True)
 class RowScaledFp8Words:
+    """One matrix's E4M3FN code words and its per-row scale words."""
+
     codes: torch.Tensor
     scales: torch.Tensor
 
@@ -41,6 +44,7 @@ def _bf16_rne_words(values: np.ndarray) -> np.ndarray:
 
 
 def _bf16_words_to_float32(words: np.ndarray) -> np.ndarray:
+    """Expand BF16 words into their binary32 values."""
     if words.dtype != np.uint16:
         raise TypeError("BF16 words must be uint16")
     return (words.astype(np.uint32) << np.uint32(16)).view(np.float32)
@@ -71,6 +75,7 @@ def _round_e4m3fn_rne(values: np.ndarray) -> np.ndarray:
 
 
 def _quantize_host_rows(host: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Quantize binary32 rows on the host into E4M3FN codes and BF16 scale words."""
     if host.dtype != np.float32 or host.ndim != 2:
         raise TypeError("FP8 quantization rows must be a rank-two binary32 array")
     if not np.isfinite(host).all():

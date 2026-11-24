@@ -1,3 +1,5 @@
+"""Helpers for reading evalscope prediction and review JSONL records."""
+
 from __future__ import annotations
 
 import json
@@ -7,6 +9,7 @@ from typing import Any
 
 
 def records(path: Path) -> Iterator[dict[str, Any]]:
+    """Yield each non-blank line of a JSONL file as a parsed dict."""
     with path.open(encoding="utf-8") as source:
         for line in source:
             if line.strip():
@@ -14,6 +17,7 @@ def records(path: Path) -> Iterator[dict[str, Any]]:
 
 
 def prediction_failed(record: dict[str, Any]) -> bool:
+    """Return True when a prediction record carries a provider error or wrapped BFCL failure."""
     output = record.get("model_output") or {}
     if output.get("error") is not None:
         return True
@@ -32,6 +36,12 @@ def prediction_failed(record: dict[str, Any]) -> bool:
 
 
 def summarize_records(job_dir: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Aggregate token and failure diagnostics plus per-question scores from a job directory.
+
+    Scans predictions/*.jsonl for counts of predictions, failures, truncation, empty
+    answers, and token usage; groups reviews/*.jsonl scores into per-question summaries.
+    Returns (diagnostics dict, list of question group dicts).
+    """
     diagnostics = {
         "predictions": 0,
         "failed": 0,

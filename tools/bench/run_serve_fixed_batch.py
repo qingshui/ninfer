@@ -41,6 +41,7 @@ PROMPTS = (
 
 
 def parse_rows(value: str) -> list[int]:
+    """Parse a comma-separated row-count list into positive integers."""
     rows: list[int] = []
     for part in value.split(","):
         if not part:
@@ -55,6 +56,7 @@ def parse_rows(value: str) -> list[int]:
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse CLI arguments, sorting and deduplicating the requested row sweep."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-url", required=True,
                         help="serve root URL without /v1, e.g. http://127.0.0.1:8080")
@@ -85,10 +87,12 @@ def run_row(
     rows: int,
     args: argparse.Namespace,
 ) -> dict[str, Any]:
+    """Release one fixed batch of decoding streams together and summarize their TPOTs."""
     barrier = threading.Barrier(rows)
     streams: list[dict[str, Any]] = [{} for _ in range(rows)]
 
     def worker(index: int) -> None:
+        """Prepare one stream, wait for the barrier, execute it, and record its timing."""
         record: dict[str, Any] = streams[index]
         request = ProtocolRequest(
             protocol="openai_chat",
@@ -170,6 +174,7 @@ def run_row(
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the row sweep against Serve and write the optional JSON report."""
     args = parse_args(argv)
     client = NInferServeClient(args.base_url, args.timeout, args.api_key)
     model = client.discover_model()

@@ -11,6 +11,7 @@ from .safetensors import SafetensorsSource
 def fp8_block_source(
     store: SafetensorsSource, prefix: str, shape: tuple[int, int]
 ) -> LogicalSource:
+    """Wrap a published E4M3FN matrix with BF16 128x128 block scales as a LogicalSource."""
     n, k = shape
     if n % 128 or k % 128:
         raise ValueError("FP8 block import requires N and K divisible by 128")
@@ -23,6 +24,7 @@ def fp8_block_source(
             raise ValueError(f"{prefix}.{suffix}: unexpected encoded geometry/type")
 
     def encoded(first: int, last: int) -> EncodedRows:
+        """Read encoded 128-row blocks in [first, last) as codes plus block scales."""
         if not 0 <= first < last <= n or first % 128 or last % 128:
             raise ValueError("FP8 encoded reads require complete 128-row blocks")
         codes = store.read_flat(prefix + ".weight", first * k, last * k)
@@ -38,6 +40,7 @@ def fp8_block_source(
         )
 
     def values(begin: int, end: int) -> torch.Tensor:
+        """Decode flat values in [begin, end) by dequantizing their enclosing 128-row blocks."""
         if begin == end:
             return torch.empty(0, dtype=torch.float32)
         first = begin // (128 * k) * 128
