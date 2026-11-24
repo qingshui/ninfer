@@ -1,4 +1,4 @@
-# Tools
+# 工具
 
 工具使用显式 artifact、executable 和输出目录；Python 不提供另一条模型推理路径。
 维护环境为 Python 3.11，各工具按自身 requirements 使用已选环境，不在运行时隐式下载模型。
@@ -17,7 +17,7 @@
 Artifact 的表示与物化关系见[权重与加载](../docs/maintainer/weights-and-loading.md)。
 各命令参数以 `--help` 为准；managed runner 拥有其启动的服务，resident runner 只访问给定地址。
 
-## Memory bandwidth probe
+## 内存带宽探针
 
 持续带宽 probe 是 CMake benchmark target，使用所选架构：
 

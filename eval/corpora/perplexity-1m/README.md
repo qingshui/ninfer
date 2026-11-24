@@ -1,22 +1,14 @@
-# NInfer Perplexity Corpus
+# NInfer 困惑度语料
 
-`ninfer-ppl-1m-v1` is the fixed text corpus for NInfer causal-perplexity evaluation. It contains
-16 independent UTF-8 streams from four domains. The streams are not concatenated during scoring;
-the first token of each stream is the only token without a causal score.
+`ninfer-ppl-1m-v1` 是 NInfer 因果困惑度评测使用的固定文本语料，包含来自四个领域的 16 条相互独立的 UTF-8 流。评分时各流不做拼接；每条流的第一个 token 是唯一没有因果评分的 token。
 
-| Domain | Source | Streams |
+| 领域 | 来源 | 流数 |
 |---|---|---:|
 | `english_reference` | WikiText-2 raw test | 4 |
 | `english_long_form` | PG-19 test books | 4 |
-| `chinese_reference` | Chinese Wikipedia | 4 |
-| `ninfer_code` | NInfer production C++/CUDA source | 4 |
+| `chinese_reference` | 中文维基百科 | 4 |
+| `ninfer_code` | NInfer 生产 C++/CUDA 源码 | 4 |
 
-The `full` mode contains all 16 streams and is roughly a one-million-token workload. The `quick`
-mode selects stream `00` from every domain and is roughly a quarter of that size. `manifest.json`
-records the stream order and paths; `provenance/*.jsonl` maps every output stream back to source
-records or file byte ranges. See `THIRD_PARTY_NOTICES.md` before redistributing the corpus.
+`full` 模式包含全部 16 条流，工作量约一百万 token；`quick` 模式从每个领域选取 `00` 号流，约为前者的四分之一。`manifest.json` 记录流顺序与路径；`provenance/*.jsonl` 把每条输出流映射回源记录或文件字节区间。再分发语料前请先阅读 `THIRD_PARTY_NOTICES.md`。
 
-The streams were initially sized with the Qwen3.6 tokenizer, without special tokens, only to keep
-their workloads in the intended rough range. Tokenizer identity and exact token counts are not part
-of the corpus contract. Every evaluation tokenizes the committed text with its artifact's tokenizer
-and reports the resulting counts. A changed corpus uses a new corpus identity.
+各流的规模最初用 Qwen3.6 tokenizer（不含特殊 token）粗调，只为了让工作量落在预期的大致区间。tokenizer 的身份与精确 token 数不属于语料合同；每次评测都用其 artifact 的 tokenizer 对提交的文本重新分词并报告所得计数。变更后的语料使用新的语料身份。

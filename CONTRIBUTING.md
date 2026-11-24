@@ -1,166 +1,122 @@
-# Contributing to NInfer
+# 参与 NInfer 贡献
 
-NInfer welcomes precise problem reports, reproducible performance evidence, and carefully scoped
-code contributions. The most useful first contribution is often an Issue that establishes what is
-happening and why it matters. A pull request is an implementation of an agreed change, not the
-place to ask the maintainer to discover the problem, choose its semantics, or redesign its core
-approach.
+NInfer 欢迎准确的问题报告、可复现的性能证据，以及范围克制的代码贡献。最有价值的首个贡献往往是一个 Issue：说清楚发生了什么、为什么重要。Pull request 是"已达成一致的变更"的实现，而不是让维护者去发现问题、决定语义或重新设计核心方案的地方。
 
-## Project scope and decisions
+## 项目范围与决策
 
-NInfer is an intentionally focused inference engine. Contributions are evaluated against the
-supported product described in [`README.md`](README.md), the public documentation map in
-[`docs/README.md`](docs/README.md), and the applicable architecture documents. Broader
-compatibility or generality is not a benefit by itself when it adds a product contract or
-maintenance surface that the project does not intend to own.
+NInfer 是一个刻意保持专注的推理引擎。所有贡献都按 [`README.md`](README.md) 描述的支持产品、[`docs/README.md`](docs/README.md) 的公开文档地图，以及适用的架构文档来评估。如果更广的兼容性或通用性会带来项目无意承担的产品合同或维护面，它本身不构成收益。
 
-The maintainer makes the final decision about product scope, architecture, and long-term
-maintenance. Establishing that a bug is real or that an idea is useful does not imply that a
-particular implementation will be accepted. The maintainer may preserve the report or core idea
-and implement it independently within the current architecture.
+产品范围、架构与长期维护由维护者做最终决定。证明一个 bug 真实存在或一个想法有用，并不意味着某个具体实现会被接受。维护者可以保留报告或核心思路，并在现有架构内独立实现。
 
-## Start with an Issue
+## 从 Issue 开始
 
-Every bug, performance opportunity, feature request, protocol change, and architecture proposal
-must begin with an Issue before implementation starts. Use the Issue to establish:
+每个 bug、性能机会、功能请求、协议变更与架构提案，都必须先有 Issue 再开始实现。用 Issue 说明：
 
-- the concrete problem or use case;
-- whether it occurs within the supported product scope;
-- the expected behavior or performance claim;
-- the affected contract and ownership boundary; and
-- whether an external implementation is appropriate.
+- 具体问题或使用场景；
+- 是否落在支持的产品范围内；
+- 预期行为或性能主张；
+- 受影响的合同与所有权边界；
+- 由外部实现是否合适。
 
-Wait for the maintainer to confirm the scope and implementation direction before investing in a
-pull request. Opening an Issue does not by itself approve a proposed design. A pull request without
-a linked, confirmed Issue may be closed without detailed review.
+在投入 pull request 之前，先等维护者确认范围与实现方向。开 Issue 本身不等于批准某个设计。没有关联已确认 Issue 的 pull request 可能不经详细评审就被关闭。
 
-### Bug reports
+### Bug 报告
 
-A bug report must contain enough information for the maintainer to locate and reason about the
-failure. Include, as applicable:
+Bug 报告必须包含足够的信息，让维护者能定位并推理失败原因。酌情包含：
 
-- the exact NInfer commit or release, artifact source, and recipe when using custom weights;
-- the GPU, driver, CUDA toolchain, build configuration, and relevant runtime options;
-- the complete command, request, or smallest practical reproduction;
-- the expected behavior and the observed behavior;
-- relevant logs or error output as text;
-- the reproduction frequency and any known trigger or boundary condition; and
-- checks already performed, including anything that could not be verified.
+- 精确的 NInfer 提交或版本、artifact 来源，以及使用自定义权重时的配方；
+- GPU、驱动、CUDA 工具链、构建配置与相关运行时选项；
+- 完整命令、请求，或最小可复现样例；
+- 预期行为与实际行为；
+- 相关日志或错误输出的文字版；
+- 复现频率，以及已知的触发条件或边界条件；
+- 已经做过的检查，包括无法验证的部分。
 
-State clearly when a reproduction is incomplete or when the behavior occurs outside the advertised
-product target. An unsupported use case may still motivate a proposal, but it is not a defect in
-the supported product contract.
+复现不完整，或行为出现在宣传的产品目标之外时，请明确说明。不支持的使用场景仍可以成为提案的动机，但它不是受支持产品合同的缺陷。
 
-### Performance reports
+### 性能报告
 
-A performance report must identify the level of the claim: operator, schedule, request phase, or
-end-to-end inference. Include the baseline and candidate measurements under comparable conditions,
-the exact workload and commands, hardware and toolchain, warmup and repetition method, and a useful
-summary of the results.
+性能报告必须说明主张所处的层级：算子、调度、请求阶段，还是端到端推理。要给出可比条件下基线与候选的测量、确切的工作负载与命令、硬件与工具链、预热与重复方法，以及有用的结果摘要。
 
-Account for relevant tradeoffs such as workspace, resident memory, transfer cost, numerical quality,
-and effects on other execution paths. End-to-end results can establish an end-to-end observation;
-they do not isolate an operator change. A proposed operator optimization should therefore include a
-direct operator benchmark and appropriate correctness evidence.
+考虑相关取舍：workspace、常驻内存、搬运成本、数值质量，以及对其他执行路径的影响。端到端结果只能证明端到端观察，无法隔离单个算子的变化。因此算子优化提案应附上直接的算子基准与相应的正确性证据。
 
-### Feature and architecture proposals
+### 功能与架构提案
 
-Describe the real supported use case, the limitation of the current behavior, the desired semantics,
-and the new contract or maintenance responsibility the project would acquire. Explain why the
-existing architecture cannot satisfy the use case. Do not begin a broad implementation until the
-maintainer has accepted both the product direction and the proposed ownership model.
+说明真实的使用场景、当前行为的局限、期望的语义，以及项目将因此承担的新合同或维护责任。解释为什么现有架构满足不了该场景。在维护者同时接受产品方向与所提议的所有权模型之前，不要开始大范围实现。
 
-## Pull request scope
+## Pull request 范围
 
-Target pull requests at the `master` branch. Before implementation, also review the current `dev`
-branch to avoid duplicating or conflicting with maintainer work that has not yet reached `master`.
+Pull request 以 `master` 分支为目标。实现之前，也请查看当前 `dev` 分支，避免与尚未进入 `master` 的维护者工作重复或冲突。
 
-Each pull request must represent one coherent engineering decision:
+每个 pull request 必须代表一个完整的工程决策：
 
-- address one confirmed Issue with one consistent design;
-- include all implementation, tests, tooling, and active documentation required to close that
-  decision correctly;
-- keep independent bugs, optimizations, refactors, and product changes in separate pull requests;
-- exclude unrelated cleanup and speculative compatibility work; and
-- avoid changing public semantics or product scope beyond what was agreed in the Issue.
+- 用一个一致的设计处理一个已确认的 Issue；
+- 包含正确关闭该决策所需的全部实现、测试、工具与现行文档；
+- 相互独立的 bug 修复、优化、重构与产品变更分属不同 pull request；
+- 不包含无关清理与投机型兼容工作；
+- 不超出 Issue 达成一致的范围去修改公开语义或产品范围。
 
-There is no mechanical line-count or file-count limit. A necessary solution may cross several
-files, but every changed part must belong to the same contract and be reviewable and verifiable as
-one unit.
+没有机械的行数或文件数上限。一个必要的方案可能横跨多个文件，但每个改动部分必须属于同一合同，并且能作为一个整体评审与验证。
 
-## Engineering and verification
+## 工程与验证
 
-Read the active documentation governing the code being changed and preserve its ownership and
-semantic contracts. In particular:
+阅读与所改代码相关的现行文档，保持其所有权与语义合同。特别是：
 
-- validate exact transformations and formats with exact comparison;
-- validate floating-point work against an independent mathematical oracle with a justified
-  numerical criterion;
-- verify the complete affected transition for stateful behavior;
-- exercise relevant supported shapes and execution routes for CUDA changes;
-- measure performance at the level being claimed; and
-- keep externally observable implementation, schema tests, and documentation consistent.
+- 精确的变换与格式用逐位比较验证；
+- 浮点计算对照独立的数学 oracle 验证，并给出合理的数值判据；
+- 有状态行为要验证完整受影响的转移；
+- CUDA 改动要覆盖相关支持的形状与执行路径；
+- 在所主张的层级上测量性能；
+- 保持外部可观察的实现、schema 测试与文档一致。
 
-Use the existing project workflows:
+使用项目既有工作流：
 
-- [`tests/README.md`](tests/README.md) for test organization and commands;
-- [`bench/README.md`](bench/README.md) for product and operator benchmarks; and
-- [`docs/maintainer/op-development.md`](docs/maintainer/op-development.md) for numerical Op
-  development and qualification.
+- [`tests/README.md`](tests/README.md)：测试组织与命令；
+- [`bench/README.md`](bench/README.md)：产品与算子基准；
+- [`docs/maintainer/op-development.md`](docs/maintainer/op-development.md)：数值 Op 开发与准入。
 
-Run the focused checks needed to establish the changed behavior and its material claims. Record the
-exact commands and summarize the results. If a relevant check could not be run, state that
-limitation and its consequence. Do not claim validation that was not performed.
+运行能证明改动行为及其实质主张的针对性检查，记录确切命令并汇总结果。相关检查没能运行的，说明该局限及其后果。不要声称未做过的验证。
 
-## Contributor responsibility and AI assistance
+## 贡献者责任与 AI 辅助
 
-The contributor is responsible for every submitted change, regardless of which tools were used to
-produce it. Tool choice neither qualifies nor disqualifies a contribution.
+无论改动由什么工具产出，贡献者对提交的每一处改动负责。工具的选择既不加分也不减分。
 
-The contributor must understand the complete diff, explain the design and its boundary conditions,
-review generated output, perform the stated verification, and respond to technical review. Code
-that the contributor cannot explain, validate, or maintain is not ready for submission. Maintainer
-review is not a substitute for contributor debugging or engineering supervision.
+贡献者必须理解完整 diff，能解释设计及其边界条件，审查生成内容，完成所述验证，并回应技术评审。贡献者解释不了、验证不了或维护不了的代码，还不具备提交条件。维护者的评审不能替代贡献者的调试与工程把关。
 
-## Pull request description
+## Pull request 描述
 
-Use the [PR template](.github/pull_request_template.md) to describe the problem and scope,
-implementation, and verification.
+用 [PR 模板](.github/pull_request_template.md)描述问题与范围、实现与验证。
 
-A pull request description must include:
+Pull request 描述必须包含：
 
-- the linked Issue and the agreed scope;
-- the concrete design and why it fits the current architecture;
-- the affected behavior, ownership boundary, or public contract;
-- the exact verification commands and summarized results;
-- the workload, hardware, toolchain, and methodology for any performance claim; and
-- every relevant check that was not run and the resulting limitation.
+- 关联的 Issue 与达成一致的范围；
+- 具体设计，以及它为何契合当前架构；
+- 受影响的行为、所有权边界或公开合同；
+- 确切的验证命令与结果汇总；
+- 任何性能主张的工作负载、硬件、工具链与方法；
+- 所有未运行的相关检查及其带来的局限。
 
-Choose the verification details relevant to your change:
+按改动类型选择验证细节：
 
-| Change | Evidence to include |
+| 改动 | 应提供的证据 |
 |---|---|
-| Bug fix | The trigger, expected behavior, and verification of the fix. |
-| Recipe or conversion method | The source, target representation, conversion command, and which stages were actually verified: conversion, loading, or execution. |
-| New Op or shape | Supported inputs, independent numerical verification, and relevant boundaries. Follow [Op development](docs/maintainer/op-development.md). |
-| Performance tuning | Correctness evidence and a final performance report. Follow the [tuning and measurement guidance](docs/maintainer/op-development.md#调优与测量). |
-| Runtime or interface change | Reproduction and verification of the affected behavior. |
-| Documentation, build, or tooling | Checks relevant to the change, such as links, affected build targets, or tool invocations. |
+| Bug 修复 | 触发条件、预期行为，以及修复的验证。 |
+| 配方或转换方法 | 源、目标表示、转换命令，以及实际验证到的阶段：转换、加载还是执行。 |
+| 新 Op 或新形状 | 支持的输入、独立数值验证与相关边界。遵循 [Op 开发](docs/maintainer/op-development.md)。 |
+| 性能调优 | 正确性证据与最终性能报告。遵循[调优与测量指引](docs/maintainer/op-development.md#调优与测量)。 |
+| 运行时或接口变更 | 受影响行为的复现与验证。 |
+| 文档、构建或工具 | 与改动相关的检查，如链接、受影响的构建目标或工具调用。 |
 
-## Review policy
+## 评审政策
 
-Review is a limited maintainer resource and is not guaranteed. A pull request may be closed without
-a line-by-line review when it:
+评审是有限的维护者资源，不保证提供。Pull request 出现以下情形时，可以不经逐行评审而关闭：
 
-- was submitted before its problem, scope, or implementation direction was confirmed;
-- falls outside the supported product or expands an unapproved contract;
-- combines independent changes into an unreviewable implementation;
-- contains evident correctness, ownership, lifetime, state, or boundary problems;
-- lacks evidence appropriate to its correctness, numerical, or performance claims;
-- cannot be explained and supported by its contributor; or
-- would require the maintainer to redesign, split, debug, or complete its core implementation.
+- 在问题、范围或实现方向被确认之前提交；
+- 落在受支持产品之外，或扩展了未经批准的合同；
+- 把相互独立的改动合并成无法评审的实现；
+- 存在明显的正确性、所有权、生命周期、状态或边界问题；
+- 缺少与其正确性、数值或性能主张相称的证据；
+- 贡献者无法解释与支持它；或
+- 需要维护者重新设计、拆分、调试或补完其核心实现。
 
-Closing a pull request does not necessarily reject the underlying report or idea. It means that the
-submitted implementation does not meet the project's review and maintenance threshold. The
-maintainer may address a confirmed problem through a separate implementation and reference the
-original report where appropriate.
+关闭 pull request 不等于否定底层的报告或想法；它只说明该实现未达到项目的评审与维护门槛。维护者可以通过单独的实现处理已确认的问题，并在合适处引用原始报告。

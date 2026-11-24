@@ -1,16 +1,16 @@
-# Capability Evaluation
+# 能力评测
 
 `ninfer_eval` 是仓库内的能力评测协调器，通过配置的 API target 调用服务。
 Coordinator 管理 job、并发、进度与恢复；backend 管理数据集和评分。EvalScope 与无网络的 mock
 使用同一 backend 边界，不把 evaluator 实现耦合进推理引擎。
 
-## Environment
+## 环境
 
 使用选定的 Python 3.11 环境，依赖版本以 [requirements.txt](requirements.txt) 为准。
 命令通过 `PYTHONPATH=eval` 使用仓库内 package。依赖安装、数据集缓存和模型服务分别管理，
 运行评测不隐式转换 `.ninfer` 权重。
 
-## Configuration
+## 配置
 
 [configs](configs/)保存任务配置；[capability-suite](configs/capability-suite.yaml)与
 [mock-suite](configs/mock-suite.yaml)提供结构示例。
@@ -24,7 +24,7 @@ API key 通过环境变量取得，不进入保存的 effective config。
 临时评测将 `runtime.runs_dir` 显式设为 `.agent-tmp/<task>/runs`。
 已有发布结果的来源由对应 [model cards](../model-cards/)维护，不从当前环境重跑就声称复现历史分数。
 
-## Commands
+## 命令
 
 ```bash
 PYTHONPATH=eval python3 -m ninfer_eval plan \
@@ -49,7 +49,7 @@ PYTHONPATH=eval python3 -m ninfer_eval summarize --run .agent-tmp/eval/runs/RUN
 Resume 核对 effective config 与 backend，跳过已完成 job，继续使用可用的预测缓存。
 不在恢复中悄悄改变采样、题目或评分条件。
 
-## Results and extension
+## 结果与扩展
 
 Run directory 保存 effective config、manifest、state、events、log、backend 原始产物及 summary。
 原始响应、截断、失败和不完整 job 保留；未知总数不伪造进度，partial 不报告为完整正式成绩。

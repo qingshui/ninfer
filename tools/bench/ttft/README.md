@@ -3,7 +3,7 @@
 Runner 向已运行服务发送公开 HTTP 请求，记录首输出、后续流事件、结束与取消。
 Campaign controller 另行负责启动配置与逐 sample 的服务生命周期；二者不调用模型内部接口。
 
-## Measurement contract
+## 测量合同
 
 请求 JSON 和媒体编码在计时前准备，每条请求使用已连接的 HTTP 连接。
 TTFT 从写请求前开始，到第一个非空 text、reasoning 或 tool-argument delta 结束。
@@ -16,7 +16,7 @@ SSE event 不等于 token：spec 一次可发布多 token，网络也可能合�
 `not_observed` 与 `unavailable` 不同，慢或失败的已构造场景仍是有效证据。
 吞吐使用实际成功输出和完整 makespan，不用缺失 usage 的 bytes/event 数推算 token。
 
-## Workloads and resources
+## 负载与资源
 
 [Cases](cases.py)定义请求图，[profiles](profiles.py)定义服务配置，
 [冻结语料](../../../bench/fixtures/ttft/README.md)定义输入身份与 token 事实。
@@ -29,7 +29,7 @@ SSE event 不等于 token：spec 一次可发布多 token，网络也可能合�
 固定到达记录计划时间与实际发送延迟，输出遵循 EOS；基于生成历史或压力事件的负载标记为
 条件性场景。改变请求图或测量合同后不能直接并入旧样本。
 
-## Run a campaign
+## 运行压测
 
 ```bash
 python3 tools/bench/run_serve_ttft_campaign.py \
@@ -58,7 +58,7 @@ python3 tools/bench/run_serve_ttft.py \
 
 Profile label 是记录标签，不验证该服务的实际设置。
 
-## Interpretation and comparisons
+## 解读与比较
 
 ```bash
 python3 tools/bench/summarize_serve_ttft.py .agent-tmp/ttft/candidate \
