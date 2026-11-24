@@ -542,6 +542,57 @@ int real_shape_distribution_contract() {
            verify_distribution("sample real token-domain B=32", wide.tokens, oracle);
 }
 
+// Presence and frequency penalties on the real token domain, with top-p active. Each penalized
+// id reorders or resizes the support if its count is missed; 248070 lies in the scalar tail
+// after the last whole 256-token chunk of the one-CTA-per-row route.
+int penalized_real_shape_distribution_contract() {
+    constexpr int physical_rows = 248320;
+    constexpr int token_domain  = 248077;
+    std::vector<float> column(physical_rows, -20.0f);
+    const int ids[]      = {17, 7919, 65537, 131071, 200003, 248070};
+    const float logits[] = {3.0f, 2.6f, 2.2f, 1.8f, 1.4f, 1.0f};
+    for (int i = 0; i < 6; ++i) { column[ids[i]] = logits[i]; }
+    column[token_domain]      = 100.0f;
+    column[physical_rows - 1] = 200.0f;
+    round_to_bf16(column);
+    std::vector<int> counts(token_domain, 0);
+    counts[17]     = 2;
+    counts[65537]  = 1;
+    counts[248070] = 3;
+    DeviceBuffer device_counts = to_device(counts);
+
+    ops::SamplingConfig config;
+    config.temperature        = 0.9f;
+    config.top_p              = 0.9f;
+    config.presence_penalty   = 1.5f;
+    config.frequency_penalty  = 0.25f;
+    config.seed               = 4242;
+    config.token_counts       = static_cast<const std::int32_t*>(device_counts.data());
+    const Distribution oracle = distribution_oracle(column, token_domain, config, &counts);
+
+    constexpr int samples = 4096;
+    RunResult result =
+        run_repeated(column, token_domain, samples, 8, config, 3000, ops::kSamplePurposeDecode);
+    RunResult wide =
+        run_repeated(column, token_domain, samples, 32, config, 3000, ops::kSamplePurposeDecode);
+    int failures = result.integrity_failures + wide.integrity_failures;
+    failures += verify_exact("sample penalized real token-domain counts",
+                             from_device<int>(device_counts, counts.size()), counts);
+    // Greedy picks the best adjusted logit: 7919 (2.6) once 17 drops to 3.0 - 1.5 - 0.5.
+    config.temperature = 0.0f;
+    for (const int batch : {8, 32}) {
+        const auto greedy = run_homogeneous_batch(repeat_column(column, batch), physical_rows,
+                                                  token_domain, batch, config, 0,
+                                                  ops::kSamplePurposeDecode, &counts);
+        failures += greedy.integrity_failures;
+        failures += verify_exact("sample penalized real token-domain greedy", greedy.tokens,
+                                 std::vector<int>(batch, 7919));
+    }
+    return failures +
+           verify_distribution("sample penalized real token-domain B=8", result.tokens, oracle) +
+           verify_distribution("sample penalized real token-domain B=32", wide.tokens, oracle);
+}
+
 int rng_key_contract() {
     std::vector<float> column = {0.0f, 0.0f};
     round_to_bf16(column);
@@ -768,6 +819,8 @@ void add_sampling_cases(ninfer::test::OpSuite& suite) {
     suite.add("sample/filtered_distribution", filtered_distribution_contract);
     suite.add("sample/capped_distribution", capped_distribution_contract);
     suite.add("sample/real_shape_distribution", real_shape_distribution_contract);
+    suite.add("sample/penalized_real_shape_distribution",
+              penalized_real_shape_distribution_contract);
     suite.add("sample/rng_key", rng_key_contract);
     suite.add("sample/workspace_route_boundary", workspace_route_boundary_contract);
     suite.add("sample/increment_counts", increment_counts_contract);

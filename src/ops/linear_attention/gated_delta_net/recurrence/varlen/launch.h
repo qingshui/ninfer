@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/dtype.h"
 #include "core/layout.h"
 #include "ops/linear_attention/gated_delta_net/recurrence/chunked/workspace.h"
 #include <cuda_runtime.h>
@@ -65,6 +66,7 @@ struct Operands {
     int tokens, rows, boundaries;
     int chunked_threshold;
     float scale;
+    DType state_dtype; // FP32 or BF16 words of source, destination and checkpoint records
 };
 
 struct Workspace {

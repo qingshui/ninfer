@@ -39,6 +39,10 @@ struct Plan {
     // Complete may widen shared/control tiles independently of routed-shared.
     bool network_topk      = false;
     int shared_columns     = 32;
+    // K splits of the mma.sync control and shared gate/up product. Above one, each split writes
+    // FP32 partial sums that a second kernel adds in split order before the epilogue; it divides
+    // the 48 hidden-dimension tiles of the 3072-wide profile.
+    int shared_splits      = 1;
     int queued_ctas_per_sm = 0;
 
     int pool_min_experts = 0, pool_expert_limit = 0, pool_columns = 0;
@@ -85,6 +89,8 @@ struct Storage {
     float* vector_activation    = nullptr;
     float* routed_sum           = nullptr;
     void* shared_activation     = nullptr;
+    // Split partial sums of the control and shared gate/up rows, [splits][tokens][rows].
+    float* shared_partials      = nullptr;
     Groups groups{};
 };
 
@@ -116,6 +122,13 @@ bool launch_shared_dense(const Tensor& x, const ScaledSwiGLUTerm& shared, const 
 bool launch_control_shared_gate_up_dense(const Tensor& x, const MoeWeights& weights,
                                          const Storage& storage, const Plan& plan,
                                          CudaExecutionView execution);
+
+// With the shared activation written densely, the router rows of the same call run as one sm100
+// BF16 GEMM that stores the FP32 scores and zeroes the per-expert counts. Returns false when the
+// router weights do not match the 122B geometry; the control kernel then computes the scores.
+bool launch_control_router_dense(const Tensor& x, const MoeWeights& weights, float* scores,
+                                 const Storage& storage, const Plan& plan,
+                                 CudaExecutionView execution);
 #endif
 
 void launch_control_shared(const Tensor& x, const MoeWeights& weights, const ExpertRoutes& routes,

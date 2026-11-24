@@ -56,6 +56,17 @@ inline void set_context_capacity(EngineOptions& options, std::uint32_t retained_
     return geometry.required_bytes(records);
 }
 
+// Records a test reserves from the context pool itself: `states` State images and `pages` pages
+// of every KV record class, packed as the pool packs them.
+[[nodiscard]] inline std::size_t held_records_bytes(const runtime::ContextCapacityPlan& plan,
+                                                    std::uint32_t states, std::uint32_t pages) {
+    const auto geometry = describe_context_pool(plan.records);
+    std::vector<RecordRequest> records{{geometry.spec_classes.at(0), states}};
+    for (std::size_t index = 1; index < geometry.spec_classes.size(); ++index)
+        records.push_back({geometry.spec_classes[index], pages});
+    return geometry.required_bytes(records);
+}
+
 // Two private requests start together, then their growth exceeds the shared arena. The
 // startup minimum must still support either complete request and its recovery by itself.
 // Choose the starting length from the actual record packing, not a separate KV token quota.

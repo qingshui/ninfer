@@ -49,32 +49,38 @@ void dispatch_tile(int tile_tokens, const Sm100Bf16Operands& p, const Epilogue& 
 }
 } // namespace
 
-Nvfp4Sm100Tuning bf16_sm100_tuning(int rows, int, int tokens) {
-    if (tokens <= 16) return {16, 1, 1};
-    if (tokens <= 32) return {32, 1, 1};
-    if (tokens <= 64) return {64, 1, 1};
-    // 256-token tiles cut operand traffic per MAC; they need enough tiles to fill the SMs.
-    if (tokens >= 3072 && rows >= 1024) return {256, 1, 1};
-    return {128, 1, 1};
+Nvfp4Sm100Tuning bf16_sm100_tuning(int rows, int k, int tokens, int weight_parts) {
+    // A SwiGLU tile owns a gate and an up weight tile.
+    const int tile_rows    = 128 * weight_parts;
+    const int weight_tiles = (rows + tile_rows - 1) / tile_rows;
+    return {g::plan_gemm(weight_tiles, tokens, k / 64, weight_parts, 0).tile_tokens, 1, 1};
 }
 
 void launch_sm100_bf16_gemm(const Sm100Bf16Operands& p, const Sm100Epilogue& epilogue,
                             __nv_bfloat16* y, cudaStream_t stream) {
-    if (p.rows <= 0 || p.rows % 128 != 0 || p.k <= 0 || p.k % 64 != 0 || p.tokens <= 0)
-        g::reject("BF16 needs whole 128-row tiles, K a multiple of 64 and tokens > 0");
+    const bool scores = epilogue.kind == Sm100Epilogue::Scores;
+    if (p.rows <= 0 || (!scores && p.rows % 128 != 0) || p.k <= 0 || p.k % 64 != 0 ||
+        p.tokens <= 0)
+        g::reject("BF16 needs whole 128-row tiles (scores excepted), K a multiple of 64 and "
+                  "tokens > 0");
     if (!g::aligned(p.x, 16) || !g::aligned(p.weight, 16))
         g::reject("BF16 operands must be 16-byte aligned");
 
-    const Nvfp4Sm100Tuning tuning = bf16_sm100_tuning(p.rows, p.k, p.tokens);
-    if (tuning.tile_tokens < 128 && p.tokens > tuning.tile_tokens)
-        g::reject("tile narrower than 128 tokens must cover the whole call");
+    const int weight_parts = epilogue.kind == Sm100Epilogue::SwiGLU ? 2 : 1;
+    const Nvfp4Sm100Tuning tuning = bf16_sm100_tuning(p.rows, p.k, p.tokens, weight_parts);
 
+    if (scores) {
+        if (!epilogue.scores || !g::aligned(epilogue.scores, 4) || epilogue.score_stride < p.rows)
+            g::reject("scores need a 4-byte aligned output and a stride of at least the rows");
+        const g::ScoresEpilogue e{epilogue.scores, epilogue.score_stride, p.rows};
+        dispatch_tile<g::ScoresEpilogue, 1>(tuning.tile_tokens, p, e, (p.rows + 127) / 128, stream);
+        return;
+    }
     if (epilogue.kind == Sm100Epilogue::SwiGLU) {
         if (p.rows % 256 != 0) g::reject("SwiGLU needs gate and up halves of whole 128-row tiles");
         if (!g::aligned(y, 16)) g::reject("output must be 16-byte aligned");
         const g::SwiGluEpilogue e{1.0f, y, p.rows / 2, p.tokens};
-        dispatch_tile<g::SwiGluEpilogue, 2>(tuning.tile_tokens == 256 ? 128 : tuning.tile_tokens,
-                                            p, e, p.rows / 256, stream);
+        dispatch_tile<g::SwiGluEpilogue, 2>(tuning.tile_tokens, p, e, p.rows / 256, stream);
         return;
     }
     const g::PlainEpilogue e = g::make_plain_epilogue(epilogue, y, 1.0f, p.rows, p.tokens);

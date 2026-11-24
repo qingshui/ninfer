@@ -1,5 +1,7 @@
 #pragma once
 
+#include "core/dtype.h"
+
 #include <cuda_bf16.h>
 #include <cstdint>
 #include <cmath>
@@ -21,12 +23,21 @@ struct RecurrenceGeometry {
 
 struct RecurrenceOperands {
     const __nv_bfloat16 *q, *k, *v;
-    const float *g, *beta, *state_in;
-    float* state_out;
+    const float *g, *beta;
+    const void* state_in; // state_dtype words
+    void* state_out;
     __nv_bfloat16* out;
     int qk_heads, value_heads, tokens;
     float scale;
+    DType state_dtype = DType::FP32;
 };
+
+// Recurrent state fields are FP32 or BF16; every state field of one call shares the dtype.
+inline void require_state_dtype(DType dtype, DType expected, const char* op, const char* name) {
+    if ((dtype != DType::FP32 && dtype != DType::BF16) || dtype != expected)
+        throw std::invalid_argument(std::string(op) + ": " + name +
+                                    " must be FP32 or BF16 and match the other state fields");
+}
 
 inline void require_scale(float scale, const char* op) {
     const float expected = 1.0f / std::sqrt(static_cast<float>(kStateDim));

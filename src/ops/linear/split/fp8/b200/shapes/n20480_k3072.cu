@@ -22,14 +22,15 @@ void require_quantized(LinearPolicy policy) {
 
 std::size_t capacity(LinearPolicy policy, std::int32_t, std::int32_t last) {
     require_quantized(policy);
-    return fp8_a8_workspace_capacity_bytes(last, kK);
+    return fp8_a8_workspace_capacity_bytes(last, kK, kFp8SplitN20480K3072PartialBytes);
 }
 
 void launch(const Tensor& x, Weights weights, std::span<const Tensor> outputs,
             MemoryArena* workspace, cudaStream_t stream) {
     require_quantized(weights.policy);
     if (workspace == nullptr) throw std::invalid_argument("fp8 linear_split requires workspace");
-    const auto scratch = allocate_fp8_a8_workspace(*workspace, x.ne[1], kK);
+    const auto scratch =
+        allocate_fp8_a8_workspace(*workspace, x.ne[1], kK, kFp8SplitN20480K3072PartialBytes);
     fp8_split_n20480_k3072_dispatch(x, weights.first, outputs, scratch, stream);
 }
 } // namespace
@@ -51,7 +52,7 @@ void fp8_split_n20480_k3072_dispatch(const Tensor& x, const Weight& weight,
     epilogue.segments = kSplitRows<12288, 8192>;
     epilogue.outputs  = output;
     launch_sm100_fp8_gemm({p.x, p.x_scales, p.codes, p.scales, p.rows, p.k, p.tokens}, epilogue,
-                          nullptr, stream);
+                          nullptr, stream, {workspace.partials, workspace.partial_bytes});
 }
 
 const SplitShape kFp8RowFp32SplitN20480K3072{kRows, kK, kSplitRows<12288, 8192>, launch, capacity};

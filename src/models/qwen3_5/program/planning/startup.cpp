@@ -192,6 +192,7 @@ ResourceLayout persistent_layout(const SequencePlanImpl& plan) {
                 .value_head_dim = config.gdn ? dimension(config.gdn->linear_value_head_dim) : 0,
                 .key_head_dim   = config.gdn ? dimension(config.gdn->linear_key_head_dim) : 0,
                 .conv_dtype     = DType::BF16,
+                .recurrent_dtype = DType::BF16,
             },
         .hidden = dimension(config.hidden_size),
     };

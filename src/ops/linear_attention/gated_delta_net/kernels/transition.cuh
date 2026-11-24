@@ -7,6 +7,7 @@
 #include "ops/common/numeric/math.cuh"
 #include <cuda_bf16.h>
 #include <cstdint>
+#include <type_traits>
 
 namespace ninfer::ops::detail::gated_delta_net {
 struct HeadMap {
@@ -33,14 +34,57 @@ static_assert(kStateDim % common::kWarpSize == 0);
 static_assert(kQkPerLane == 4);
 static_assert(kStateDim % kBlockDv == 0);
 
-__device__ __forceinline__ void load_qk_lane(float (&reg)[kQkPerLane], const float* base,
-                                             std::uint32_t dqk_base) {
-    common::store_vec(reg, common::load_vec<float4>(base + dqk_base));
+// Recurrent state words are FP32 or BF16. Arithmetic is FP32 in both cases: a BF16 word widens
+// exactly and a published state is rounded to nearest even.
+template <class State>
+inline constexpr bool kBf16State = std::is_same_v<State, __nv_bfloat16>;
+
+template <class State>
+__device__ __forceinline__ float represent(float value) {
+    if constexpr (kBf16State<State>) return __bfloat162float(__float2bfloat16_rn(value));
+    return value;
 }
 
-__device__ __forceinline__ void store_qk_lane(const float (&reg)[kQkPerLane], float* base,
+__device__ __forceinline__ float state_value(float word) { return word; }
+__device__ __forceinline__ float state_value(__nv_bfloat16 word) { return __bfloat162float(word); }
+
+template <class State>
+__device__ __forceinline__ State state_word(float value) {
+    if constexpr (kBf16State<State>) return __float2bfloat16_rn(value);
+    else return value;
+}
+
+// Four consecutive state words; the address is aligned to four words.
+__device__ __forceinline__ void load_state_quad(float* reg, const float* source) {
+    common::store_vec(reg, common::load_vec<float4>(source));
+}
+
+__device__ __forceinline__ void load_state_quad(float* reg, const __nv_bfloat16* source) {
+    const uint2 packed = common::load_vec<uint2>(source);
+    const float2 low   = common::bf16x2_bits_to_float2(packed.x);
+    const float2 high  = common::bf16x2_bits_to_float2(packed.y);
+    common::store_vec(reg, make_float4(low.x, low.y, high.x, high.y));
+}
+
+__device__ __forceinline__ void store_state_quad(const float* reg, float* destination) {
+    common::store_vec(destination, common::load_vec<float4>(reg));
+}
+
+__device__ __forceinline__ void store_state_quad(const float* reg, __nv_bfloat16* destination) {
+    common::store_vec(destination, make_uint2(common::pack_bf16x2(reg[0], reg[1]),
+                                              common::pack_bf16x2(reg[2], reg[3])));
+}
+
+template <class State>
+__device__ __forceinline__ void load_qk_lane(float (&reg)[kQkPerLane], const State* base,
+                                             std::uint32_t dqk_base) {
+    load_state_quad(reg, base + dqk_base);
+}
+
+template <class State>
+__device__ __forceinline__ void store_qk_lane(const float (&reg)[kQkPerLane], State* base,
                                               std::uint32_t dqk_base) {
-    common::store_vec(base + dqk_base, common::load_vec<float4>(reg));
+    store_state_quad(reg, base + dqk_base);
 }
 
 inline constexpr float kQkL2NormEps = 1.0e-6f;
@@ -130,6 +174,23 @@ __device__ __forceinline__ void apply_gdn_transition(float (&state)[kDvPerWarp][
     }
 }
 
+// Stores scale * S * q for the warp's value rows from the query lane in its consumed form.
+__device__ __forceinline__ void readout_rows(const float (&state)[kDvPerWarp][kQkPerLane],
+                                             const float (&query)[kQkPerLane],
+                                             __nv_bfloat16* output, std::uint32_t dv_base,
+                                             int lane, float scale) {
+    float attn_val = 0.0f;
+#pragma unroll
+    for (int r = 0; r < kDvPerWarp; ++r) {
+        float partial = 0.0f;
+#pragma unroll
+        for (int c = 0; c < kQkPerLane; ++c) { partial += state[r][c] * query[c]; }
+        partial = common::warp_sum<common::kWarpSize>(partial);
+        if (lane == r) { attn_val = partial; }
+    }
+    if (lane < kDvPerWarp) { output[dv_base + lane] = __float2bfloat16(attn_val * scale); }
+}
+
 template <bool Normalize>
 __device__ __forceinline__ void readout_and_store(float (&state)[kDvPerWarp][kQkPerLane],
                                                   const __nv_bfloat16* query, __nv_bfloat16* output,
@@ -137,17 +198,7 @@ __device__ __forceinline__ void readout_and_store(float (&state)[kDvPerWarp][kQk
                                                   int lane, float scale) {
     RawQkLane q = load_raw_qk_lane(query, dqk_base);
     normalize_qk_lane<Normalize>(q.value, lane);
-
-    float attn_val = 0.0f;
-#pragma unroll
-    for (int r = 0; r < kDvPerWarp; ++r) {
-        float partial = 0.0f;
-#pragma unroll
-        for (int c = 0; c < kQkPerLane; ++c) { partial += state[r][c] * q.value[c]; }
-        partial = common::warp_sum<common::kWarpSize>(partial);
-        if (lane == r) { attn_val = partial; }
-    }
-    if (lane < kDvPerWarp) { output[dv_base + lane] = __float2bfloat16(attn_val * scale); }
+    readout_rows(state, q.value, output, dv_base, lane, scale);
 }
 
 struct RecurrentCoordinates {
@@ -198,8 +249,9 @@ struct OutputEffects {
     }
 };
 
+template <class State>
 __device__ __forceinline__ void load_state_tile(float (&state)[kDvPerWarp][kQkPerLane],
-                                                const float* base,
+                                                const State* base,
                                                 const RecurrentCoordinates& coord) {
 #pragma unroll
     for (int r = 0; r < kDvPerWarp; ++r) {
@@ -208,8 +260,9 @@ __device__ __forceinline__ void load_state_tile(float (&state)[kDvPerWarp][kQkPe
     }
 }
 
+template <class State>
 __device__ __forceinline__ void store_state_tile(const float (&state)[kDvPerWarp][kQkPerLane],
-                                                 float* base, const RecurrentCoordinates& coord) {
+                                                 State* base, const RecurrentCoordinates& coord) {
 #pragma unroll
     for (int r = 0; r < kDvPerWarp; ++r) {
         store_qk_lane(state[r], base + static_cast<std::int64_t>(coord.dv_base + r) * kStateDim,
@@ -217,7 +270,21 @@ __device__ __forceinline__ void store_state_tile(const float (&state)[kDvPerWarp
     }
 }
 
-template <bool NormalizeInputs, class Effects, class Access>
+// Replaces the registers by the values a published State field would hold.
+template <class State, int Rows, int Columns>
+__device__ __forceinline__ void represent_state(float (&state)[Rows][Columns]) {
+    if constexpr (kBf16State<State>) {
+#pragma unroll
+        for (int r = 0; r < Rows; ++r) {
+#pragma unroll
+            for (int c = 0; c < Columns; ++c) state[r][c] = represent<State>(state[r][c]);
+        }
+    }
+}
+
+// TokenState is the representation every token's state takes before the next token: float keeps
+// the FP32 registers of one call, a BF16 State repeats the one-token publication.
+template <bool NormalizeInputs, class Effects, class TokenState = float, class Access>
 __device__ __forceinline__ void
 run_recurrent_sequence(float (&state)[kDvPerWarp][kQkPerLane], const Access& access,
                        const RecurrentCoordinates& coord, std::int32_t valid) {
@@ -240,6 +307,7 @@ run_recurrent_sequence(float (&state)[kDvPerWarp][kQkPerLane], const Access& acc
         }
 
         Effects::template publish_output<NormalizeInputs>(state, access, coord, token);
+        represent_state<TokenState>(state);
     }
 }
 

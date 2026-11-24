@@ -82,7 +82,8 @@ gdn::Traffic recurrence_traffic(const Problem& p, int slices) {
 
 std::vector<BenchRow> run_batch_update(const Options& options, std::int32_t tokens,
                                        bench::L2FlushBuffer& flush, CudaExecutionView cuda) {
-    const Problem problem{options.qk_heads, options.value_heads, tokens, options.batch};
+    const Problem problem{options.qk_heads, options.value_heads, tokens, options.batch,
+                          dtype_size(options.state_dtype)};
     Operands operands(problem, false);
 
     const std::size_t qk_elements = static_cast<std::size_t>(gated_delta_net_detail::kStateDim) *
@@ -90,16 +91,19 @@ std::vector<BenchRow> run_batch_update(const Options& options, std::int32_t toke
     const std::size_t state_elements = static_cast<std::size_t>(gated_delta_net_detail::kStateDim) *
                                        gated_delta_net_detail::kStateDim * problem.value_heads;
     const std::int32_t records = 2 * problem.batch;
-    DeviceBuffer states        = bench::make_f32(state_elements * records, 211U, -.02F, .02F);
+    const std::size_t word     = problem.state_word;
+    DeviceBuffer states =
+        options.state_dtype == DType::BF16
+            ? bench::make_bf16(state_elements * records, 211U, -.02F, .02F)
+            : bench::make_f32(state_elements * records, 211U, -.02F, .02F);
     SavedBuffer initial_states(states);
     const auto restore = [&](CudaExecutionView cuda) { initial_states.restore(cuda); };
     std::vector<std::int64_t> source_offsets_host(static_cast<std::size_t>(problem.batch));
     std::vector<std::int64_t> destination_offsets_host(static_cast<std::size_t>(problem.batch));
     for (std::int32_t row = 0; row < problem.batch; ++row) {
-        source_offsets_host[static_cast<std::size_t>(row)] =
-            2 * row * state_elements * sizeof(float);
+        source_offsets_host[static_cast<std::size_t>(row)] = 2 * row * state_elements * word;
         destination_offsets_host[static_cast<std::size_t>(row)] =
-            (2 * row + 1) * state_elements * sizeof(float);
+            (2 * row + 1) * state_elements * word;
     }
     DeviceBuffer source_offsets(ninfer::bench::device_context().device(),
                                 source_offsets_host.size() * sizeof(std::int64_t));
@@ -124,8 +128,9 @@ std::vector<BenchRow> run_batch_update(const Options& options, std::int32_t toke
     Tensor destinations = options.state_form == "alias"
                               ? source_table
                               : Tensor(destination_offsets.span(), DType::I64, {problem.batch});
-    TensorRegion state_region{
-        {0, state_elements * sizeof(float), 16}, DType::FP32, {128, 128, problem.value_heads, 1}};
+    TensorRegion state_region{{0, state_elements * word, 16},
+                              options.state_dtype,
+                              {128, 128, problem.value_heads, 1}};
     StateFieldView source_state{{states.span(), source_table},
                                 StateFieldLayout{state_region, 1, 0}};
     StateFieldView destination_state{{states.span(), destinations},
@@ -154,8 +159,9 @@ std::vector<BenchRow> run_batch_update(const Options& options, std::int32_t toke
     };
     BenchRow row;
     row.normalization  = composed ? "composed" : "fused";
-    row.implementation = composed ? "l2norm_x2+public.batch_update.qk_pre_normalized"
-                                  : "public.batch_update.qk_fused";
+    row.implementation = std::string(composed ? "l2norm_x2+public.batch_update.qk_pre_normalized"
+                                              : "public.batch_update.qk_fused") +
+                         (options.state_dtype == DType::BF16 ? ".bf16_state" : "");
     row.traffic        = gdn::running_traffic(problem);
     // Alias shares the read-only selector tensor; distinct form uses two arrays.
     row.traffic.logical.read +=

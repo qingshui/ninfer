@@ -107,6 +107,25 @@ std::vector<T> download_state(ninfer::ConstMemorySpan span) {
     return result;
 }
 
+// A recurrent State field as FP32 values, from FP32 or BF16 storage.
+inline std::vector<float> widen_recurrent(const std::vector<std::uint16_t>& words) {
+    std::vector<float> result;
+    result.reserve(words.size());
+    for (auto word : words) result.push_back(std::bit_cast<float>(std::uint32_t{word} << 16));
+    return result;
+}
+
+inline std::vector<float> download_recurrent(const ninfer::Tensor& tensor) {
+    if (tensor.dtype == ninfer::DType::BF16)
+        return widen_recurrent(download<std::uint16_t>(tensor));
+    return download<float>(tensor);
+}
+
+inline std::vector<float> download_recurrent(ninfer::ConstMemorySpan span, ninfer::DType dtype) {
+    if (dtype == ninfer::DType::BF16) return widen_recurrent(download_state<std::uint16_t>(span));
+    return download_state<float>(span);
+}
+
 } // namespace packed_tap
 
 namespace ninfer::ops {
@@ -158,7 +177,7 @@ void gated_delta_net(const Tensor& q, const Tensor& k, const Tensor& v, const Te
     packed_tap::Gdn record;
     if (tap) {
         CUDA_CHECK(cudaStreamSynchronize(execution.stream()));
-        record.state_in = packed_tap::download<float>(ssm_state_in);
+        record.state_in = packed_tap::download_recurrent(ssm_state_in);
     }
     real(q, k, v, g, beta, scale, normalize_qk, ws, ssm_state_in, ssm_state_out, out, execution);
     if (!tap) return;
@@ -174,7 +193,7 @@ void gated_delta_net(const Tensor& q, const Tensor& k, const Tensor& v, const Te
     record.g           = packed_tap::download<float>(g);
     record.beta        = packed_tap::download<float>(beta);
     record.out         = packed_tap::download<std::uint16_t>(out);
-    record.state_out   = packed_tap::download<float>(ssm_state_out);
+    record.state_out   = packed_tap::download_recurrent(ssm_state_out);
     packed_tap::push(&packed_tap::Store::gdn, std::move(record));
 }
 
@@ -231,7 +250,8 @@ void gated_delta_net_varlen(const Tensor& q, const Tensor& k, const Tensor& v, c
         offsets         = packed_tap::download<std::int32_t>(rows.token_offsets);
         const auto from = packed_tap::download<std::int64_t>(rows.source.records.byte_offsets);
         for (int r = 0; r < row_count; ++r)
-            before[r] = packed_tap::download_state<float>(rows.source.memory(from[r]));
+            before[r] = packed_tap::download_recurrent(rows.source.memory(from[r]),
+                                                       rows.source.field.tensor.dtype);
     }
     real(q, k, v, g, beta, scale, normalize_qk, rows, boundaries, checkpoint_field, row_count,
          boundary_count, ws, out, execution);
@@ -272,11 +292,11 @@ void gated_delta_net_varlen(const Tensor& q, const Tensor& k, const Tensor& v, c
         record.g           = cut(gw, std::size_t(Hv), begin, end);
         record.beta        = cut(bw, std::size_t(Hv), begin, end);
         record.state_in    = std::move(before[r]);
-        record.state_out   = packed_tap::download<float>(rows.destination.tensor(to[r]));
+        record.state_out   = packed_tap::download_recurrent(rows.destination.tensor(to[r]));
         for (std::size_t i = 0; i < at_rows.size(); ++i)
             if (at_rows[i] == r && at_images[i] >= 0)
                 record.checkpoints.emplace_back(
-                    at_columns[i], packed_tap::download<float>(checkpoint_field.bind(
+                    at_columns[i], packed_tap::download_recurrent(checkpoint_field.bind(
                                        rows.destination.records.storage.subspan(at_images[i]))));
         packed_tap::push(&packed_tap::Store::gdn, std::move(record));
     }
@@ -383,6 +403,12 @@ std::vector<T> read(const Tensor& tensor) {
     std::vector<T> result(tensor.bytes() / sizeof(T));
     CUDA_CHECK(cudaMemcpy(result.data(), tensor.data, tensor.bytes(), cudaMemcpyDeviceToHost));
     return result;
+}
+
+// The values of a recurrent State field, FP32 or BF16 storage.
+void append_recurrent(const Tensor& tensor, std::vector<float>& out) {
+    const auto values = packed_tap::download_recurrent(tensor);
+    out.insert(out.end(), values.begin(), values.end());
 }
 
 // Packed and sequential execution differ through the batch-shape dependent choices of the
@@ -758,8 +784,7 @@ public:
         const auto offset = rows_[row].state_offsets.destination;
         auto& linear      = rank.resources.state_images.linear();
         for (std::uint32_t layer = 0; layer < linear.layer_count(); ++layer) {
-            for (float value : read<float>(linear.recurrent_tensor(layer, offset)))
-                out.recurrent.push_back(value);
+            append_recurrent(linear.recurrent_tensor(layer, offset), out.recurrent);
             for (auto word : read<std::uint16_t>(linear.conv_tensor(layer, offset)))
                 out.conv.push_back(bf16(word));
         }
@@ -793,8 +818,7 @@ public:
         Image out;
         auto& linear = native_.rank().resources.state_images.linear();
         for (std::uint32_t layer = 0; layer < linear.layer_count(); ++layer) {
-            for (float value : read<float>(linear.recurrent_tensor(layer, offset)))
-                out.recurrent.push_back(value);
+            append_recurrent(linear.recurrent_tensor(layer, offset), out.recurrent);
             for (auto word : read<std::uint16_t>(linear.conv_tensor(layer, offset)))
                 out.conv.push_back(bf16(word));
         }
@@ -1167,7 +1191,9 @@ int main() {
         options.speculative.draft_tokens          = mtp ? kDrafts : 0;
         options.context_cache.enabled             = false;
         options.context_cache.host_capacity_bytes = 0;
-        Native fixture(definition, model, profile, options);
+        // The rig reserves a State image per row and spare, and a whole context of pages per row.
+        Native fixture(definition, model, profile, options,
+                       {.held_states = kRows + kSpare, .held_pages = kRows * (kContext / kPage)});
         auto& spec = fixture.rank().resources.frame().spec;
         require(spec.pack_tokens == q35::resolve_prefill_pack_tokens(kChunk, kContext) &&
                     spec.pack_tokens >= 2 * kChunk &&

@@ -7,6 +7,68 @@
 namespace ninfer::ops::sampling_detail {
 using namespace common;
 
+// The thread's share of a greedy row. Each warp reads 256-element chunks, eight BF16 logits per
+// lane with the next four chunks already in flight, then the tail past the last whole chunk, or a
+// row that is not 16-byte aligned, one element at a time. Nonnegative penalties only lower
+// values, so an element below the thread's best needs no token count. Higher value, then lower
+// id, orders the non-NaN values totally, so how the row is divided does not change the winner.
+__device__ inline void sampling_row_argmax(const __nv_bfloat16* row, std::int32_t vocab,
+                                           const SamplingConfig& cfg, float& best_value,
+                                           int& best_index) {
+    constexpr int kChunk  = kSamplerChunk;
+    constexpr int kUnroll = 4; // chunks in flight per warp
+    const int lane        = static_cast<int>(threadIdx.x) & 31;
+    const int warp        = static_cast<int>(threadIdx.x) >> 5;
+    const int warps       = static_cast<int>(blockDim.x) >> 5;
+    const bool penalties  = cfg.presence_penalty != 0.0f || cfg.frequency_penalty != 0.0f;
+    // Nonnegative penalties only lower values.
+    const bool bounded = penalties && cfg.presence_penalty >= 0.0f && cfg.frequency_penalty >= 0.0f;
+    const auto offer   = [&](float x, int id) {
+        if (bounded) {
+            if (x < best_value) { return; }
+            x = sampling_adjusted_logit(x, id, cfg);
+        }
+        if (score_id_better(x, id, best_value, best_index)) {
+            best_value = x;
+            best_index = id;
+        }
+    };
+    const int chunks = (reinterpret_cast<std::uintptr_t>(row) & 15) == 0 ? vocab / kChunk : 0;
+    const int step   = warps * kUnroll;
+    uint4 current[kUnroll], upcoming[kUnroll];
+    const auto fetch = [&](uint4* into, int group) {
+#pragma unroll
+        for (int u = 0; u < kUnroll; ++u) {
+            const int chunk = group + u * warps;
+            if (chunk < chunks) {
+                into[u] = __ldg(reinterpret_cast<const uint4*>(row + chunk * kChunk) + lane);
+            }
+        }
+    };
+    fetch(current, warp);
+    for (int group = warp; group < chunks; group += step) {
+        fetch(upcoming, group + step);
+#pragma unroll
+        for (int u = 0; u < kUnroll; ++u) {
+            const int chunk = group + u * warps;
+            if (chunk >= chunks) { continue; }
+            const int first = chunk * kChunk + lane * 8;
+            float x[8];
+            sampling_lane_values(current[u], first, cfg, penalties && !bounded, x);
+#pragma unroll
+            for (int i = 0; i < 8; ++i) { offer(x[i], first + i); }
+        }
+#pragma unroll
+        for (int u = 0; u < kUnroll; ++u) { current[u] = upcoming[u]; }
+    }
+    for (int v = chunks * kChunk + static_cast<int>(threadIdx.x); v < vocab;
+         v += static_cast<int>(blockDim.x)) {
+        float x = __bfloat162float(row[v]);
+        if (!bounded) { x = sampling_adjusted_logit(x, v, cfg); }
+        offer(x, v);
+    }
+}
+
 template <class S>
 __launch_bounds__(S::kSamplerBlock) __global__
     void sample_row_kernel(const __nv_bfloat16* logits, std::int32_t* out,
@@ -21,28 +83,12 @@ __launch_bounds__(S::kSamplerBlock) __global__
     __shared__ float red_val[S::kSamplerBlock];
     __shared__ int red_idx[S::kSamplerBlock];
 
-    // With penalties disabled this remains the exact raw-logit argmax route.
+    // With penalties disabled this remains the exact raw-logit argmax route. Padding rows of a
+    // graph bucket carry zeroed configs and take this route too.
     if (!(cfg.temperature > 0.0f)) {
-        float bv             = -CUDART_INF_F;
-        int bi               = INT_MAX;
-        const bool penalties = cfg.presence_penalty != 0.0f || cfg.frequency_penalty != 0.0f;
-        if (!penalties && cfg.mask.words == nullptr) {
-            for (int v = tid; v < token_domain; v += blockDim.x) {
-                const float x = __bfloat162float(logits[base + v]);
-                if (score_id_better(x, v, bv, bi)) {
-                    bv = x;
-                    bi = v;
-                }
-            }
-        } else {
-            for (int v = tid; v < token_domain; v += blockDim.x) {
-                const float x = sampling_adjusted_logit(__bfloat162float(logits[base + v]), v, cfg);
-                if (score_id_better(x, v, bv, bi)) {
-                    bv = x;
-                    bi = v;
-                }
-            }
-        }
+        float bv = -CUDART_INF_F;
+        int bi   = INT_MAX;
+        sampling_row_argmax(logits + base, token_domain, cfg, bv, bi);
         red_val[tid] = bv;
         red_idx[tid] = bi;
         __syncthreads();

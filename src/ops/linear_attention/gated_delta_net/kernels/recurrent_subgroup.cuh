@@ -55,7 +55,8 @@ __device__ __forceinline__ void normalize(float (&x)[kStateDim / Lanes]) {
 }
 
 // A subgroup owns consecutive state rows and coalesced four-key segments. Keep its transition
-// arithmetic aligned with replay fold's exact snapshot contract.
+// arithmetic aligned with replay fold's exact snapshot contract. Record and Fold continue every
+// token from the State its one-token update would publish.
 template <int Lanes, bool Normalize, Mode Behavior, bool Prefetch, int Capacity, class Access>
 __device__ __forceinline__ void run(const Access& a, RecurrentCoordinates original, int valid,
                                     Window<Capacity>* sm) {
@@ -71,15 +72,15 @@ __device__ __forceinline__ void run(const Access& a, RecurrentCoordinates origin
     auto c          = original;
     c.dv_base += group * Rows;
     if constexpr (Prefetch) prefetch<Readout>(*sm, a, original, valid);
+    using State = typename Access::State;
     __align__(16) float state[Rows][Cols];
-    const float* source = a.state_read_base(c);
+    const State* source = a.state_read_base(c);
 #pragma unroll
     for (int r = 0; r < Rows; ++r) {
 #pragma unroll
         for (int p = 0; p < Cols / 4; ++p) {
-            const int col  = lane * 4 + p * Lanes * 4;
-            const float4 x = common::load_vec<float4>(source + (c.dv_base + r) * kStateDim + col);
-            common::store_vec(state[r] + p * 4, x);
+            const int col = lane * 4 + p * Lanes * 4;
+            load_state_quad(state[r] + p * 4, source + (c.dv_base + r) * kStateDim + col);
         }
     }
     if constexpr (Prefetch) {
@@ -155,16 +156,16 @@ __device__ __forceinline__ void run(const Access& a, RecurrentCoordinates origin
                     a.output_ptr(c, t)[c.dv_base + r] = __float2bfloat16_rn(dot * a.scale);
             }
         }
+        if constexpr (Behavior != Mode::Update) represent_state<State>(state);
     }
     if constexpr (WriteState) {
-        float* destination = a.state_write_base(c);
+        State* destination = a.state_write_base(c);
 #pragma unroll
         for (int r = 0; r < Rows; ++r) {
 #pragma unroll
             for (int p = 0; p < Cols / 4; ++p) {
                 const int col = lane * 4 + p * Lanes * 4;
-                common::store_vec(destination + (c.dv_base + r) * kStateDim + col,
-                                  common::load_vec<float4>(state[r] + p * 4));
+                store_state_quad(state[r] + p * 4, destination + (c.dv_base + r) * kStateDim + col);
             }
         }
     }

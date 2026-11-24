@@ -281,9 +281,13 @@ std::vector<GraphProfile> draft_graph_profiles(const GraphSpec& spec) {
 
 std::vector<std::uint32_t> graph_capture_buckets(std::uint32_t batch_capacity) {
     if (!batch_capacity) throw std::invalid_argument("graph batch capacity must be positive");
+    // A replay runs every kernel over its padded rows, so from 16 rows up the buckets grow by
+    // about an eighth, rounded up to a multiple of 4, instead of doubling.
     std::vector<std::uint32_t> buckets;
-    for (std::uint64_t size = 1; size < batch_capacity; size <<= 1)
+    for (std::uint64_t size = 1; size < batch_capacity;) {
         buckets.push_back(static_cast<std::uint32_t>(size));
+        size += size < 16 ? size : (size / 8 + 3) / 4 * 4;
+    }
     buckets.push_back(batch_capacity);
     return buckets;
 }

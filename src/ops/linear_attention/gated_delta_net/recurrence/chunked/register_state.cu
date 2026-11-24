@@ -40,6 +40,7 @@ __device__ __forceinline__ void load_stage(regs::Stage& stage, const RecurrenceO
     common::cp_commit();
 }
 
+template <class Word>
 __global__ __launch_bounds__(regs::kThreads, 3) void chunk_register_kernel(
     RecurrenceOperands args, const QkChunk* __restrict__ qk_workspace,
     const ControlChunk* __restrict__ control_workspace) {
@@ -54,7 +55,7 @@ __global__ __launch_bounds__(regs::kThreads, 3) void chunk_register_kernel(
     const auto out_pitch  = static_cast<std::int64_t>(args.value_heads) * kStateDim;
 
     regs::State state;
-    regs::load_state(state, args.state_in + state_base, value_row, lane);
+    regs::load_state(state, static_cast<const Word*>(args.state_in) + state_base, value_row, lane);
     load_stage(sm.stage[0], args, qk_workspace, control_workspace, head, value_start, 0, tid);
     if (chunks > 1)
         load_stage(sm.stage[1], args, qk_workspace, control_workspace, head, value_start, 1, tid);
@@ -76,18 +77,27 @@ __global__ __launch_bounds__(regs::kThreads, 3) void chunk_register_kernel(
                    min(kChunkSize, args.tokens - chunk * kChunkSize), args.scale, warp, lane);
         stage = stage + 1 == regs::kStages ? 0 : stage + 1;
     }
-    regs::store_state(state, args.state_out + state_base, value_row, lane);
+    regs::store_state(state, static_cast<Word*>(args.state_out) + state_base, value_row, lane);
+}
+
+template <class Word>
+void launch_register_state(const RecurrenceOperands& args, const QkChunk* qk,
+                           const ControlChunk* control, cudaStream_t stream) {
+    constexpr int shared_bytes = sizeof(regs::Shared);
+    (void)common::prepare_shared<shared_bytes, chunk_register_kernel<Word>, true>();
+    chunk_register_kernel<Word><<<args.value_heads*(kStateDim / regs::kValues), regs::kThreads,
+                                  shared_bytes, stream>>>(args, qk, control);
+    CUDA_CHECK(cudaGetLastError());
 }
 
 } // namespace
 
 void launch_register_state(const RecurrenceOperands& args, const QkChunk* qk,
                            const ControlChunk* control, cudaStream_t stream) {
-    constexpr int shared_bytes = sizeof(regs::Shared);
-    (void)common::prepare_shared<shared_bytes, chunk_register_kernel, true>();
-    chunk_register_kernel<<<args.value_heads*(kStateDim / regs::kValues), regs::kThreads,
-                              shared_bytes, stream>>>(args, qk, control);
-    CUDA_CHECK(cudaGetLastError());
+    if (args.state_dtype == DType::BF16)
+        launch_register_state<__nv_bfloat16>(args, qk, control, stream);
+    else
+        launch_register_state<float>(args, qk, control, stream);
 }
 
 } // namespace ninfer::ops::detail::gated_delta_net::chunked

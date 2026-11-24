@@ -87,40 +87,43 @@ struct TileInfo {
     int expert, m, start, valid;
 };
 
-// Walks experts in order; tiles are numbered expert-major, then weight row tile, then token tile
-// (the token tile varies fastest so CTAs working on one weight tile share it through L2). Every
-// role advances through the same increasing tile sequence, so one forward-only cursor per role
-// suffices.
+// Tiles are numbered expert-major, then weight row tile, then token tile (the token tile varies
+// fastest so CTAs working on one weight tile share it through L2). Every role advances through the
+// same increasing tile sequence, so the expert of its previous tile bounds the search for the next.
 struct TileCursor {
     int expert = 0;
-    int base   = 0;
 };
 
-// The expert offsets are staged in shared memory: every role walks the tile sequence, and a
-// walk over global loads costs a dependent L2 round trip per expert, which the producer cannot
-// hide behind its stage ring.
+// The expert offsets and the first tile of every expert are staged in shared memory. A role finds
+// a tile's expert by a binary search over the tile starts: walking the experts one by one costs a
+// dependent shared load per expert, and with few routed tokens most of the 256 experts are empty,
+// so that walk delayed every role by microseconds.
 inline constexpr int kMaxExperts = 256;
 
 template <int TileN>
 __device__ __forceinline__ bool next_tile(TileCursor& cursor, int tile, const GroupedArgs& args,
-                                          const int* offsets, TileInfo& info) {
-    while (cursor.expert < args.experts) {
-        const int begin  = offsets[cursor.expert];
-        const int end    = offsets[cursor.expert + 1];
-        const int ntiles = (end - begin + TileN - 1) / TileN;
-        const int count  = ntiles * args.tiles_m;
-        if (tile < cursor.base + count) {
-            const int u     = tile - cursor.base;
-            const int m     = u / ntiles;
-            const int n     = u - m * ntiles;
-            const int start = begin + n * TileN;
-            info = {cursor.expert, m, start, min(TileN, end - start)};
-            return true;
+                                          const int* offsets, const int* tile_start,
+                                          TileInfo& info) {
+    if (tile >= tile_start[args.experts]) return false;
+    // tile_start[lo] <= tile < tile_start[hi]; expert `lo` ends up owning the tile.
+    int lo = cursor.expert, hi = args.experts;
+    while (hi - lo > 1) {
+        const int mid = (lo + hi) >> 1;
+        if (tile_start[mid] <= tile) {
+            lo = mid;
+        } else {
+            hi = mid;
         }
-        cursor.base += count;
-        ++cursor.expert;
     }
-    return false;
+    cursor.expert    = lo;
+    const int begin  = offsets[lo];
+    const int end    = offsets[lo + 1];
+    const int ntiles = (end - begin + TileN - 1) / TileN;
+    const int u      = tile - tile_start[lo];
+    const int m      = u / ntiles;
+    const int start  = begin + (u - m * ntiles) * TileN;
+    info             = {lo, m, start, min(TileN, end - start)};
+    return true;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -174,6 +177,26 @@ __global__ __launch_bounds__(Cfg::kThreads, 1) void grouped_gemm_kernel(
     for (int i = static_cast<int>(threadIdx.x); i <= args.experts; i += Cfg::kThreads) {
         offsets[i] = args.offsets[i];
     }
+    // One expert per thread: its tile count, scanned within the warp. The warp totals complete
+    // the exclusive prefix after the barrier below.
+    static_assert(Cfg::kThreads >= kMaxExperts);
+    __shared__ int tile_start[kMaxExperts + 1];
+    __shared__ int warp_tiles[Cfg::kThreads / 32];
+    const int expert = static_cast<int>(threadIdx.x);
+    int tiles_before = 0;
+    {
+        const int tiles = expert < args.experts ? (args.offsets[expert + 1] - args.offsets[expert] +
+                                                   TileN - 1) / TileN * args.tiles_m
+                                                : 0;
+        int inclusive = tiles;
+#pragma unroll
+        for (int d = 1; d < 32; d <<= 1) {
+            const int value = __shfl_up_sync(0xffffffffu, inclusive, d);
+            if (lane >= d) inclusive += value;
+        }
+        if (lane == 31) warp_tiles[warp] = inclusive;
+        tiles_before = inclusive - tiles;
+    }
 
     if (warp == 0 && lane == 0) {
         sm::tma_prefetch_descriptor(&a_map);
@@ -193,6 +216,18 @@ __global__ __launch_bounds__(Cfg::kThreads, 1) void grouped_gemm_kernel(
         sm::tmem_relinquish_alloc_permit<1>();
     }
     __syncthreads();
+    {
+        int total = 0;
+#pragma unroll
+        for (int w = 0; w < Cfg::kThreads / 32; ++w) {
+            const int tiles = warp_tiles[w];
+            tiles_before += w < warp ? tiles : 0;
+            total += tiles;
+        }
+        if (expert < args.experts) tile_start[expert] = tiles_before;
+        if (expert == 0) tile_start[args.experts] = total;
+    }
+    __syncthreads();
     sm::fence_after_thread_sync();
     const std::uint32_t tmem_base = *tmem_slot;
     constexpr std::uint32_t kSfBase = Cfg::kAccStages * Cfg::kAccCols;
@@ -205,7 +240,7 @@ __global__ __launch_bounds__(Cfg::kThreads, 1) void grouped_gemm_kernel(
         TileInfo t;
         int stage           = 0;
         std::uint32_t phase = 0;
-        for (int tile = static_cast<int>(blockIdx.x); next_tile<TileN>(cursor, tile, args, offsets, t);
+        for (int tile = static_cast<int>(blockIdx.x); next_tile<TileN>(cursor, tile, args, offsets, tile_start, t);
              tile += static_cast<int>(gridDim.x)) {
             for (int kb = 0; kb < args.k_iters; ++kb) {
                 sm::mbarrier_wait(&empty[stage], phase ^ 1u);
@@ -245,7 +280,7 @@ __global__ __launch_bounds__(Cfg::kThreads, 1) void grouped_gemm_kernel(
         TileInfo t;
         int stage           = 0;
         std::uint32_t phase = 0;
-        for (int tile = static_cast<int>(blockIdx.x); next_tile<TileN>(cursor, tile, args, offsets, t);
+        for (int tile = static_cast<int>(blockIdx.x); next_tile<TileN>(cursor, tile, args, offsets, tile_start, t);
              tile += static_cast<int>(gridDim.x)) {
             std::int64_t row[R];
 #pragma unroll
@@ -304,7 +339,7 @@ __global__ __launch_bounds__(Cfg::kThreads, 1) void grouped_gemm_kernel(
             int acc                 = 0;
             std::uint32_t acc_phase = 0;
             std::uint32_t k_count   = 0;
-            for (int tile = static_cast<int>(blockIdx.x); next_tile<TileN>(cursor, tile, args, offsets, t);
+            for (int tile = static_cast<int>(blockIdx.x); next_tile<TileN>(cursor, tile, args, offsets, tile_start, t);
                  tile += static_cast<int>(gridDim.x)) {
                 sm::mbarrier_wait(&acc_empty[acc], acc_phase ^ 1u);
                 sm::fence_after_thread_sync();
@@ -374,14 +409,14 @@ __global__ __launch_bounds__(Cfg::kThreads, 1) void grouped_gemm_kernel(
         TileCursor cursor;
         TileInfo t, upcoming;
         Ahead ahead{};
-        bool more = next_tile<TileN>(cursor, static_cast<int>(blockIdx.x), args, offsets, upcoming);
+        bool more = next_tile<TileN>(cursor, static_cast<int>(blockIdx.x), args, offsets, tile_start, upcoming);
         if (more) {
             ahead = epilogue.template fetch<Cfg>(upcoming, lane);
             epilogue.template settle<Cfg>(ahead, upcoming, lane);
         }
         for (int tile = static_cast<int>(blockIdx.x); more; tile += static_cast<int>(gridDim.x)) {
             t    = upcoming;
-            more = next_tile<TileN>(cursor, tile + static_cast<int>(gridDim.x), args, offsets, upcoming);
+            more = next_tile<TileN>(cursor, tile + static_cast<int>(gridDim.x), args, offsets, tile_start, upcoming);
             sm::mbarrier_wait(&acc_full[acc], acc_phase);
             sm::fence_after_thread_sync();
             Ahead following{};

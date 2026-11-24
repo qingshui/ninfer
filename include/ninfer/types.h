@@ -167,14 +167,17 @@ struct EngineOptions {
     std::size_t memory_headroom_bytes  = kDefaultMemoryHeadroomBytes;
     // Resident execution lanes in [1,kMaximumConcurrency]. Zero selects automatic lane fitting
     // for a Generation Engine: after construction resolves the context token capacity, the
-    // Engine clamps the lane count from that estimate and reports the resolved value. Causal
-    // Scoring normalizes to a single lane.
+    // Engine clamps the lane count from that estimate and reports the resolved value. A fitted
+    // Engine whose Session mixes prefill into decode flights also holds its resident lanes to a
+    // decode token interval (a saturated load queues instead of slowing every stream); an
+    // explicit count keeps every lane it names resident. Causal Scoring normalizes to one lane.
     std::uint32_t max_concurrency      = 1;
-    // True while max_concurrency holds the provisional ceiling that construct_model substituted
-    // for the automatic-lane-fitting zero. The session still needs a concrete lane count during
-    // construction, so model planning may fit lane-count-derived resources (context pool working
-    // sets, KV table rows, graph capture buckets) to the device budget below the ceiling; the
-    // Engine bounds the resolved lane count by the constructed session's lane capacity.
+    // Set when construct_model substituted the provisional ceiling for the automatic-lane-fitting
+    // zero. The session still needs a concrete lane count during construction, so model planning
+    // may fit lane-count-derived resources (context pool working sets, KV table rows, graph
+    // capture buckets) to the device budget below the ceiling; the Engine bounds the resolved lane
+    // count by the constructed session's lane capacity. The flag stays set once the Engine has
+    // resolved the count, and the Engine core then governs the resident lanes.
     bool automatic_lane_fitting        = false;
     std::uint32_t max_pending_requests = 16;
     std::uint32_t pending_timeout_ms   = 30000;

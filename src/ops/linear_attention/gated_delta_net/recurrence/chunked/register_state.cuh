@@ -6,7 +6,7 @@
 #include "ops/common/numeric/convert.cuh"
 #include "ops/linear_attention/gated_delta_net/recurrence/chunked/workspace.h"
 
-// Chunk recurrence for a 64-value stripe whose FP32 state never leaves the MMA accumulators.
+// Chunk recurrence for a 64-value stripe whose state never leaves the FP32 MMA accumulators.
 // A warp owns sixteen value rows of S^T[value, key] and forms every product with the state or
 // Delta as the A operand, so accumulator fragments feed the next MMA directly and only the
 // K/Q/V fragments are read from shared memory. Operand precisions: TF32 for K.S and the two
@@ -42,16 +42,34 @@ struct Shared {
 static_assert(sizeof(Stage) == 12544);
 static_assert(sizeof(Shared) == 40704);
 
-// Fragment (g,t) holds keys 8*tile+2t, 2t+1 of value rows g and g+8.
-__device__ __forceinline__ void load_state(State& state, const float* head_state, int value_row,
+__device__ __forceinline__ float2 load_pair(const float* source) {
+    return common::load_vec<float2>(source);
+}
+
+__device__ __forceinline__ float2 load_pair(const __nv_bfloat16* source) {
+    return common::bf16x2_to_float2(common::load_vec<__nv_bfloat162>(source));
+}
+
+__device__ __forceinline__ void store_pair(float* destination, float x, float y) {
+    common::store_vec(destination, make_float2(x, y));
+}
+
+__device__ __forceinline__ void store_pair(__nv_bfloat16* destination, float x, float y) {
+    common::store_vec(destination, common::pack_bf16x2(x, y));
+}
+
+// Fragment (g,t) holds keys 8*tile+2t, 2t+1 of value rows g and g+8. Word is the FP32 or BF16
+// State storage; a BF16 store rounds to nearest even.
+template <class Word>
+__device__ __forceinline__ void load_state(State& state, const Word* head_state, int value_row,
                                            int lane) {
     const int g = lane >> 2, t = lane & 3;
-    const float* upper = head_state + static_cast<std::int64_t>(value_row + g) * kStateDim + 2 * t;
-    const float* lower = upper + 8 * kStateDim;
+    const Word* upper = head_state + static_cast<std::int64_t>(value_row + g) * kStateDim + 2 * t;
+    const Word* lower = upper + 8 * kStateDim;
 #pragma unroll
     for (int tile = 0; tile < kKeyTiles; ++tile) {
-        const float2 a = common::load_vec<float2>(upper + tile * 8);
-        const float2 b = common::load_vec<float2>(lower + tile * 8);
+        const float2 a = load_pair(upper + tile * 8);
+        const float2 b = load_pair(lower + tile * 8);
         state[tile][0] = a.x;
         state[tile][1] = a.y;
         state[tile][2] = b.x;
@@ -59,15 +77,16 @@ __device__ __forceinline__ void load_state(State& state, const float* head_state
     }
 }
 
-__device__ __forceinline__ void store_state(const State& state, float* head_state, int value_row,
+template <class Word>
+__device__ __forceinline__ void store_state(const State& state, Word* head_state, int value_row,
                                             int lane) {
     const int g = lane >> 2, t = lane & 3;
-    float* upper = head_state + static_cast<std::int64_t>(value_row + g) * kStateDim + 2 * t;
-    float* lower = upper + 8 * kStateDim;
+    Word* upper = head_state + static_cast<std::int64_t>(value_row + g) * kStateDim + 2 * t;
+    Word* lower = upper + 8 * kStateDim;
 #pragma unroll
     for (int tile = 0; tile < kKeyTiles; ++tile) {
-        common::store_vec(upper + tile * 8, make_float2(state[tile][0], state[tile][1]));
-        common::store_vec(lower + tile * 8, make_float2(state[tile][2], state[tile][3]));
+        store_pair(upper + tile * 8, state[tile][0], state[tile][1]);
+        store_pair(lower + tile * 8, state[tile][2], state[tile][3]);
     }
 }
 

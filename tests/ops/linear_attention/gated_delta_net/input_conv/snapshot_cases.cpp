@@ -103,6 +103,10 @@ std::vector<SnapshotCase> cases(Profile p) {
         batch(16, 3, {16, 9, 4}, 1031U, Policy::AllowA8);
         batch(8, 8, {8, 7, 6, 5, 4, 3, 2, 1}, 1037U, Policy::AllowA8);
         batch(1, 17, {}, 1043U, Policy::AllowA8);
+        // Decode batches of at most 128 rows split the K loop of the GEMM's last round.
+        batch(1, 56, {}, 1047U, Policy::AllowA8);
+        batch(1, 96, {}, 1049U, Policy::AllowA8);
+        result.back().graph = true;
         batch(1, 520, {}, 1051U, Policy::AllowA8);
         result.back().graph = true;
     } else {

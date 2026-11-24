@@ -97,6 +97,15 @@ std::vector<T> read_tensor(const Tensor& tensor) {
     return result;
 }
 
+// The values of a recurrent State field, FP32 or BF16 storage.
+void append_recurrent(const Tensor& tensor, std::vector<float>& out) {
+    if (tensor.dtype == DType::BF16) {
+        for (auto word : read_tensor<std::uint16_t>(tensor)) out.push_back(bf16_value(word));
+    } else {
+        for (float value : read_tensor<float>(tensor)) out.push_back(value);
+    }
+}
+
 // K as BF16 and V as FP16 words of positions [0, tokens) of every Main layer, ordered
 // [layer][position][head][dim]. The KV storage of the fixture is BFloat16.
 PrefillImage read_prefill_image(native::NativeRankFixture& fixture, const q35::ExecutionRow& row,
@@ -131,8 +140,7 @@ PrefillImage read_prefill_image(native::NativeRankFixture& fixture, const q35::E
     const auto offset = row.state_offsets.destination;
     auto& linear      = resources.state_images.linear();
     for (std::uint32_t layer = 0; layer < linear.layer_count(); ++layer) {
-        for (float value : read_tensor<float>(linear.recurrent_tensor(layer, offset)))
-            image.recurrent.push_back(value);
+        append_recurrent(linear.recurrent_tensor(layer, offset), image.recurrent);
         for (auto word : read_tensor<std::uint16_t>(linear.conv_tensor(layer, offset)))
             image.conv.push_back(bf16_value(word));
     }

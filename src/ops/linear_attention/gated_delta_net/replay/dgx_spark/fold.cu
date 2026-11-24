@@ -19,9 +19,10 @@ struct alignas(16) FoldWindow {
     float alpha[kFoldWindow], beta[kFoldWindow];
 };
 
-template <class Geometry, class Rows>
+// Every token continues from the State its one-token update would publish.
+template <class Geometry, class Rows, class State>
 __global__ __launch_bounds__(common::kWarpSize* kFoldWarps, 2) void fold_kernel(
-    const __grid_constant__ FoldAccess<Geometry, Rows> access, unsigned row_map) {
+    const __grid_constant__ FoldAccess<Geometry, Rows, State> access, unsigned row_map) {
     const int lane = threadIdx.x % kFoldLanes, group = threadIdx.x / kFoldLanes;
     const int tid  = threadIdx.y * common::kWarpSize + threadIdx.x;
     const int tile = blockIdx.x % kFoldTiles, head = blockIdx.x / kFoldTiles;
@@ -48,15 +49,13 @@ __global__ __launch_bounds__(common::kWarpSize* kFoldWarps, 2) void fold_kernel(
     }
     common::cp_commit();
     __align__(16) float state[kFoldRows][kFoldCols];
-    const float* source = access.state_read_base(coord);
+    const State* source = access.state_read_base(coord);
 #pragma unroll
     for (int r = 0; r < kFoldRows; ++r) {
 #pragma unroll
         for (int p = 0; p < kFoldCols / 4; ++p) {
             const int col = lane * 4 + p * kFoldLanes * 4;
-            common::store_vec(
-                state[r] + p * 4,
-                common::load_vec<float4>(source + (coord.dv_base + r) * kStateDim + col));
+            load_state_quad(state[r] + p * 4, source + (coord.dv_base + r) * kStateDim + col);
         }
     }
 
@@ -110,15 +109,15 @@ __global__ __launch_bounds__(common::kWarpSize* kFoldWarps, 2) void fold_kernel(
 #pragma unroll
             for (int j = 0; j < kFoldCols; ++j) state[r][j] = alpha * state[r][j] + delta * key[j];
         }
+        represent_state<State>(state);
     }
-    float* destination = access.state_write_base(coord);
+    State* destination = access.state_write_base(coord);
 #pragma unroll
     for (int r = 0; r < kFoldRows; ++r) {
 #pragma unroll
         for (int p = 0; p < kFoldCols / 4; ++p) {
             const int col = lane * 4 + p * kFoldLanes * 4;
-            common::store_vec(destination + (coord.dv_base + r) * kStateDim + col,
-                              common::load_vec<float4>(state[r] + p * 4));
+            store_state_quad(state[r] + p * 4, destination + (coord.dv_base + r) * kStateDim + col);
         }
     }
 
@@ -138,27 +137,39 @@ static_assert(sizeof(GdnReplayFoldKernelRows) == 256);
 static_assert(alignof(GdnReplayFoldKernelRows) == 16);
 static_assert(std::is_trivially_copyable_v<GdnReplayFoldKernelRows>);
 
-template <class Geometry, class Rows>
+template <class Geometry, class Rows, class State>
 void launch_replay_fold_fixed(const GdnReplayRecords& records,
                               LinearAttentionStateAllLayersView states, const Rows& rows,
                               unsigned row_map, int launched_rows, cudaStream_t stream) {
-    const FoldAccess<Geometry, Rows> access{
+    const FoldAccess<Geometry, Rows, State> access{
         static_cast<const __nv_bfloat16*>(records.key.data),
         static_cast<const __nv_bfloat16*>(records.value.data),
         reinterpret_cast<const uint2*>(records.gate.data),
         static_cast<const __nv_bfloat16*>(records.conv.data),
-        common::operand::state_field_base<float>(states.recurrent),
+        common::operand::state_field_base<State>(states.recurrent),
         common::operand::state_field_base<__nv_bfloat16>(states.conv),
-        static_cast<std::int64_t>(states.recurrent.field.layer_stride / sizeof(float)),
+        static_cast<std::int64_t>(states.recurrent.field.layer_stride / sizeof(State)),
         static_cast<std::int64_t>(states.conv.field.layer_stride / sizeof(__nv_bfloat16)),
         records.spec.record_capacity,
         records.spec.width,
         rows,
     };
     const dim3 grid(Geometry::kValueHeads * kFoldTiles, launched_rows, Geometry::kLayers);
-    fold_kernel<Geometry, Rows>
+    fold_kernel<Geometry, Rows, State>
         <<<grid, dim3(common::kWarpSize, kFoldWarps), 0, stream>>>(access, row_map);
     CUDA_CHECK(cudaGetLastError());
+}
+
+template <class Geometry, class Rows>
+void launch_replay_fold_fixed(const GdnReplayRecords& records,
+                              LinearAttentionStateAllLayersView states, const Rows& rows,
+                              unsigned row_map, int launched_rows, cudaStream_t stream) {
+    if (states.recurrent.field.tensor.dtype == DType::BF16)
+        launch_replay_fold_fixed<Geometry, Rows, __nv_bfloat16>(records, states, rows, row_map,
+                                                                launched_rows, stream);
+    else
+        launch_replay_fold_fixed<Geometry, Rows, float>(records, states, rows, row_map,
+                                                        launched_rows, stream);
 }
 
 template <class Rows>

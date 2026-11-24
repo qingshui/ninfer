@@ -38,7 +38,9 @@ void validate_replay_record(const Tensor& q, const Tensor& k, const Tensor& v, c
     common::operand::tensor(beta, DType::FP32, {value_heads, width, rows}, 4, kOp, "beta", device);
     if (initial_state.field.layers != 1)
         throw std::invalid_argument("gated_delta_net_replay_record: select one state layer");
-    common::operand::state_field(initial_state, DType::FP32, {kStateDim, kStateDim, value_heads},
+    const DType state_dtype = initial_state.field.tensor.dtype;
+    detail::gated_delta_net::require_state_dtype(state_dtype, state_dtype, kOp, "initial state");
+    common::operand::state_field(initial_state, state_dtype, {kStateDim, kStateDim, value_heads},
                                  16, kOp, "initial state", device);
     common::operand::shape(initial_state.records.byte_offsets, {rows, 1, 1, 1}, kOp,
                            "initial state byte offsets");

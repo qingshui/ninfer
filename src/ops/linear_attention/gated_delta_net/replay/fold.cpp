@@ -47,11 +47,12 @@ void validate_fold_states(const GdnReplayRecords& records,
         state.conv_channels != record.conv_channels || state.conv_width != 3 ||
         state.value_heads != record.value_heads || state.value_head_dim != kStateDim ||
         state.key_head_dim != kStateDim || state.conv_dtype != DType::BF16 ||
+        (state.recurrent_dtype != DType::FP32 && state.recurrent_dtype != DType::BF16) ||
         states.conv.field.layers != state.layers || states.recurrent.field.layers != state.layers)
         throw std::invalid_argument("gdn_replay_fold: state geometry does not match records");
     common::operand::state_field(states.conv, DType::BF16, {record.conv_channels, 3}, 256, op,
                                  "convolution state", records.conv.device, false);
-    common::operand::state_field(states.recurrent, DType::FP32,
+    common::operand::state_field(states.recurrent, state.recurrent_dtype,
                                  {kStateDim, kStateDim, record.value_heads}, 256, op,
                                  "recurrent state", records.conv.device, false);
     if (states.conv.records.storage.data != states.recurrent.records.storage.data ||

@@ -33,12 +33,13 @@ namespace ninfer::ops {
  *   ideal[:,h,t] = scale * S_h * q[:,qh,t].
  *
  * Shapes/dtypes are contiguous q/k BF16 [128,Hqk,T], v/out BF16 [128,Hv,T], g/beta FP32 [Hv,T],
- * and state FP32 [128,128,Hv], where Hqk>=1, Hv>=Hqk, and Hv%Hqk==0. `scale` is 1/sqrt(128). When
- * `normalize_qk` is true, the Op consumes raw q/k and applies
+ * and state FP32 or BF16 [128,128,Hv], where Hqk>=1, Hv>=Hqk, and Hv%Hqk==0. `scale` is
+ * 1/sqrt(128). When `normalize_qk` is true, the Op consumes raw q/k and applies
  * x / sqrt(sum(x^2) + 1e-6) independently to every 128-element row before using it. When false,
  * q/k are consumed as supplied. The outputs approximate the complete recurrence above from
- * represented inputs. The master state is FP32; output storage is BF16. Scratch capacity is
- * independent of normalize_qk.
+ * represented inputs. The call publishes only the state after token T-1, rounded to nearest even
+ * when the state is BF16; output storage is BF16. Scratch capacity is independent of
+ * normalize_qk.
  * `execution` supplies the stream and physical SM count for launch decomposition.
  * Inputs and out do not overlap state or one another. `ws` supplies transient storage reported by
  * gated_delta_net_workspace_capacity_bytes; scratch is scoped to the call. T may be any positive
@@ -52,8 +53,8 @@ void gated_delta_net(const Tensor& q, const Tensor& k, const Tensor& v, const Te
 
 /**
  * Distinct-state form of the same recurrence. `ssm_state_out` receives the final state;
- * `ssm_state_in` and `ssm_state_out` may be disjoint or exactly the same storage. No other
- * arguments may overlap either state.
+ * `ssm_state_in` and `ssm_state_out` share one dtype and may be disjoint or exactly the same
+ * storage. No other arguments may overlap either state.
  */
 void gated_delta_net(const Tensor& q, const Tensor& k, const Tensor& v, const Tensor& g,
                      const Tensor& beta, float scale, bool normalize_qk, MemoryArena& ws,
@@ -63,8 +64,9 @@ void gated_delta_net(const Tensor& q, const Tensor& k, const Tensor& v, const Te
 /**
  * One-token update for B independent records. q/k are contiguous BF16 [128,Hqk,1,B],
  * v/out BF16 [128,Hv,1,B], and g/beta FP32 [Hv,1,B]. Source and destination fields are dense
- * FP32 [128,128,Hv] within caller-owned records, selected by device I64 [B] arena-relative byte
- * offsets. B is in [1, kMaximumConcurrency]: one row per decode lane of the execution model.
+ * [128,128,Hv] fields of one dtype, FP32 or BF16, within caller-owned records, selected by device
+ * I64 [B] arena-relative byte offsets; a BF16 destination holds the updated state rounded to
+ * nearest even. B is in [1, kMaximumConcurrency]: one row per decode lane of the execution model.
  * Each selected field must be 16-byte aligned and fully inside its arena.
  * A row may update in place. Destinations are distinct and do not overwrite other active sources.
  * Input/output tensors do not overlap selected state fields. This form uses no arena allocation.
@@ -78,11 +80,11 @@ void gated_delta_net_batch_update(const Tensor& q, const Tensor& k, const Tensor
 /**
  * Row table for gated_delta_net_varlen. R rows are consecutive token ranges of one packed
  * sequence axis: `token_offsets` is device I32 [R+1], strictly increasing, with [0]=0 and [R]=T.
- * `source` and `destination` select dense FP32 [128,128,Hv] fields (one layer) with device I64 [R]
- * record byte offsets. Row r starts from source record r and publishes its final state to
- * destination record r. A source may exactly alias its own row's destination. Destinations of
- * different rows do not overlap each other, any source other than the row's own, or any
- * checkpoint record.
+ * `source` and `destination` select dense [128,128,Hv] fields (one layer) of one dtype, FP32 or
+ * BF16, with device I64 [R] record byte offsets. Row r starts from source record r and publishes
+ * its final state to destination record r. A source may exactly alias its own row's destination.
+ * Destinations of different rows do not overlap each other, any source other than the row's own,
+ * or any checkpoint record.
  */
 struct GdnVarlenRows {
     Tensor token_offsets;
@@ -121,8 +123,9 @@ struct GdnVarlenBoundaries {
  * state that sub-segment k-1 produced (the row source for k=0), the last sub-segment writing the
  * row destination and every boundary with destination_offsets[i]>=0 writing its checkpoint
  * record (checkpoint records live in destination.records.storage and are laid out by
- * `checkpoint_field`, dense FP32 [128,128,Hv], one layer). Chunks start at the row start and at
- * every boundary. Intermediate state of a row may be staged in that row's destination record.
+ * `checkpoint_field`, dense [128,128,Hv] of the row state dtype, one layer). Chunks start at the
+ * row start and at every boundary. Intermediate state of a row may be staged in that row's
+ * destination record.
  *
  * `row_count` is R in [1,1024] and `boundary_count` is C in [0,1024]; T is q.ne[2]. Row and
  * boundary tables are consumed on the device and are not read back. A profile or geometry outside
@@ -145,15 +148,16 @@ struct GdnRecurrenceRecords {
 /**
  * Evaluates B independent normalized Gated DeltaNet recurrences without modifying initial state.
  * q/k are BF16 [128,Hq,T,B], v/out BF16 [128,Hv,T,B], and g/beta FP32 [Hv,T,B].
- * initial_state selects dense FP32 [128,128,Hv] fields using device I64 [B] record byte offsets.
- * Every selected field is 16-byte aligned and in bounds. B=1..8, T=2..16; (Hq,Hv) is one of
- * (16,32), (16,48), (16,64), (8,24). scale is 1/sqrt(128).
+ * initial_state selects dense FP32 or BF16 [128,128,Hv] fields using device I64 [B] record byte
+ * offsets. Every selected field is 16-byte aligned and in bounds. B=1..8, T=2..16; (Hq,Hv) is
+ * one of (16,32), (16,48), (16,64), (8,24). scale is 1/sqrt(128).
  *
  * valid_columns is empty for dense rows or device I32 [B] with values in [1,T]. Each valid
  * transition copies raw k, v and {g,beta} into the corresponding record fields. Invalid record
  * suffixes remain unchanged; invalid output suffixes are exact BF16 zero. Inputs, selected state
  * fields, records and output do not overlap. Valid outputs are bit-identical to normalized
- * recurrent one-token execution from the same represented inputs and initial FP32 state.
+ * recurrent one-token execution from the same represented inputs and initial state, so a BF16
+ * state continues every token from its value rounded to nearest even.
  */
 void gated_delta_net_replay_record(const Tensor& q, const Tensor& k, const Tensor& v,
                                    const Tensor& g, const Tensor& beta, float scale,

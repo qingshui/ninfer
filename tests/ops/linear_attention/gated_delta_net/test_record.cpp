@@ -45,8 +45,22 @@ int verify_equal(const std::string& label, const std::vector<std::uint16_t>& lhs
     return 1;
 }
 
+// The bytes of a State field holding `values`, which lie on the BF16 grid for a BF16 State.
+std::vector<std::uint8_t> state_bytes(const std::vector<float>& values, DType dtype) {
+    std::vector<std::uint8_t> bytes(values.size() * dtype_size(dtype));
+    if (dtype == DType::BF16) {
+        std::vector<std::uint16_t> bits(values.size());
+        for (std::size_t i = 0; i < values.size(); ++i) bits[i] = f32_to_bf16(values[i]);
+        std::memcpy(bytes.data(), bits.data(), bytes.size());
+    } else {
+        std::memcpy(bytes.data(), values.data(), bytes.size());
+    }
+    return bytes;
+}
+
 int run_case(std::int32_t value_heads, std::int32_t width, std::int32_t batch,
-             std::vector<std::int32_t> valid_columns, std::uint32_t seed) {
+             std::vector<std::int32_t> valid_columns, std::uint32_t seed,
+             DType state_dtype = DType::FP32) {
     const std::int32_t kQkHeads = value_heads == 24 ? 8 : 16;
     const bool dense            = valid_columns.empty();
     if (dense) { valid_columns.assign(static_cast<std::size_t>(batch), width); }
@@ -74,6 +88,8 @@ int run_case(std::int32_t value_heads, std::int32_t width, std::int32_t batch,
     std::vector<float> state(state_elements);
     fill_uniform(state, seed + 5, -0.03F, 0.03F);
     state[0] = std::bit_cast<float>(0x80000000U);
+    if (state_dtype == DType::BF16) round_to_bf16(state);
+    const std::vector<std::uint8_t> initial_state_bytes = state_bytes(state, state_dtype);
 
     std::vector<std::int32_t> initial_slots(static_cast<std::size_t>(batch));
     for (std::int32_t row = 0; row < batch; ++row) {
@@ -85,11 +101,11 @@ int run_case(std::int32_t value_heads, std::int32_t width, std::int32_t batch,
     DeviceBuffer device_v        = to_device(v_bits);
     DeviceBuffer device_g        = to_device(g);
     DeviceBuffer device_beta     = to_device(beta);
-    DeviceBuffer reference_state = to_device(state);
+    DeviceBuffer reference_state = to_device(initial_state_bytes);
     DeviceBuffer reference_final(ninfer::test::cuda_environment().context.device(),
                                  static_cast<std::size_t>(kStateDim) * kStateDim * value_heads *
-                                     batch * sizeof(float));
-    DeviceBuffer record_state = to_device(state);
+                                     batch * dtype_size(state_dtype));
+    DeviceBuffer record_state = to_device(initial_state_bytes);
     DeviceBuffer device_valid;
     if (!dense) { device_valid = to_device(valid_columns); }
 
@@ -114,12 +130,12 @@ int run_case(std::int32_t value_heads, std::int32_t width, std::int32_t batch,
     Tensor v(device_v.span(), DType::BF16, {kStateDim, value_heads, width, batch});
     Tensor g_tensor(device_g.span(), DType::FP32, {value_heads, width, batch});
     Tensor beta_tensor(device_beta.span(), DType::FP32, {value_heads, width, batch});
-    Tensor reference_states(reference_state.span(), DType::FP32,
+    Tensor reference_states(reference_state.span(), state_dtype,
                             {kStateDim, kStateDim, value_heads, slots});
-    Tensor record_states(record_state.span(), DType::FP32,
+    Tensor record_states(record_state.span(), state_dtype,
                          {kStateDim, kStateDim, value_heads, slots});
     RecordStateFixture history(record_states, 3);
-    Tensor reference_final_states(reference_final.span(), DType::FP32,
+    Tensor reference_final_states(reference_final.span(), state_dtype,
                                   {kStateDim, kStateDim, value_heads, batch});
     DeviceBuffer reference_slot = to_device(std::vector<std::int64_t>{0});
     Tensor selected_reference_slot(reference_slot.span(), DType::I64, {1});
@@ -229,7 +245,8 @@ int run_case(std::int32_t value_heads, std::int32_t width, std::int32_t batch,
 
     int failures             = 0;
     const std::string suffix = " Hv=" + std::to_string(value_heads) +
-                               " T=" + std::to_string(width) + " B=" + std::to_string(batch);
+                               " T=" + std::to_string(width) + " B=" + std::to_string(batch) +
+                               (state_dtype == DType::BF16 ? " state=bf16" : " state=fp32");
     const std::vector<std::uint16_t> reference_output_bits =
         from_device<std::uint16_t>(reference_out, value_elements);
     const std::vector<std::uint16_t> record_output_bits =
@@ -298,8 +315,8 @@ int run_case(std::int32_t value_heads, std::int32_t width, std::int32_t batch,
 
     history.copy_back();
     failures += history.verify_guards("record source");
-    const std::vector<float> state_after = from_device<float>(record_state, state_elements);
-    if (std::memcmp(state_after.data(), state.data(), state_elements * sizeof(float)) != 0) {
+    if (from_device<std::uint8_t>(record_state, initial_state_bytes.size()) !=
+        initial_state_bytes) {
         std::cerr << "replay record modified source state" << suffix << "\n";
         ++failures;
     }
@@ -355,11 +372,13 @@ int reject_unregistered_heads() {
 
 int main(int argc, char** argv) {
     OpSuite suite;
-    const auto add = [&](int heads, int width, int batch, std::vector<int> valid, unsigned seed) {
+    const auto add = [&](int heads, int width, int batch, std::vector<int> valid, unsigned seed,
+                         DType state = DType::FP32) {
         suite.add(std::string(heads == 24 ? "gdn_record_local/h" : "gdn_record/h") +
                       std::to_string(heads) + "/w" + std::to_string(width) + "/b" +
-                      std::to_string(batch) + (valid.empty() ? "/dense" : "/ragged"),
-                  [=] { return run_case(heads, width, batch, valid, seed); },
+                      std::to_string(batch) + (valid.empty() ? "/dense" : "/ragged") +
+                      (state == DType::BF16 ? "/bf16-state" : ""),
+                  [=] { return run_case(heads, width, batch, valid, seed, state); },
                   {{"execution", width == 2 || width == 9 || width == 16 ? "graph" : "eager"}});
     };
     suite.add("gdn_record/reject/h80", [] { return reject_unregistered_heads(); });
@@ -373,6 +392,16 @@ int main(int argc, char** argv) {
         add(48, width, 8, valid, 1760U + width);
     }
     add(48, 5, 3, {5, 3, 1}, 1791U);
+
+    // A BF16 State continues every token from its rounded one-token publication.
+    add(64, 2, 1, {}, 5911U, DType::BF16);
+    add(64, 16, 1, {7}, 5921U, DType::BF16);
+    add(64, 16, 8, {16, 15, 9, 8, 4, 3, 2, 1}, 5925U, DType::BF16);
+    add(64, 6, 8, {6, 5, 4, 3, 2, 1, 6, 2}, 5931U, DType::BF16);
+    add(48, 9, 3, {}, 5941U, DType::BF16);
+    add(32, 5, 2, {5, 3}, 5951U, DType::BF16);
+    add(24, 16, 8, {}, 5961U, DType::BF16);
+    add(24, 7, 4, {7, 1, 4, 2}, 5971U, DType::BF16);
 
     add(64, 2, 1, {}, 1911U);
     add(64, 16, 1, {7}, 1921U);

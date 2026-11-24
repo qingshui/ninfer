@@ -4,9 +4,6 @@
 #include "ninfer/ops/sequence.h"
 
 #include <algorithm>
-#include <cstdio>
-#include <cstdlib>
-#include <vector>
 #include <limits>
 #include <stdexcept>
 
@@ -185,18 +182,6 @@ void RankProgramImpl::begin_mixed_target(ComputeOperation& operation) {
         segment_table(static_cast<std::uint32_t>(rows), static_cast<std::uint32_t>(count),
                       operation.boundaries)};
     resources.work().reset();
-    if (std::getenv("NINFER_DEBUG_MIXED")) { // TEMPDEBUG
-        CUDA_CHECK(cudaStreamSynchronize(device.stream()));
-        std::vector<std::int32_t> valid(4), table(4), pos(operation.axis_tokens), rope(3 * operation.axis_tokens);
-        CUDA_CHECK(cudaMemcpy(valid.data(), frame.valid_columns.data, 16, cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaMemcpy(table.data(), frame.main_table_rows.data, 16, cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaMemcpy(pos.data(), input.cache_positions.data, 4 * operation.axis_tokens, cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaMemcpy(rope.data(), input.rope_positions.data, 12 * operation.axis_tokens, cudaMemcpyDeviceToHost));
-        std::fprintf(stderr, "MIXED rows=%d count=%d width=%d axis=%d prefill=%u valid=%d,%d,%d table=%d,%d,%d\n", rows, count, width, axis, operation.prefill_tokens, valid[0], valid[1], valid[2], table[0], table[1], table[2]);
-        std::fprintf(stderr, "  pos[0..2]=%d,%d,%d pos[last]=%d,%d  rope0[0]=%d rope1[0]=%d rope2[0]=%d ropeLast=%d\n", pos[0], pos[1], pos[2], pos[axis-2], pos[axis-1], rope[0], rope[axis], rope[2*axis], rope[axis-1]);
-        for (const auto& seg : operation.segments) std::fprintf(stderr, "  seg row=%u off=%u tokens=%u src=%ld dst=%ld\n", seg.row, seg.token_offset, seg.tokens, (long)seg.source_offset, (long)seg.destination_offset);
-        std::fprintf(stderr, "  decode state src=%ld dst=%ld frontiers=%d,%d\n", (long)frame.host_ingress->state_source_offsets[0], (long)frame.host_ingress->state_destination_offsets[0], frame.host_ingress->frontiers[0], frame.host_ingress->frontiers[1]);
-    }
     slot().gpu_timer.begin_target();
     operation.text = std::make_unique<execution::TextRun>(
         execution::TextExecutionView{parameters, resources.work(), device.execution_view(),

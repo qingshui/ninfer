@@ -16,18 +16,18 @@ static_assert(sizeof(GdnReplayFoldKernelRows) == 256);
 static_assert(alignof(GdnReplayFoldKernelRows) == 16);
 static_assert(std::is_trivially_copyable_v<GdnReplayFoldKernelRows>);
 
-template <class Geometry, class Rows>
+template <class Geometry, class Rows, class State>
 void launch_replay_fold_fixed(const GdnReplayRecords& records,
                               LinearAttentionStateAllLayersView states, const Rows& rows,
                               std::int32_t active_rows, cudaStream_t stream) {
-    const FoldAccess<Geometry, Rows> access{
+    const FoldAccess<Geometry, Rows, State> access{
         static_cast<const __nv_bfloat16*>(records.key.data),
         static_cast<const __nv_bfloat16*>(records.value.data),
         reinterpret_cast<const uint2*>(records.gate.data),
         static_cast<const __nv_bfloat16*>(records.conv.data),
-        common::operand::state_field_base<float>(states.recurrent),
+        common::operand::state_field_base<State>(states.recurrent),
         common::operand::state_field_base<__nv_bfloat16>(states.conv),
-        static_cast<std::int64_t>(states.recurrent.field.layer_stride / sizeof(float)),
+        static_cast<std::int64_t>(states.recurrent.field.layer_stride / sizeof(State)),
         static_cast<std::int64_t>(states.conv.field.layer_stride / sizeof(__nv_bfloat16)),
         records.spec.record_capacity,
         records.spec.width,
@@ -37,8 +37,20 @@ void launch_replay_fold_fixed(const GdnReplayRecords& records,
                     static_cast<unsigned>(active_rows),
                     static_cast<unsigned>(Geometry::kLayers * (kStateDim / kBlockDv)));
     const dim3 block(common::kWarpSize, kNumWarps, 1);
-    recurrent_fold_kernel<Geometry, Rows><<<grid, block, 0, stream>>>(access);
+    recurrent_fold_kernel<Geometry, Rows, State><<<grid, block, 0, stream>>>(access);
     CUDA_CHECK(cudaGetLastError());
+}
+
+template <class Geometry, class Rows>
+void launch_replay_fold_fixed(const GdnReplayRecords& records,
+                              LinearAttentionStateAllLayersView states, const Rows& rows,
+                              std::int32_t active_rows, cudaStream_t stream) {
+    if (states.recurrent.field.tensor.dtype == DType::BF16)
+        launch_replay_fold_fixed<Geometry, Rows, __nv_bfloat16>(records, states, rows,
+                                                                active_rows, stream);
+    else
+        launch_replay_fold_fixed<Geometry, Rows, float>(records, states, rows, active_rows,
+                                                        stream);
 }
 
 template <class Rows>

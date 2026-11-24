@@ -24,10 +24,12 @@ struct GdnReplayFoldRow {
  * update in place; active destinations are distinct and cannot overwrite another active source.
  *
  * commit_columns is in [0,T]. Zero is a strict no-op: no record or state is accessed. A positive
- * row writes final FP32 recurrent state and tail_3(old_history || conv_record[0:commit_columns]).
- * Both regions are bit-identical to the corresponding snapshot of the same full physical
- * record-producing block from the same initial state and represented inputs. Projection is
- * not re-evaluated at the commit width.
+ * row writes the final recurrent state (FP32 or BF16 fields) and
+ * tail_3(old_history || conv_record[0:commit_columns]). Both regions are bit-identical to the
+ * corresponding snapshot of the same full physical record-producing block from the same initial
+ * state and represented inputs; the recurrent snapshot is the state after commit_columns
+ * one-token updates, each rounded to nearest even when the state is BF16. Projection is not
+ * re-evaluated at the commit width.
  *
  * Construction validates fixed state/record geometry. The bound arena, field geometry and
  * record addresses stay stable for the plan lifetime; record byte offsets may change. Host row

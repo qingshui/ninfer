@@ -7,6 +7,7 @@
 #include "runtime/engine/request_record.h"
 #include "runtime/engine/context_cache/resource_manager.h"
 #include "runtime/engine/context_cache/placement_policy.h"
+#include "runtime/engine/lane_governor.h"
 #include "runtime/engine/scheduler.h"
 #include "runtime/engine/generation_budget.h"
 #include "runtime/executor/contract.h"
@@ -99,6 +100,19 @@ public:
         instance_.executor->configure_decode_statistics(max_concurrency_);
         materializing_.resize(max_concurrency_);
         lane_residency_epochs_.resize(max_concurrency_, 1);
+        if (options.automatic_lane_fitting && instance_.session->mixed_decode_limit() != 0) {
+            lane_governor_.emplace(
+                max_concurrency_,
+                kLaneGovernorFloorLanes,
+                LaneGovernor::Policy{.target        = kLaneCadenceTarget,
+                                     .window        = kLaneGovernorWindow,
+                                     .min_samples   = kLaneGovernorSamples,
+                                     .band          = kLaneGovernorBand,
+                                     .gain          = kLaneGovernorGain,
+                                     .max_step      = kLaneGovernorStep,
+                                     .release_after = kLaneGovernorReleaseAfter,
+                                     .release_for   = kLaneGovernorReleaseFor});
+        }
         cumulative_stats_.context_transfers.kv.resize(instance_.session->kv_pools().size());
         for (const auto& pool : instance_.session->kv_pools()) {
             cumulative_stats_.kv_pools.push_back({pool.id.index, std::string(pool.label), 0});
@@ -165,12 +179,20 @@ public:
     // decode row limit is the Session's mixed-flight row bound (the lane capacity when the
     // Session never mixes, so every decode row still rides); and the floor keeps the head
     // prefill lane advancing beside the decode rows even when its own limit exceeds the budget.
+    //
+    // Prefill batching applies to Sessions that mix: a mixed flight costs about 9 ms more than the
+    // decode step it carries on the B200 with the 122B target, however few prefill tokens it
+    // holds, and 1536 tokens (about 14 ms of prefill) repay that. With 88 lanes, holding prefill
+    // for two decode flights gained less than three, and four or six gained nothing measurable.
     [[nodiscard]] IterationBudget iteration_budget() const noexcept {
         const std::uint32_t rows = instance_.session->mixed_decode_limit();
         return IterationBudget{
             .token_budget         = std::max(instance_.session->prefill_pack_tokens(), 1U),
             .decode_rows_limit    = rows != 0 ? rows : max_concurrency_,
             .prefill_floor_tokens = prefill_chunk_ != 0 ? prefill_chunk_ : 1U,
+            .batch_decode_rows    = rows != 0 ? kPrefillBatchRows : 0U,
+            .batch_prefill_tokens = kPrefillBatchTokens,
+            .batch_max_deferrals  = kPrefillBatchDeferrals,
         };
     }
 
@@ -601,7 +623,10 @@ private:
         bool restoring = false;
         std::vector<typename ResourceManagement::SourceChoice> sources;
         std::size_t current = 0;
+        // Ranked at the decision's first reclaim and fixed from then on; until then it carries
+        // only the decision's rights. A binding that fits needs no ranking.
         typename ResourceManagement::ReclaimCursor reclaim;
+        bool ranked = false;
     };
 
     struct CaptureDecision {
@@ -672,9 +697,16 @@ private:
 
     void record_first_output(const std::shared_ptr<Request>& request);
 
+    // `hold_wake` leaves a streaming consumer's wake-up to flush_consumer_wakes: the events are
+    // queued now and the consumer observes them once the iteration's flights are submitted.
     void append_output(const std::shared_ptr<Request>& request, PublishedOutput output,
                        std::optional<GenerationTimingObservation> timing = std::nullopt,
-                       EnginePhaseScope* phase                           = nullptr);
+                       EnginePhaseScope* phase = nullptr, bool hold_wake = false);
+
+    // Wakes the streaming consumers whose events a model commit queued. A wake is a system call
+    // per consumer, so the worker issues them after the next flight is on the device instead of
+    // between a flight's result and its successor's launch.
+    void flush_consumer_wakes() noexcept;
 
     // Model-format failures settle only this already-committed row. Native abort still owns the
     // sequence cleanup; decoder errors must not escape to the Engine-wide invariant handler.
@@ -745,7 +777,16 @@ private:
 
     [[nodiscard]] std::optional<std::uint32_t> free_lane() const noexcept;
 
-    [[nodiscard]] std::uint32_t free_lane_count() const noexcept;
+    [[nodiscard]] std::uint32_t occupied_lane_count() const noexcept;
+    // Whether a fresh admission may take `lanes` free lanes now: they must be free and, unless the
+    // Engine is idle, fit within the lane governor's quota. A refusal the quota alone causes is
+    // reported to the governor.
+    [[nodiscard]] bool admits_fresh_lanes(std::uint32_t lanes) noexcept;
+
+    // A request committed `tokens` tokens at `now`; the tokens of a decode row also report their
+    // cadence to the lane governor.
+    void observe_token_cadence(Request& request, bool decode_row, std::uint32_t tokens,
+                               Clock::time_point now) noexcept;
 
     [[nodiscard]] bool resident_empty() const noexcept;
 
@@ -840,6 +881,34 @@ private:
     // Longest an admission that waits for capacity keeps the Engine in its iteration to chain its
     // reclaim steps (see begin_iteration).
     static constexpr std::chrono::milliseconds kAdmissionBurst{50};
+
+    // Prefill batching bounds of iteration_budget(): the resident decode lanes that engage it, the
+    // waiting prefill tokens that end it, and the most decode flights in a row it holds prefill for.
+    static constexpr std::uint32_t kPrefillBatchRows      = 32;
+    static constexpr std::uint32_t kPrefillBatchTokens    = 1536;
+    static constexpr std::uint32_t kPrefillBatchDeferrals = 3;
+
+    // Lane governor of an automatically fitted Engine whose Session mixes (see LaneGovernor). The
+    // target is the token interval a decode lane is held to, about 46 tokens/s per stream. It was
+    // calibrated on the Qwen3.5-122B target on a B200 under a 130-client closed loop at n=4 and
+    // n=8, where the quota binds at both loads and the mean time per output token follows the
+    // target almost linearly: the target keeps it about 4% under that of an sglang server limited
+    // to 170 running requests at n=8, which crosses it at about 22.4 ms. The cadence it assumes
+    // is the one of mixed flights, where every resident decode row rides every flight; a Session
+    // that never mixes alternates prefill and decode flights and keeps every fitted lane. The
+    // window is the observation one adjustment needs, the floor the smallest quota, the release
+    // how long a prefill-bound load must miss the target at the floor before it keeps every lane
+    // and for how long, and the rest the control law. The floor is a lane count: the fitted lanes
+    // follow the memory a lane holds, which says nothing about the cadence of a flight.
+    static constexpr std::chrono::microseconds kLaneCadenceTarget{21500};
+    static constexpr std::chrono::milliseconds kLaneGovernorWindow{150};
+    static constexpr std::uint32_t kLaneGovernorSamples      = 32;
+    static constexpr std::uint32_t kLaneGovernorFloorLanes   = 32;
+    static constexpr double kLaneGovernorBand                = 0.04;
+    static constexpr double kLaneGovernorGain                = 0.6;
+    static constexpr double kLaneGovernorStep                = 0.25;
+    static constexpr std::chrono::seconds kLaneGovernorReleaseAfter{2};
+    static constexpr std::chrono::seconds kLaneGovernorReleaseFor{20};
 
     // Retained points, the shared prefixes and the finished lineages the resource manager keeps
     // for later requests to adopt, are a cache over the pool's idle bytes. Admission and
@@ -957,7 +1026,15 @@ private:
     // turn over, restores the pressure owner, advances forking sample groups, and admits new
     // work. Admission of a synchronous root binding and the fork step run while flights
     // compute; reclamation and asynchronous bindings keep waiting for a quiescent iteration.
-    void begin_iteration(HostPhaseMeasurement& boundary);
+    // True when the admission pass trails the iteration's flight instead
+    // (admission_trails_flight): the caller runs it once the flight is submitted.
+    [[nodiscard]] bool begin_iteration(HostPhaseMeasurement& boundary);
+
+    // Whether this iteration's flight carries decode rows that prefill batching keeps apart from
+    // every prefill lane, the waiting ones and those an admission would add below the batching
+    // token target. Such a flight does not depend on the admission pass. Reads the batching state
+    // without advancing it.
+    [[nodiscard]] bool admission_trails_flight() const;
 
     // Plans and submits one iteration's flights: the control rows, one replaying lane, and one
     // mixed flight of every planned decode row plus the prefill segments the token budget
@@ -991,6 +1068,9 @@ private:
     // Asynchronous bindings in flight, indexed by destination lane; the Session's single
     // context-operation slot keeps at most one entry waiting at a time.
     std::vector<std::optional<MaterializingRequest>> materializing_;
+    // Present only for an automatically fitted Engine whose Session mixes; the worker thread alone
+    // touches it.
+    std::optional<LaneGovernor> lane_governor_;
     // Submitted groups that still have queued branches (guarded by `queue_mutex_`).
     std::vector<std::shared_ptr<SampleGroup>> groups_;
     // Engaged fork groups waiting for their parent to rest at the fork frontier.
@@ -1009,6 +1089,7 @@ private:
         std::exception_ptr error;
     };
     std::vector<HeldCompletion> held_completions_;
+    std::vector<std::shared_ptr<Request>> held_wakes_;
     std::optional<bool> pass_blocked_;
     std::vector<std::shared_ptr<Request>> paused_;
     Scheduling scheduler_;
@@ -1029,9 +1110,17 @@ private:
     std::vector<std::uint32_t> current_decode_lanes_{};
     std::size_t current_decode_lane_count_ = 0;
     std::vector<std::uint8_t> current_decode_member_{};
+    // Advances with every change of `slots_` or `materializing_`; the caches of the lane tables
+    // below are valid while it holds still.
     std::uint64_t slots_epoch_ = 0;
     mutable ExposureHandle exposure_cache_{};
     mutable std::uint64_t exposure_cache_epoch_ = 0;
+    // The lanes in use and the first free lane, found once per epoch: an admission pass asks for
+    // every queued candidate.
+    mutable std::optional<std::uint64_t> occupied_cache_epoch_{};
+    mutable std::uint32_t occupied_cache_ = 0;
+    mutable std::optional<std::uint64_t> free_lane_cache_epoch_{};
+    mutable std::optional<std::uint32_t> free_lane_cache_{};
     RuntimeStats cumulative_stats_;
     RuntimeStats stats_snapshot_;
     EngineSnapshot published_snapshot_;

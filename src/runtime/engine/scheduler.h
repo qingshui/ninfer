@@ -12,6 +12,7 @@
 #include <optional>
 #include <span>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 namespace ninfer::runtime {
@@ -30,9 +31,12 @@ struct LaneTableEntry {
 
 // The lanes one iteration plans over, indexed by lane. `priority_lane` names the lane the plan
 // visits first: the Session's prefill continuation, else the pressure owner's prefill lane.
+// `decode_in_flight` counts the decode lanes whose current unit is still executing: they are in
+// no entry, and join the flight of the iteration planned once that unit completes.
 struct LaneTable {
     std::vector<LaneTableEntry> lanes;
     std::optional<std::uint32_t> priority_lane;
+    std::uint32_t decode_in_flight = 0;
 
     [[nodiscard]] std::uint32_t size() const noexcept {
         return static_cast<std::uint32_t>(lanes.size());
@@ -43,10 +47,21 @@ struct LaneTable {
 // iteration carries, `decode_rows_limit` the decode rows, and `prefill_floor_tokens` the tokens
 // the first prefill lane is guaranteed even when the budget left is smaller: decode rows always
 // ride, so the floor is what keeps prefill work from starving behind them.
+//
+// A flight that carries prefill costs more than the decode step it rides with, by a fixed amount
+// that does not depend on how many prefill tokens it holds. Prefill batching spreads that cost
+// over more tokens: while `batch_decode_rows` or more decode lanes are resident, prefill lanes
+// that together hold fewer than `batch_prefill_tokens` wait, for at most `batch_max_deferrals`
+// decode flights in a row, and those flights carry the decode rows alone. While those decode
+// lanes are resident no prefill flies by itself, however many tokens it holds: it joins the decode
+// rows' next flight. Zero `batch_decode_rows` plans prefill in every iteration.
 struct IterationBudget {
     std::uint32_t token_budget         = std::numeric_limits<std::uint32_t>::max();
     std::uint32_t decode_rows_limit    = std::numeric_limits<std::uint32_t>::max();
     std::uint32_t prefill_floor_tokens = 0;
+    std::uint32_t batch_decode_rows    = 0;
+    std::uint32_t batch_prefill_tokens = 0;
+    std::uint32_t batch_max_deferrals  = 0;
 };
 
 // The membership of one iteration. `decode_lanes` are decode rows, in lane order; every planned
@@ -210,6 +225,10 @@ public:
     //  - Replaying lanes never join the prefill list: a replay unit runs alone.
     //  - The cursor moves past the last admitted prefill lane, so k prefilling lanes each
     //    advance within k iterations.
+    //  - Prefill batching (see IterationBudget) holds the whole prefill list back for a bounded
+    //    number of iterations. It never applies to the priority lane, so a continuation or a
+    //    pressure owner keeps advancing, and it ends as soon as the waiting lanes hold enough
+    //    tokens or the bound is reached.
     [[nodiscard]] IterationPlan plan_iteration(const LaneTable& table, IterationBudget budget) {
         IterationPlan plan;
         const std::uint32_t lanes = table.size();
@@ -220,6 +239,7 @@ public:
              ++lane) {
             if (table.lanes[lane].decode_ready) plan.decode_lanes.push_back(lane);
         }
+        if (defers_prefill(table, budget, plan.decode_lanes.size())) return plan;
         std::int64_t remaining = budget.token_budget;
         bool floored           = false;
         const auto visit = [&](std::uint32_t lane) {
@@ -253,6 +273,17 @@ public:
         return plan;
     }
 
+    // Whether prefill batching holds back every prefill lane of this iteration's plan: the ones
+    // waiting now and any an admission before the plan would add while the waiting tokens stay
+    // below the target. `decode_rows` decode lanes fly now, enough decode lanes are resident, and
+    // the deferral bound is not reached. Reads the batching state without advancing it.
+    [[nodiscard]] bool batching_holds(const LaneTable& table, const IterationBudget& budget,
+                                      std::size_t decode_rows) const noexcept {
+        return decode_rows != 0 && batching_resident(table, budget, decode_rows) &&
+               waiting_prefill(table) < budget.batch_prefill_tokens &&
+               deferred_iterations_ < budget.batch_max_deferrals;
+    }
+
     // Queue/capacity changes start a bounded pass. Ordinary decode cycles only continue
     // an unfinished pass; they do not restart failed admission checks.
     void begin_admission_scan() noexcept { admission_scan_requested_ = true; }
@@ -262,7 +293,12 @@ public:
     }
 
     void admission_candidate_checked(std::uint64_t request_id) noexcept {
-        std::erase(admission_scan_remaining_, request_id);
+        // The tickets stay sorted (fresh_candidates), so a pass over hundreds of queued requests
+        // checks each one off in logarithmic time.
+        const auto found = std::lower_bound(admission_scan_remaining_.begin(),
+                                            admission_scan_remaining_.end(), request_id);
+        if (found != admission_scan_remaining_.end() && *found == request_id)
+            admission_scan_remaining_.erase(found);
         if (request_id != admission_scan_head_) { scan_after_ = request_id; }
     }
 
@@ -276,44 +312,47 @@ public:
             return candidates;
         }
         admission_scan_head_ = fresh.front()->id;
-        std::size_t limit    = fresh.size();
-        for (std::size_t i = 0; i < fresh.size(); ++i) {
-            if (fresh[i]->admission_bypasses >= concurrency) {
-                limit = i + 1;
-                break;
-            }
+        // One read of each queued request: the requests behind one whose bypass allowance is
+        // spent are not eligible. The queue can hold hundreds of requests, so everything after
+        // this pass works on the copied ids.
+        auto& ids = scan_ids_;
+        ids.clear();
+        for (const auto& request : fresh) {
+            ids.push_back(request->id);
+            if (request->admission_bypasses >= concurrency) break;
         }
         if (admission_scan_requested_) {
-            admission_scan_remaining_.clear();
-            for (std::size_t i = 0; i < limit; ++i) {
-                admission_scan_remaining_.push_back(fresh[i]->id);
-            }
+            admission_scan_remaining_.assign(ids.begin(), ids.end());
+            std::sort(admission_scan_remaining_.begin(), admission_scan_remaining_.end());
             admission_scan_requested_ = false;
         } else {
             // Cancellation and a newly exhausted bypass allowance can remove eligibility
             // while the pass is in progress. Keep tickets, not queue positions or iterators.
+            auto& eligible = scan_sorted_;
+            eligible.assign(ids.begin(), ids.end());
+            std::sort(eligible.begin(), eligible.end());
             std::erase_if(admission_scan_remaining_, [&](std::uint64_t id) {
-                return std::none_of(fresh.begin(), fresh.begin() + limit,
-                                    [id](const auto& request) { return request->id == id; });
+                return !std::binary_search(eligible.begin(), eligible.end(), id);
             });
         }
         if (admission_scan_remaining_.empty()) { return candidates; }
         candidates.push_back(fresh.front());
-        std::vector<RequestPtr> younger;
-        for (std::size_t i = 1; i < limit; ++i) {
-            if (std::find(admission_scan_remaining_.begin(), admission_scan_remaining_.end(),
-                          fresh[i]->id) != admission_scan_remaining_.end()) {
-                younger.push_back(fresh[i]);
+        const auto& pending = admission_scan_remaining_;
+        // The younger requests still to check, as (id, queue position), in id order.
+        auto& younger = scan_younger_;
+        younger.clear();
+        for (std::size_t i = 1; i < ids.size(); ++i) {
+            if (std::binary_search(pending.begin(), pending.end(), ids[i])) {
+                younger.emplace_back(ids[i], i);
             }
         }
-        std::sort(younger.begin(), younger.end(),
-                  [](const auto& a, const auto& b) { return a->id < b->id; });
-        const auto next = std::find_if(younger.begin(), younger.end(), [&](const auto& request) {
-            return request->id > scan_after_;
-        });
+        std::sort(younger.begin(), younger.end());
+        const auto next = std::find_if(younger.begin(), younger.end(),
+                                       [&](const auto& entry) { return entry.first > scan_after_; });
         std::rotate(younger.begin(), next, younger.end());
         const auto count = std::min<std::size_t>(concurrency, younger.size());
-        candidates.insert(candidates.end(), younger.begin(), younger.begin() + count);
+        candidates.reserve(1 + count);
+        for (std::size_t i = 0; i < count; ++i) candidates.push_back(fresh[younger[i].second]);
         return candidates;
     }
 
@@ -420,10 +459,15 @@ private:
     std::uint32_t lanes_;
     // Round-robin cursor over prefill lanes, advanced past the last admitted prefill lane.
     std::uint32_t prefill_cursor_ = 0;
+    // Consecutive iterations that held prefill back under prefill batching.
+    std::uint32_t deferred_iterations_ = 0;
 
     std::uint64_t scan_after_          = 0;
     std::uint64_t admission_scan_head_ = 0;
     std::vector<std::uint64_t> admission_scan_remaining_;
+    // Working storage of fresh_candidates, kept to avoid an allocation per call.
+    std::vector<std::uint64_t> scan_ids_, scan_sorted_;
+    std::vector<std::pair<std::uint64_t, std::size_t>> scan_younger_;
     bool admission_scan_requested_ = false;
     std::deque<std::uint64_t> service_order_;
     bool pressure_             = false;
@@ -431,6 +475,44 @@ private:
     bool served_               = false;
     std::uint64_t service_ns_  = 0;
     std::uint64_t recovery_ns_ = 0;
+
+    // The prefill tokens the lanes of a plan's table wait to process.
+    [[nodiscard]] static std::uint64_t waiting_prefill(const LaneTable& table) noexcept {
+        std::uint64_t waiting = 0;
+        for (const auto& entry : table.lanes) {
+            if (entry.prefilling) waiting += entry.prefill_limit;
+        }
+        return waiting;
+    }
+
+    // Enough decode lanes are resident for prefill batching, and no priority lane exempts it.
+    [[nodiscard]] static bool batching_resident(const LaneTable& table,
+                                                const IterationBudget& budget,
+                                                std::size_t decode_rows) noexcept {
+        return budget.batch_decode_rows != 0 &&
+               decode_rows + table.decode_in_flight >= budget.batch_decode_rows &&
+               !table.priority_lane;
+    }
+
+    // Whether prefill batching holds the prefill list back. It engages only while enough decode
+    // lanes are resident and the waiting prefill is small; large prefill work flies with the
+    // decode rows at once. While every resident decode lane executes, the waiting lanes join the
+    // decode rows' next flight whatever they hold, and the iteration neither spends nor resets the
+    // count, which advances once per iteration that flies decode rows.
+    [[nodiscard]] bool defers_prefill(const LaneTable& table, const IterationBudget& budget,
+                                      std::size_t decode_rows) noexcept {
+        const std::uint64_t waiting = waiting_prefill(table);
+        const bool resident         = batching_resident(table, budget, decode_rows);
+        if (resident && decode_rows == 0 && waiting != 0) return true;
+        const bool engaged = resident && waiting != 0 && waiting < budget.batch_prefill_tokens;
+        if (!engaged) {
+            deferred_iterations_ = 0;
+            return false;
+        }
+        const bool defer     = deferred_iterations_ < budget.batch_max_deferrals;
+        deferred_iterations_ = defer ? deferred_iterations_ + 1 : 0;
+        return defer;
+    }
 
     void reset_service() noexcept {
         served_      = false;

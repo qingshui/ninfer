@@ -7,12 +7,14 @@
 // tiles:
 //   BF16     K bf16 and V fp16 are copied as stored.
 //   FP8      K stays E4M3 (native kind::f8f6f4 MMA with per-(key, 128-group) UE8M0 scales applied to
-//            the accumulators); V is expanded to fp16.
+//            the accumulators); V is expanded to fp16. Pages reach shared memory by bulk copy, and
+//            the tiles are built from the staged pages.
 //   INT8, K8V4, NVFP4
 //            K is expanded to bf16 and V to fp16 in registers before the shared-memory store.
 // Rotation flags describe the basis the cache lives in (the write kernels apply a normalized H256
 // to K, and for NVFP4 / K8V4 also to V); Q is rotated to match and the output rotated back.
 
+#include "ops/common/cuda/sm100/tma.cuh"
 #include "ops/common/numeric/convert.cuh"
 #include "ops/common/quant/fp8.cuh"
 #include "ops/common/quant/nvfp4.cuh"
@@ -157,6 +159,56 @@ struct KvPolicy<KvDType::Fp8> {
     __device__ static __forceinline__ uint4 decode_v8(const VRaw& raw) {
         const int4 value = common::fp8_dequant_f16x8(raw.codes, static_cast<std::uint8_t>(raw.scale));
         return make_uint4(value.x, value.y, value.z, value.w);
+    }
+
+    // A page staged in shared memory: the K codes, the V codes, the K scales and the V scales of
+    // one head, each the head's contiguous slice of its plane. A slice is addressed as record 0
+    // and head 0 of its plane.
+    static constexpr int kPageCodeBytes  = kPagedKVPageSize * 256;
+    static constexpr int kPageScaleBytes = kPagedKVPageSize * 2;
+    static constexpr int kPageBytes      = 2 * kPageCodeBytes + 2 * kPageScaleBytes;
+    static constexpr int kPageVOff       = kPageCodeBytes;
+    static constexpr int kPageKScaleOff  = 2 * kPageCodeBytes;
+    static constexpr int kPageVScaleOff  = kPageKScaleOff + kPageScaleBytes;
+
+    // The bulk copies of one staged page, completing on `full`. Each run is 16-byte aligned, as the
+    // bulk copy requires: the attention operands are validated to have 16-byte aligned planes,
+    // which every record keeps, and a head's slice is a multiple of 16 bytes.
+    __device__ static __forceinline__ void stage_page(const Sm100KvCache& c, std::int64_t record,
+                                                      int head, unsigned char* page,
+                                                      std::uint64_t* full) {
+        namespace sm     = common::sm100;
+        const auto code  = kv::Fp8G128Layout::code_offset(record, head, 0, 0);
+        const auto scale = kv::Fp8G128Layout::scale_offset(record, head, 0, 0);
+        sm::mbarrier_arrive_expect_tx(full, kPageBytes);
+        sm::bulk_load(page, static_cast<const std::uint8_t*>(c.keys) + code, kPageCodeBytes, full);
+        sm::bulk_load(page + kPageVOff, static_cast<const std::uint8_t*>(c.values) + code,
+                      kPageCodeBytes, full);
+        sm::bulk_load(page + kPageKScaleOff, static_cast<const std::uint8_t*>(c.key_scales) + scale,
+                      kPageScaleBytes, full);
+        sm::bulk_load(page + kPageVScaleOff,
+                      static_cast<const std::uint8_t*>(c.value_scales) + scale, kPageScaleBytes,
+                      full);
+    }
+    // load_k16, load_k_scale_pair and load_v8_raw from a staged page. Offsets inside a page fit
+    // in an int.
+    __device__ static __forceinline__ int staged_code(int row, int d) {
+        return static_cast<int>(kv::Fp8G128Layout::code_offset(0, 0, d, row));
+    }
+    __device__ static __forceinline__ int staged_scale(int row, int group) {
+        return static_cast<int>(kv::Fp8G128Layout::scale_offset(0, 0, group, row));
+    }
+    __device__ static __forceinline__ uint4 staged_k16(const unsigned char* page, int row, int d) {
+        return common::load_vec<uint4>(page + staged_code(row, d));
+    }
+    __device__ static __forceinline__ unsigned staged_k_scale_pair(const unsigned char* page,
+                                                                   int row) {
+        return common::load_vec<std::uint16_t>(page + kPageKScaleOff + staged_scale(row, 0));
+    }
+    __device__ static __forceinline__ VRaw staged_v8_raw(const unsigned char* page, int row,
+                                                         int d) {
+        return {common::load_vec<int2>(page + kPageVOff + staged_code(row, d)),
+                static_cast<unsigned>(page[kPageVScaleOff + staged_scale(row, d / 128)])};
     }
 };
 

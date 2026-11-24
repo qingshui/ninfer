@@ -21,7 +21,7 @@ std::size_t nvfp4_linear_add_workspace_capacity_bytes(std::int32_t rows, std::in
         throw std::invalid_argument("nvfp4 linear_add: invalid token interval");
     (void)select_plan(rows, k, policy, first);
     const auto plan = select_plan(rows, k, policy, last);
-    return plan.a16 ? 0 : nvfp4_a4_workspace_capacity_bytes(last, k);
+    return plan.a16 ? 0 : nvfp4_a4_workspace_capacity_bytes(last, k, plan.partial_bytes);
 }
 
 void nvfp4_linear_add_dispatch(const Tensor& x, const Weight& w, Tensor& out, LinearPolicy policy,
@@ -29,7 +29,7 @@ void nvfp4_linear_add_dispatch(const Tensor& x, const Weight& w, Tensor& out, Li
     const auto plan = select_plan(w.n, w.k, policy, x.ne[1]);
     if (plan.a16) return plan.a16(x, w, out, stream);
     auto scope         = arena.scope();
-    const auto scratch = allocate_nvfp4_a4_workspace(arena, x.ne[1], w.k);
+    const auto scratch = allocate_nvfp4_a4_workspace(arena, x.ne[1], w.k, plan.partial_bytes);
     launch_nvfp4_a4_quantize(x, w, scratch, plan.scale_layout, stream);
     plan.quantized(x, w, out, scratch, stream);
 }

@@ -376,25 +376,79 @@ struct SamplingWarpList {
     }
 };
 
+// Elements one warp reads per vector load: eight BF16 per lane.
+inline constexpr int kSamplerChunk = 256;
+
+// A lane's eight values of a row chunk, the elements first .. first + 7 for `first` a multiple of
+// eight: masked, and also penalized when `penalize`. The eight elements share one mask word.
+__device__ __forceinline__ void sampling_lane_values(const uint4& packed, int first,
+                                                     const SamplingConfig& cfg, bool penalize,
+                                                     float (&x)[8], TokenRow overlay = {},
+                                                     int overlay_len = 0) {
+    const unsigned words[4] = {packed.x, packed.y, packed.z, packed.w};
+#pragma unroll
+    for (int w = 0; w < 4; ++w) {
+        x[2 * w]     = __uint_as_float(words[w] << 16);
+        x[2 * w + 1] = __uint_as_float(words[w] & 0xffff0000u);
+    }
+    if (penalize) {
+#pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            x[i] = sampling_adjusted_logit(x[i], first + i, cfg, overlay, overlay_len);
+        }
+    } else if (cfg.mask.words) {
+        const unsigned allowed =
+            cfg.mask.words[overlay_len * cfg.mask.stride + first / 32] >> (first % 32);
+#pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            if (!((allowed >> i) & 1u)) { x[i] = -CUDART_INF_F; }
+        }
+    }
+}
+
+// A lower bound on the cap-th largest of the block's values: the largest value that at least `cap`
+// of them reach, searched over the order keys that end in 16 zero bits, or -inf when fewer than
+// `cap` of them exceed -inf. Every thread of the block calls with one value, which must not be
+// NaN; the search is one block-wide count per remaining key bit.
+__device__ inline float sampling_block_floor(float value, int cap) {
+    const unsigned int key = ordered_score_bits(value);
+    unsigned int floor_key = 0;
+    for (int bit = 31; bit >= 16; --bit) {
+        const unsigned int trial = floor_key | (1u << bit);
+        if (__syncthreads_count(key >= trial) >= cap) { floor_key = trial; }
+    }
+    // The keys below that of -inf decode to NaN.
+    const float floor = score_from_order_key(static_cast<std::uint64_t>(floor_key) << 32);
+    return floor >= -CUDART_INF_F ? floor : -CUDART_INF_F;
+}
+
 // Single-block route for large columns when the finite multi-block workspace route cannot
-// represent the launch. It reads each vocab entry once. Every warp scans its slices into a
-// SamplingWarpList and the block then ranks the warps' lists against each other, so there are no
-// thread-local arrays and no serial merge. A 16-byte aligned row is read in 256-element chunks
-// (eight BF16 per lane, the next group of chunks already in flight); the chunk tail and rows that
-// are not 16-byte aligned take the scalar path.
+// represent the launch. A 16-byte aligned row is read twice in 256-element chunks (eight BF16 per
+// lane, the next group of chunks already in flight). The first pass keeps every lane's best
+// element and every chunk's largest value. The lanes' best elements are distinct, so no element
+// below the largest value that `cap` of them reach is a candidate, and the second pass revisits
+// only the chunks that reach this floor: every warp offers their elements to a SamplingWarpList
+// and the block then ranks the warps' lists against each other, so there are no thread-local
+// arrays and no serial merge. A warp records the chunks of its first 32 groups and revisits every
+// later chunk. Both passes apply the mask. Nonnegative penalties only lower values, so they are
+// applied, with their token counts, to the lanes' best elements and to the revisited lanes whose
+// unpenalized values reach both the floor and their warp list's cap-th value. The chunk tail and
+// rows that are not 16-byte aligned take the scalar path.
 __device__ inline void
 sampling_build_truncated_block_fast(const __nv_bfloat16* logits, std::int64_t base,
                                     std::int32_t vocab, const SamplingConfig& cfg, float* merge_val,
                                     int* merge_idx, float* cand_val, int* cand_idx, float* prob,
                                     int* n_support, TokenRow overlay = {}, int overlay_len = 0) {
     static_assert(kSamplerFastCandidates <= 32, "a warp holds the candidate list, one per lane");
-    constexpr int kChunk  = 256; // elements one warp reads per vector load
-    constexpr int kUnroll = 4;   // chunks in flight per warp
-    const int tid         = threadIdx.x;
-    const int lane        = tid & 31;
-    const int warp        = tid >> 5;
-    const int warps       = blockDim.x >> 5;
-    const int cap         = sampling_candidate_cap(cfg, vocab); // always <= kSamplerFastCandidates
+    constexpr unsigned kFull = 0xffffffffu;
+    constexpr int kChunk     = kSamplerChunk;
+    constexpr int kUnroll    = 4; // chunks in flight per warp
+    const int tid            = threadIdx.x;
+    const int lane           = tid & 31;
+    const int warp           = tid >> 5;
+    const int warps          = blockDim.x >> 5;
+    // Always <= kSamplerFastCandidates.
+    const int cap = sampling_candidate_cap(cfg, vocab);
 
     if (tid < cap) {
         cand_val[tid] = -CUDART_INF_F;
@@ -406,41 +460,127 @@ sampling_build_truncated_block_fast(const __nv_bfloat16* logits, std::int64_t ba
     const __nv_bfloat16* row = logits + base;
     const bool vector_row    = (reinterpret_cast<std::uintptr_t>(row) & 15) == 0;
     const int chunks         = vector_row ? vocab / kChunk : 0;
-    const auto offer_chunk   = [&](const uint4& packed, int chunk) {
-        const unsigned words[4] = {packed.x, packed.y, packed.z, packed.w};
-        const int first         = chunk * kChunk + lane * 8;
+    const bool penalties     = cfg.presence_penalty != 0.0f || cfg.frequency_penalty != 0.0f;
+    // Nonnegative penalties only lower values.
+    const bool bounded = penalties && cfg.presence_penalty >= 0.0f && cfg.frequency_penalty >= 0.0f;
+    float floor        = -CUDART_INF_F;
+
+    const auto load = [&](int chunk) {
+        return __ldg(reinterpret_cast<const uint4*>(row + chunk * kChunk) + lane);
+    };
+    // A lane's eight values of a chunk, penalized unless bounded.
+    const auto values = [&](const uint4& packed, int first, float (&x)[8]) {
+        sampling_lane_values(packed, first, cfg, penalties && !bounded, x, overlay, overlay_len);
+    };
+    const auto offer_chunk = [&](const uint4& packed, int chunk) {
+        const int first = chunk * kChunk + lane * 8;
+        const float bar = fmaxf(floor, list.worst_value);
+        float x[8];
+        values(packed, first, x);
+        float top = -CUDART_INF_F; // NaN values are never candidates
 #pragma unroll
-        for (int w = 0; w < 4; ++w) {
-            const int id0 = first + 2 * w;
-            const float low  = __uint_as_float(words[w] << 16);
-            const float high = __uint_as_float(words[w] & 0xffff0000u);
-            list.offer(sampling_adjusted_logit(low, id0, cfg, overlay, overlay_len), id0, true);
-            list.offer(sampling_adjusted_logit(high, id0 + 1, cfg, overlay, overlay_len), id0 + 1,
-                       true);
+        for (int i = 0; i < 8; ++i) { top = fmaxf(top, x[i]); }
+        const bool reaches = top >= bar;
+        if (!__any_sync(kFull, reaches)) { return; }
+        // A lane below the bar offers unpenalized values, which stay below it.
+        if (bounded && reaches) {
+#pragma unroll
+            for (int i = 0; i < 8; ++i) {
+                x[i] = sampling_adjusted_logit(x[i], first + i, cfg, overlay, overlay_len);
+            }
         }
+#pragma unroll
+        for (int i = 0; i < 8; ++i) { list.offer(x[i], first + i, x[i] >= floor); }
     };
     if (chunks > 0) {
-        const int step = warps * kUnroll;
+        // In its group g a warp reads the chunks warp + g * step + u * warps, u < kUnroll; lane g
+        // records the order key of the largest value of each.
+        constexpr int kRecorded = 32;
+        const int step          = warps * kUnroll;
         uint4 current[kUnroll], upcoming[kUnroll];
+        unsigned int peak[kUnroll];
         const auto fetch = [&](uint4* into, int group) {
 #pragma unroll
             for (int u = 0; u < kUnroll; ++u) {
                 const int chunk = group + u * warps;
-                if (chunk < chunks) {
-                    into[u] = __ldg(reinterpret_cast<const uint4*>(row + chunk * kChunk) + lane);
-                }
+                if (chunk < chunks) { into[u] = load(chunk); }
             }
         };
-        int group = warp;
-        fetch(current, group);
-        for (; group < chunks; group += step) {
+#pragma unroll
+        for (int u = 0; u < kUnroll; ++u) { peak[u] = 0; } // below every value
+        float best  = -CUDART_INF_F;
+        int best_id = INT_MAX;
+        fetch(current, warp);
+        for (int group = warp, g = 0; group < chunks; group += step, ++g) {
             fetch(upcoming, group + step);
 #pragma unroll
             for (int u = 0; u < kUnroll; ++u) {
-                if (group + u * warps < chunks) { offer_chunk(current[u], group + u * warps); }
+                const int chunk = group + u * warps;
+                if (chunk >= chunks) { continue; }
+                const int first = chunk * kChunk + lane * 8;
+                float x[8];
+                values(current[u], first, x);
+                float top = -CUDART_INF_F;
+#pragma unroll
+                for (int i = 0; i < 8; ++i) {
+                    top = fmaxf(top, x[i]);
+                    if (x[i] > best) {
+                        best    = x[i];
+                        best_id = first + i;
+                    }
+                }
+                const unsigned int largest = __reduce_max_sync(kFull, ordered_score_bits(top));
+                if (lane == g) { peak[u] = largest; }
             }
 #pragma unroll
             for (int u = 0; u < kUnroll; ++u) { current[u] = upcoming[u]; }
+        }
+        // A bounded lane's best element contributes its penalized value.
+        if (bounded && best_id != INT_MAX) {
+            best = sampling_adjusted_logit(best, best_id, cfg, overlay, overlay_len);
+        }
+        floor = sampling_block_floor(best, cap);
+
+        const unsigned int floor_key = ordered_score_bits(floor);
+        unsigned int revisit[kUnroll], groups = 0;
+#pragma unroll
+        for (int u = 0; u < kUnroll; ++u) {
+            revisit[u] = __ballot_sync(kFull, peak[u] >= floor_key);
+            groups |= revisit[u];
+        }
+        const auto fetch_revisit = [&](uint4* into, int g) {
+#pragma unroll
+            for (int u = 0; u < kUnroll; ++u) {
+                if ((revisit[u] >> g) & 1u) { into[u] = load(warp + g * step + u * warps); }
+            }
+        };
+        if (groups) {
+            int g = __ffs(groups) - 1;
+            groups &= groups - 1;
+            fetch_revisit(current, g);
+            for (;;) {
+                const int next = groups ? __ffs(groups) - 1 : -1;
+                if (next >= 0) {
+                    groups &= groups - 1;
+                    fetch_revisit(upcoming, next);
+                }
+#pragma unroll
+                for (int u = 0; u < kUnroll; ++u) {
+                    if ((revisit[u] >> g) & 1u) {
+                        offer_chunk(current[u], warp + g * step + u * warps);
+                    }
+                }
+                if (next < 0) { break; }
+                g = next;
+#pragma unroll
+                for (int u = 0; u < kUnroll; ++u) { current[u] = upcoming[u]; }
+            }
+        }
+        for (int group = warp + kRecorded * step; group < chunks; group += step) {
+            for (int u = 0; u < kUnroll; ++u) {
+                const int chunk = group + u * warps;
+                if (chunk < chunks) { offer_chunk(load(chunk), chunk); }
+            }
         }
     }
     for (int start = chunks * kChunk + warp * 32; start < vocab; start += warps * 32) {
@@ -449,7 +589,7 @@ sampling_build_truncated_block_fast(const __nv_bfloat16* logits, std::int64_t ba
         const float x   = live ? sampling_adjusted_logit(__bfloat162float(row[id]), id, cfg,
                                                          overlay, overlay_len)
                                : -CUDART_INF_F;
-        list.offer(x, id, live);
+        list.offer(x, id, live && x >= floor);
     }
 
     if (lane < kSamplerFastCandidates) {
@@ -459,19 +599,31 @@ sampling_build_truncated_block_fast(const __nv_bfloat16* logits, std::int64_t ba
     __syncthreads();
 
     // The best `cap` of the warps' lists, ranked in parallel: a candidate's rank is the number of
-    // candidates strictly ahead of it, and ranks below `cap` are the output slots.
+    // candidates strictly ahead of it, and ranks below `cap` are the output slots. Each list is
+    // ordered, so its candidates ahead of another list's candidate are a prefix, found by
+    // bisection.
     for (int c = tid; c < warps * kSamplerFastCandidates; c += blockDim.x) {
         const int member = c % kSamplerFastCandidates;
         if (member >= cap) { continue; }
         const float value = merge_val[c];
         const int index   = merge_idx[c];
         if (index == INT_MAX) { continue; }
-        int rank = 0;
-        for (int w = 0; w < warps; ++w) {
-            for (int j = 0; j < cap; ++j) {
-                const int other = w * kSamplerFastCandidates + j;
-                rank += score_id_better(merge_val[other], merge_idx[other], value, index);
+        const int owner = c / kSamplerFastCandidates;
+        int rank        = member;
+        for (int w = 0; w < warps && rank < cap; ++w) {
+            if (w == owner) { continue; }
+            const float* values_w = merge_val + w * kSamplerFastCandidates;
+            const int* indices_w  = merge_idx + w * kSamplerFastCandidates;
+            int low = 0, high = cap;
+            while (low < high) {
+                const int middle = (low + high) >> 1;
+                if (score_id_better(values_w[middle], indices_w[middle], value, index)) {
+                    low = middle + 1;
+                } else {
+                    high = middle;
+                }
             }
+            rank += low;
         }
         if (rank < cap) {
             cand_val[rank] = value;

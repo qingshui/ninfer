@@ -2,7 +2,9 @@
 // B200 tcgen05 route: linear_split for the qkvz parent (n=20480, k=3072, segments {12288, 8192})
 // and linear_add for the output projection (n=3072, k=8192). Both quantize the activation per
 // token, so the AllowA8 criterion applies. The reference decodes the stored codes and scales with
-// the fixture's own code and accumulates in FP64 from the exact BF16 activations.
+// the fixture's own code and accumulates in FP64 from the exact BF16 activations. Decode token
+// counts (at most 128) split the K loop of the last round's tiles; 48 to 128 tokens cover the 64-
+// and 128-token tiles there.
 
 #include "ops/linear/fp8_row_fp32_t4/helpers.h"
 
@@ -28,7 +30,7 @@ using namespace ninfer::test::t4;
 
 constexpr double kBf16Roundoff = 1.0 / 256.0;
 constexpr ReductionCriterion kA8Criterion{0.04, kBf16Roundoff, 0.06};
-constexpr std::array kTokens{1, 2, 17, 130, 257, 520, 1025, 3200};
+constexpr std::array kTokens{1, 2, 17, 48, 64, 96, 128, 130, 257, 520, 1025, 3200};
 constexpr int kMaxTokens = 3200;
 
 double dot(const std::vector<double>& row, const std::vector<std::uint16_t>& act, int k, int token) {

@@ -172,7 +172,7 @@ template <class Instance>
 void EngineCore<Instance>::append_output(const std::shared_ptr<Request>& request,
                                          PublishedOutput output,
                                          std::optional<GenerationTimingObservation> timing,
-                                         EnginePhaseScope* phase) {
+                                         EnginePhaseScope* phase, bool hold_wake) {
     if (output.empty() && !timing) { return; }
     if (!request->first_output_timing &&
         std::any_of(output.begin(), output.end(), [](const OutputEvent& event) {
@@ -197,7 +197,17 @@ void EngineCore<Instance>::append_output(const std::shared_ptr<Request>& request
             if (streaming) { request->events.emplace_back(std::move(event)); }
         }
     }
-    if (streaming) { request->cv.notify_one(); }
+    if (!streaming) return;
+    if (hold_wake)
+        held_wakes_.push_back(request);
+    else
+        request->cv.notify_one();
+}
+
+template <class Instance>
+void EngineCore<Instance>::flush_consumer_wakes() noexcept {
+    for (const auto& request : held_wakes_) request->cv.notify_one();
+    held_wakes_.clear();
 }
 
 template <class Instance>

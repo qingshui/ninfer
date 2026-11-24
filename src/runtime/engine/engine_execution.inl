@@ -1,5 +1,6 @@
 #pragma once
 
+
 namespace ninfer::runtime {
 
 template <class Instance>
@@ -209,6 +210,7 @@ void EngineCore<Instance>::commit_pending(PendingBatch&& pending, ComputeFlight 
         }
     }
 
+    const auto committed_at = Clock::now();
     for (std::size_t row = 0; row < row_count; ++row) {
         const auto member           = member_of(row);
         const std::uint32_t lane     = flight.lanes[member];
@@ -225,12 +227,18 @@ void EngineCore<Instance>::commit_pending(PendingBatch&& pending, ComputeFlight 
             flight.progressed[member] = accepted != 0;
             request->budget->commit(accepted);
             request->placement_tokens = instance_.session->load_tokens(*request->sequence);
+            if (accepted != 0) {
+                observe_token_cadence(
+                    *request,
+                    decode_flight || (flight.kind == FlightKind::Mixed && row < flight.decode_rows),
+                    accepted, committed_at);
+            }
         }
         request->consumed_by_commit = cancelled[row];
         update_recovery(request, cancelled[row]);
         auto published = request->output.commit_preview();
         auto timing    = record_committed_output(request, accepted);
-        append_output(request, std::move(published), std::move(timing), &phase);
+        append_output(request, std::move(published), std::move(timing), &phase, true);
         if (request->output.output_error()) {
             if constexpr (!kInFlightCapture) {
                 if (committed.capture_ready[row]) {
@@ -264,6 +272,10 @@ void EngineCore<Instance>::commit_pending(PendingBatch&& pending, ComputeFlight 
             }
         }
         request->model_state = next_state;
+    }
+    if (lane_governor_ && lane_governor_->update(committed_at, occupied_lane_count())) {
+        // The quota held requests back: check them against the quota of the next window.
+        request_admission_check();
     }
     phase.finish();
     record_service(flight);
@@ -1091,6 +1103,7 @@ void EngineCore<Instance>::fail_all(std::exception_ptr error) noexcept {
         if (entry) { materializing.push_back(entry->request); }
         entry.reset();
     }
+    ++slots_epoch_;
     // Native retires all transfer readers before any external checkpoint owner is destroyed.
     instance_.session->fail_all_cleanup();
     for (auto& flight : compute_) {

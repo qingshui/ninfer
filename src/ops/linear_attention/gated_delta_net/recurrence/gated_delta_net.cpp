@@ -40,7 +40,8 @@ RecurrenceGeometry validate_recurrent(const Tensor& q, const Tensor& k, const Te
     common::operand::dtype(out, DType::BF16, "gated_delta_net", "out must be BF16");
     common::operand::dtype(g, DType::FP32, "gated_delta_net", "g must be FP32");
     common::operand::dtype(beta, DType::FP32, "gated_delta_net", "beta must be FP32");
-    common::operand::dtype(ssm_state, DType::FP32, "gated_delta_net", "ssm_state must be FP32");
+    detail::gated_delta_net::require_state_dtype(ssm_state.dtype, ssm_state.dtype,
+                                                 "gated_delta_net", "ssm_state");
 
     const RecurrenceGeometry geometry = require_geometry(q, v);
     common::operand::shape(
@@ -113,10 +114,13 @@ RecurrenceGeometry validate_recurrent_batch_update(const Tensor& q, const Tensor
                            "g");
     common::operand::shape(beta, {geometry.value_heads, geometry.tokens, batch, 1},
                            "gated_delta_net", "beta");
+    const DType state_dtype = destination_state.field.tensor.dtype;
     for (const auto& state : std::array<ConstStateFieldView, 2>{source_state, destination_state}) {
         if (state.field.layers != 1)
             throw std::invalid_argument("gated_delta_net: select one recurrent state layer");
-        common::operand::state_field(state, DType::FP32, {128, 128, geometry.value_heads}, 16,
+        detail::gated_delta_net::require_state_dtype(state.field.tensor.dtype, state_dtype,
+                                                     "gated_delta_net", "recurrent state");
+        common::operand::state_field(state, state_dtype, {128, 128, geometry.value_heads}, 16,
                                      "gated_delta_net", "recurrent state", device);
         common::operand::shape(state.records.byte_offsets, {batch, 1, 1, 1}, "gated_delta_net",
                                "state byte offsets");
@@ -141,8 +145,8 @@ void validate_recurrence(const Tensor& q, const Tensor& k, const Tensor& v, cons
     // ssm_state_in is an equally-shaped read view (may alias ssm_state_out for in-place).
     const RecurrenceGeometry geometry =
         validate_recurrent(q, k, v, g, beta, scale, ssm_state_out, out, device);
-    common::operand::dtype(ssm_state_in, DType::FP32, "gated_delta_net",
-                           "ssm_state_in must be FP32");
+    detail::gated_delta_net::require_state_dtype(ssm_state_in.dtype, ssm_state_out.dtype,
+                                                 "gated_delta_net", "ssm_state_in");
     common::operand::shape(ssm_state_in,
                            {detail::gated_delta_net::kStateDim, detail::gated_delta_net::kStateDim,
                             geometry.value_heads, 1},
@@ -213,13 +217,14 @@ void gated_delta_net(const Tensor& q, const Tensor& k, const Tensor& v, const Te
         static_cast<const __nv_bfloat16*>(v.data),
         static_cast<const float*>(g.data),
         static_cast<const float*>(beta.data),
-        static_cast<const float*>(ssm_state_in.data),
-        static_cast<float*>(ssm_state_out.data),
+        ssm_state_in.data,
+        ssm_state_out.data,
         static_cast<__nv_bfloat16*>(out.data),
         q.ne[1],
         v.ne[1],
         q.ne[2],
-        scale};
+        scale,
+        ssm_state_out.dtype};
     chunked::launch_prepare(args, qk, control, normalize_qk, execution.stream());
     chunked::launch_recurrence(args, qk, control, plan.value_tile, execution.stream());
 }

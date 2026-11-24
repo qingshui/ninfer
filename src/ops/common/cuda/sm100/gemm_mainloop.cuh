@@ -19,6 +19,7 @@
 // The epilogue is a type supplied by the caller: it owns the numeric transform and the output
 // layout. The mainloop only tells it where the finished tile is.
 
+#include "core/pdl.cuh"
 #include "ops/common/cuda/sm100/tcgen05.cuh"
 #include "ops/common/cuda/sm100/tile_scheduler.cuh"
 #include "ops/common/cuda/sm100/tma.cuh"
@@ -124,6 +125,11 @@ struct GemmArgs {
     int scale_k64;            // K / 64: block-scale atoms per row tile
     const std::uint8_t* a_scales; // weight scales, block_scale_k16_m128x4 layout
     const std::uint8_t* b_scales; // activation scales, K16M128x4 layout, padded to 128 tokens
+    // Split K (see StaticTileScheduler): the last `split_tiles` tiles run as `k_splits` K ranges
+    // whose FP32 accumulators fill `partials`, one [TileN tokens][128 rows] block per unit.
+    int split_tiles = 0;
+    int k_splits    = 1;
+    float* partials = nullptr;
 };
 
 // What an epilogue warp is told about the tile it is draining.
@@ -162,7 +168,26 @@ struct GemmSharedLayout {
     }
 };
 
-template <class Cfg, class Epilogue>
+// A split unit's FP32 accumulators into its partial block, element [token][row] of the tile.
+template <class Cfg>
+__device__ __forceinline__ void drain_partial(const EpilogueTile& t, float* block) {
+    constexpr int C = Cfg::kTileN >= 32 ? 32 : Cfg::kTileN;
+    float* rows     = block + t.warp_q * 32 + t.lane;
+    for (int c0 = 0; c0 < t.valid_tokens; c0 += C) {
+        std::uint32_t r[C];
+        tmem_load_32x32b<C>(t.tmem + c0, r);
+        tmem_load_wait();
+#pragma unroll
+        for (int i = 0; i < C; ++i) {
+            if (c0 + i < t.valid_tokens)
+                rows[static_cast<std::int64_t>(c0 + i) * Cfg::kTileM] = __uint_as_float(r[i]);
+        }
+    }
+}
+
+// A SplitK instance runs the units of a split launch (see StaticTileScheduler). Any other instance
+// runs every tile over the whole K loop and compiles without the split bookkeeping.
+template <class Cfg, class Epilogue, bool SplitK = false>
 __global__ __launch_bounds__(Cfg::kThreads, 1) void sm100_gemm_kernel(
     const __grid_constant__ CUtensorMap a_map, const __grid_constant__ CUtensorMap b_map,
     const __grid_constant__ GemmArgs args, const __grid_constant__ Epilogue epilogue) {
@@ -199,9 +224,19 @@ __global__ __launch_bounds__(Cfg::kThreads, 1) void sm100_gemm_kernel(
     }
     __syncthreads();
     fence_after_thread_sync();
+    // The reduction kernel of a split launch may take SM slots now; it waits for this grid.
+    if constexpr (SplitK) pdl::trigger_dependents();
     const std::uint32_t tmem_base = *tmem_slot;
-    const StaticTileScheduler scheduler{args.tiles_m, args.tiles_n};
-    const int total_tiles = scheduler.total();
+    const StaticTileScheduler scheduler{args.tiles_m, args.tiles_n, args.k_iters, args.split_tiles,
+                                        args.k_splits};
+    // Unit `index` and the end of its K range. The whole-K instance takes the bound from
+    // args.k_iters rather than from the unit, which keeps its code that of a GEMM without split K.
+    const int units    = SplitK ? scheduler.units() : scheduler.total();
+    const auto unit_at = [&](int index) {
+        return SplitK ? scheduler.unit(index)
+                      : WorkUnit{scheduler.coord(index), 0, args.k_iters, -1};
+    };
+    const auto k_end = [&](const WorkUnit& unit) { return SplitK ? unit.k_end : args.k_iters; };
     constexpr std::uint32_t kSfBase = Cfg::kAccStages * Cfg::kAccCols;
 
     if (warp == 0) {
@@ -210,9 +245,10 @@ __global__ __launch_bounds__(Cfg::kThreads, 1) void sm100_gemm_kernel(
             const std::uint64_t hint = l2_retained_policy();
             int stage                = 0;
             std::uint32_t phase      = 0;
-            for (int tile = scheduler.first(); tile < total_tiles; tile += scheduler.stride()) {
-                const TileCoord c = scheduler.coord(tile);
-                for (int kb = 0; kb < args.k_iters; ++kb) {
+            for (int index = scheduler.first(); index < units; index += scheduler.stride()) {
+                const WorkUnit unit = unit_at(index);
+                const TileCoord c   = unit.tile;
+                for (int kb = unit.k_begin; kb < k_end(unit); ++kb) {
                     mbarrier_wait(&empty[stage], phase ^ 1u);
                     mbarrier_arrive_expect_tx(&full[stage], Cfg::kStageBytes);
 #pragma unroll
@@ -263,10 +299,11 @@ __global__ __launch_bounds__(Cfg::kThreads, 1) void sm100_gemm_kernel(
             int acc                       = 0;
             std::uint32_t acc_phase       = 0;
             std::uint32_t k_count         = 0;
-            for (int tile = scheduler.first(); tile < total_tiles; tile += scheduler.stride()) {
+            for (int index = scheduler.first(); index < units; index += scheduler.stride()) {
+                const WorkUnit unit = unit_at(index);
                 mbarrier_wait(&acc_empty[acc], acc_phase ^ 1u);
                 fence_after_thread_sync();
-                for (int kb = 0; kb < args.k_iters; ++kb) {
+                for (int kb = unit.k_begin; kb < k_end(unit); ++kb) {
                     mbarrier_wait(&full[stage], phase);
                     fence_after_thread_sync();
                     const std::uint32_t sf_buf =
@@ -304,7 +341,7 @@ __global__ __launch_bounds__(Cfg::kThreads, 1) void sm100_gemm_kernel(
                                 umma_desc_advance(b_desc0, j * Cfg::kMmaKBytes);
                             const std::uint32_t d =
                                 tmem_base + acc * Cfg::kAccCols + p * Cfg::kTileN;
-                            const bool accumulate = (kb | j) != 0;
+                            const bool accumulate = ((kb - unit.k_begin) | j) != 0;
                             if constexpr (Cfg::kScaled) {
                                 const std::uint32_t sf_j = sf_buf + j * Cfg::kSfColsPerMma;
                                 umma_mxf4nvf4_ss<1>(d, a_desc, b_desc, idesc, sf_j + p * 4,
@@ -335,8 +372,9 @@ __global__ __launch_bounds__(Cfg::kThreads, 1) void sm100_gemm_kernel(
         const int q               = warp - 4;
         int acc                   = 0;
         std::uint32_t acc_phase   = 0;
-        for (int tile = scheduler.first(); tile < total_tiles; tile += scheduler.stride()) {
-            const TileCoord c = scheduler.coord(tile);
+        for (int index = scheduler.first(); index < units; index += scheduler.stride()) {
+            const WorkUnit unit = unit_at(index);
+            const TileCoord c   = unit.tile;
             mbarrier_wait(&acc_full[acc], acc_phase);
             fence_after_thread_sync();
             const int remaining = args.tokens - c.n * Cfg::kTileN;
@@ -348,7 +386,11 @@ __global__ __launch_bounds__(Cfg::kThreads, 1) void sm100_gemm_kernel(
                            lane,
                            remaining < Cfg::kTileN ? remaining : Cfg::kTileN,
                            shared.scratch(q)};
-            epilogue.template drain<Cfg>(t);
+            if (!SplitK || unit.partial < 0)
+                epilogue.template drain<Cfg>(t);
+            else
+                drain_partial<Cfg>(t, args.partials + static_cast<std::int64_t>(unit.partial) *
+                                                          Cfg::kTileM * Cfg::kTileN);
             fence_before_thread_sync();
             __syncwarp();
             if (lane == 0) mbarrier_arrive(&acc_empty[acc]);

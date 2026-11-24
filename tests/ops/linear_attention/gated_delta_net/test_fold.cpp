@@ -78,6 +78,19 @@ std::vector<float> initial_recurrent_values(std::size_t elements, std::uint32_t 
     return values;
 }
 
+// The bytes of a recurrent State field holding `values`, rounded to nearest even for BF16.
+std::vector<std::uint8_t> recurrent_bytes(const std::vector<float>& values, DType dtype) {
+    std::vector<std::uint8_t> bytes(values.size() * dtype_size(dtype));
+    if (dtype == DType::BF16) {
+        std::vector<std::uint16_t> bits(values.size());
+        for (std::size_t i = 0; i < values.size(); ++i) bits[i] = f32_to_bf16(values[i]);
+        std::memcpy(bytes.data(), bits.data(), bytes.size());
+    } else {
+        std::memcpy(bytes.data(), values.data(), bytes.size());
+    }
+    return bytes;
+}
+
 std::vector<std::int32_t> selected_slots(std::int32_t rows) {
     if (rows == 1) { return {2}; }
     std::vector<std::int32_t> slots{10, 2, 8, 0, 6, 4, 9, 1};
@@ -88,7 +101,7 @@ std::vector<std::int32_t> selected_slots(std::int32_t rows) {
 int run_case(const FoldProfile profile, std::int32_t width, std::int32_t rows,
              const std::vector<std::int32_t>& commits, std::uint32_t seed,
              bool distinct_destination = false, bool captured = false, bool device_rows = false,
-             std::int32_t record_capacity = kRecordCapacity) {
+             std::int32_t record_capacity = kRecordCapacity, DType state_dtype = DType::FP32) {
     const int kQkHeads                           = profile.value_heads == 24 ? 8 : 16;
     const std::vector<std::int32_t> source_slots = selected_slots(rows);
     std::vector<std::int32_t> destination_slots  = source_slots;
@@ -97,7 +110,7 @@ int run_case(const FoldProfile profile, std::int32_t width, std::int32_t rows,
     const std::int32_t slot_count = rows == 1 ? 3 : distinct_destination ? 11 + rows : 11;
     const std::size_t recurrent_slot_elements =
         static_cast<std::size_t>(kStateDim) * kStateDim * profile.value_heads;
-    const std::size_t recurrent_slot_bytes = recurrent_slot_elements * sizeof(float);
+    const std::size_t recurrent_slot_bytes = recurrent_slot_elements * dtype_size(state_dtype);
     const std::size_t conv_slot_elements   = static_cast<std::size_t>(profile.conv_channels) * 3;
     const std::size_t conv_slot_bytes      = conv_slot_elements * sizeof(std::uint16_t);
 
@@ -191,13 +204,14 @@ int run_case(const FoldProfile profile, std::int32_t width, std::int32_t rows,
 
     StateImageBuilder state_builder;
     const LinearAttentionStateLayout state_layout = plan_linear_attention_state(
-        state_builder, {.layers         = static_cast<std::uint32_t>(profile.layers),
-                        .conv_channels  = profile.conv_channels,
-                        .conv_width     = 3,
-                        .value_heads    = profile.value_heads,
-                        .value_head_dim = kStateDim,
-                        .key_head_dim   = kStateDim,
-                        .conv_dtype     = DType::BF16});
+        state_builder, {.layers          = static_cast<std::uint32_t>(profile.layers),
+                        .conv_channels   = profile.conv_channels,
+                        .conv_width      = 3,
+                        .value_heads     = profile.value_heads,
+                        .value_head_dim  = kStateDim,
+                        .key_head_dim    = kStateDim,
+                        .conv_dtype      = DType::BF16,
+                        .recurrent_dtype = state_dtype});
     const auto image_layout = state_builder.finish();
     const auto state_offset = [&](int record) {
         return static_cast<std::int64_t>((image_layout.image_bytes + 256) * record);
@@ -292,7 +306,7 @@ int run_case(const FoldProfile profile, std::int32_t width, std::int32_t rows,
     DeviceBuffer beta_row(ninfer::test::cuda_environment().context.device(),
                           static_cast<std::size_t>(profile.value_heads) * width * sizeof(float));
     const Tensor q_tensor(q.span(), DType::BF16, {kStateDim, kQkHeads, width, 1});
-    Tensor local_state_tensor(local_state.span(), DType::FP32,
+    Tensor local_state_tensor(local_state.span(), state_dtype,
                               {kStateDim, kStateDim, profile.value_heads});
     DeviceBuffer reference_slot = to_device(std::vector<std::int64_t>{0});
     Tensor selected_reference_slot(reference_slot.span(), DType::I64, {1});
@@ -302,8 +316,8 @@ int run_case(const FoldProfile profile, std::int32_t width, std::int32_t rows,
     for (std::int32_t layer = 0; layer < profile.layers; ++layer) {
         const GdnReplayRecordLayer layer_records = records.layer(layer, rows);
         for (std::int32_t row = 0; row < rows; ++row) {
-            const auto initial_recurrent =
-                initial_recurrent_values(recurrent_slot_elements, seed, layer, row);
+            const auto initial_recurrent = recurrent_bytes(
+                initial_recurrent_values(recurrent_slot_elements, seed, layer, row), state_dtype);
             const Tensor actual_initial = state_pool.recurrent_tensor(
                 static_cast<std::uint32_t>(layer),
                 state_offset(source_slots[static_cast<std::size_t>(row)]));
@@ -432,9 +446,10 @@ int run_case(const FoldProfile profile, std::int32_t width, std::int32_t rows,
     int failures             = 0;
     const std::string suffix = " L=" + std::to_string(profile.layers) +
                                " Hv=" + std::to_string(profile.value_heads) +
-                               " T=" + std::to_string(width) + " B=" + std::to_string(rows);
-    std::vector<float> actual_recurrent(recurrent_slot_elements);
-    std::vector<float> expected_recurrent_host(recurrent_slot_elements);
+                               " T=" + std::to_string(width) + " B=" + std::to_string(rows) +
+                               (state_dtype == DType::BF16 ? " state=bf16" : " state=fp32");
+    std::vector<std::uint8_t> actual_recurrent(recurrent_slot_bytes);
+    std::vector<std::uint8_t> expected_recurrent_host(recurrent_slot_bytes);
     std::vector<std::uint16_t> actual_conv(conv_slot_elements);
     std::vector<std::uint16_t> expected_conv_host(conv_slot_elements);
     for (std::int32_t layer = 0; layer < profile.layers; ++layer) {
@@ -476,14 +491,13 @@ int run_case(const FoldProfile profile, std::int32_t width, std::int32_t rows,
                 return failures + 1;
             }
             if (destination_slots[row] != source_slots[row]) {
-                const auto initial_values =
-                    initial_recurrent_values(recurrent_slot_elements, seed, layer, row);
+                const auto initial_values = recurrent_bytes(
+                    initial_recurrent_values(recurrent_slot_elements, seed, layer, row),
+                    state_dtype);
                 const Tensor source_state = state_pool.recurrent_tensor(
                     static_cast<std::uint32_t>(layer), state_offset(source_slots[row]));
-                const auto source_recurrent =
-                    from_device<float>(source_state.data, recurrent_slot_elements);
-                if (std::memcmp(source_recurrent.data(), initial_values.data(),
-                                recurrent_slot_bytes) != 0) {
+                if (from_device<std::uint8_t>(source_state.data, recurrent_slot_bytes) !=
+                    initial_values) {
                     std::cerr << "fold modified recurrent source" << suffix << " layer=" << layer
                               << " row=" << row << "\n";
                     return failures + 1;
@@ -511,7 +525,7 @@ int run_case(const FoldProfile profile, std::int32_t width, std::int32_t rows,
         }
     }
 
-    std::vector<float> inactive_recurrent(recurrent_slot_elements);
+    std::vector<std::uint8_t> inactive_recurrent(recurrent_slot_bytes);
     std::vector<std::uint16_t> inactive_conv(conv_slot_elements);
     for (std::int32_t layer = 0; layer < profile.layers; ++layer) {
         for (std::int32_t slot = 0; slot < slot_count; ++slot) {
@@ -525,9 +539,8 @@ int run_case(const FoldProfile profile, std::int32_t width, std::int32_t rows,
             cuda_check(cudaMemcpy(inactive_recurrent.data(), recurrent.data, recurrent_slot_bytes,
                                   cudaMemcpyDeviceToHost),
                        "download inactive recurrent state");
-            if (!std::all_of(inactive_recurrent.begin(), inactive_recurrent.end(), [](float value) {
-                    return std::bit_cast<std::uint32_t>(value) == 0;
-                })) {
+            if (!std::all_of(inactive_recurrent.begin(), inactive_recurrent.end(),
+                             [](std::uint8_t value) { return value == 0; })) {
                 std::cerr << "fold modified inactive recurrent slot" << suffix << " layer=" << layer
                           << " slot=" << slot << "\n";
                 return failures + 1;
@@ -565,7 +578,8 @@ int run_case(const FoldProfile profile, std::int32_t width, std::int32_t rows,
     return failures;
 }
 
-int run_record_fold_rounds(bool q8 = false, bool local = false) {
+int run_record_fold_rounds(bool q8 = false, bool local = false,
+                           DType state_dtype = DType::FP32) {
     using ninfer::test::input_projection::DevicePackedWeight;
     using ninfer::test::input_projection::make_bf16_activation;
 
@@ -615,13 +629,14 @@ int run_record_fold_rounds(bool q8 = false, bool local = false) {
 
     StateImageBuilder state_builder;
     const LinearAttentionStateLayout state_layout = plan_linear_attention_state(
-        state_builder, {.layers         = static_cast<std::uint32_t>(kProfile.layers),
-                        .conv_channels  = kProfile.conv_channels,
-                        .conv_width     = 3,
-                        .value_heads    = kProfile.value_heads,
-                        .value_head_dim = kStateDim,
-                        .key_head_dim   = kStateDim,
-                        .conv_dtype     = DType::BF16});
+        state_builder, {.layers          = static_cast<std::uint32_t>(kProfile.layers),
+                        .conv_channels   = kProfile.conv_channels,
+                        .conv_width      = 3,
+                        .value_heads     = kProfile.value_heads,
+                        .value_head_dim  = kStateDim,
+                        .key_head_dim    = kStateDim,
+                        .conv_dtype      = DType::BF16,
+                        .recurrent_dtype = state_dtype});
     const auto image_layout = state_builder.finish();
     const auto state_offset = [&](int record) {
         return static_cast<std::int64_t>((image_layout.image_bytes + 256) * record);
@@ -638,7 +653,8 @@ int run_record_fold_rounds(bool q8 = false, bool local = false) {
     const std::size_t conv_slot_elements = static_cast<std::size_t>(kProfile.conv_channels) * 3;
     for (std::int32_t layer = 0; layer < kProfile.layers; ++layer) {
         const float initial_value = signed_pattern(1911U + layer * 47U, 0.01F);
-        const std::vector<float> recurrent(recurrent_slot_elements, initial_value);
+        const auto recurrent = recurrent_bytes(
+            std::vector<float>(recurrent_slot_elements, initial_value), state_dtype);
         const Tensor recurrent_slot = state_pool.recurrent_tensor(static_cast<std::uint32_t>(layer),
                                                                   state_offset(kInitialSlot));
         cuda_check(cudaMemcpy(recurrent_slot.data, recurrent.data(), recurrent_slot.bytes(),
@@ -846,8 +862,8 @@ int run_record_fold_rounds(bool q8 = false, bool local = false) {
                 static_cast<std::uint32_t>(layer), state_offset(kInitialSlot));
             const Tensor snapshot_recurrent = state_pool.recurrent_tensor(
                 static_cast<std::uint32_t>(layer), state_offset(commit - 1));
-            if (from_device<std::uint32_t>(folded_recurrent.data, recurrent_slot_elements) !=
-                from_device<std::uint32_t>(snapshot_recurrent.data, recurrent_slot_elements)) {
+            if (from_device<std::uint8_t>(folded_recurrent.data, folded_recurrent.bytes()) !=
+                from_device<std::uint8_t>(snapshot_recurrent.data, snapshot_recurrent.bytes())) {
                 std::cerr << "record-fold recurrent mismatch round=" << round << " layer=" << layer
                           << "\n";
                 return failures + 1;
@@ -915,7 +931,7 @@ int main(int argc, char** argv) {
         }
     const auto add = [&](FoldProfile p, int width, int batch, std::vector<int> commits,
                          unsigned seed, bool distinct = false, bool captured = false,
-                         int capacity = kRecordCapacity) {
+                         int capacity = kRecordCapacity, DType state = DType::FP32) {
         std::string id = std::string(p.value_heads == 24 ? "gdn_fold_local/l" : "gdn_fold/l") +
                          std::to_string(p.layers) + "/h" + std::to_string(p.value_heads) + "/w" +
                          std::to_string(width) + "/b" + std::to_string(batch) +
@@ -923,10 +939,11 @@ int main(int argc, char** argv) {
         for (int c : commits) id += "_" + std::to_string(c);
         if (captured) id += "/graph";
         if (capacity != kRecordCapacity) id += "/capacity_" + std::to_string(capacity);
+        if (state == DType::BF16) id += "/bf16-state";
         suite.add(id,
                   [=] {
                       return run_case(p, width, batch, commits, seed, distinct, captured, false,
-                                      capacity);
+                                      capacity, state);
                   },
                   {{"execution", captured || (width == 16 && batch == 8) ? "graph" : "eager"}});
     };
@@ -964,6 +981,25 @@ int main(int argc, char** argv) {
     suite.add("gdn_fold/device/l36/h48/zero/graph", [] {
         return run_case({36, 48, 10240}, 4, 4, {0, 0, 0, 0}, 5201U, true, true, true);
     });
+    // A BF16 State: the fold snapshot is the state after N rounded one-token updates.
+    constexpr DType kBf16 = DType::BF16;
+    add({36, 64, 12288}, 2, 1, {2}, 6901U, true, false, kRecordCapacity, kBf16);
+    add({36, 64, 12288}, 5, 4, {0, 1, 3, 5}, 6911U, false, false, kRecordCapacity, kBf16);
+    add({36, 64, 12288}, 16, 8, {0, 1, 2, 3, 7, 13, 15, 16}, 6921U, true, false, kRecordCapacity,
+        kBf16);
+    add({36, 64, 12288}, 16, 1, {16}, 6931U, true, true, kRecordCapacity, kBf16);
+    add({36, 24, 5120}, 16, 8, {1, 4, 7, 9, 11, 13, 15, 16}, 6941U, true, false, kRecordCapacity,
+        kBf16);
+    add({36, 24, 5120}, 6, 3, {6, 0, 2}, 6951U, false, false, kRecordCapacity, kBf16);
+    for (bool captured : {false, true})
+        suite.add(std::string("gdn_fold/device/l36/h64/bf16-state") +
+                      (captured ? "/graph" : "/eager"),
+                  [=] {
+                      return run_case({36, 64, 12288}, 6, 4, {0, 1, 3, 6}, 6100U, captured,
+                                      captured, true, kRecordCapacity, kBf16);
+                  });
+    suite.add("gdn_fold/record_rounds/q8/bf16-state",
+              [] { return run_record_fold_rounds(true, false, kBf16); }, {{"format", "q8"}});
     suite.add("gdn_fold/record_rounds/q4_q5", [] { return run_record_fold_rounds(); },
               {{"format", "q4_q5"}});
     suite.add("gdn_fold/record_rounds/q8", [] { return run_record_fold_rounds(true); },

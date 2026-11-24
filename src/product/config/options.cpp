@@ -594,7 +594,8 @@ LaunchOptions default_launch_options(EntryPoint entry) {
         // concurrency waves at once, and a request rejected while a lane frees up moments
         // later is a service failure, not backpressure. The serving default selects
         // automatic lane fitting: the Engine resolves the lane count from its context
-        // token capacity; explicit TOML/CLI values still override it.
+        // token capacity and holds the resident lanes to a decode token interval;
+        // explicit TOML/CLI values still override it.
         options.engine.max_concurrency      = kDefaultServeMaxConcurrency;
         options.engine.max_pending_requests = kDefaultServeMaxPendingRequests;
         options.engine.pending_timeout_ms   = kDefaultServePendingTimeoutMs;

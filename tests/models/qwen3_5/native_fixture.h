@@ -106,6 +106,10 @@ struct ObservedTypes {
 
 struct ContextBudget {
     std::uint32_t retained_states = 0;
+    // Records the test reserves from the context pool itself (see held_records_bytes); the
+    // capacity also holds them whole.
+    std::uint32_t held_states = 0;
+    std::uint32_t held_pages  = 0;
 };
 
 class NativeRankFixture {
@@ -123,8 +127,9 @@ public:
         auto instance = std::make_unique<runtime::RankModelInstance<ObservedTypes>>(
             std::make_unique<SharedModel>(SharedModel{std::move(model)}), profile);
         auto planner = q35::make_sequence_planner(profile, *device, options);
-        const runtime::ContextCapacity capacity{
-            context_capacity_bytes(planner.capacity_plan(), budget.retained_states)};
+        const runtime::ContextCapacity capacity{std::max(
+            context_capacity_bytes(planner.capacity_plan(), budget.retained_states),
+            held_records_bytes(planner.capacity_plan(), budget.held_states, budget.held_pages))};
         auto plan           = std::move(planner).finalize(capacity);
         session_plan        = q35::plan_session(plan);
         auto native_planner = q35::detail::make_sequence_planner_impl(profile, *device, options);

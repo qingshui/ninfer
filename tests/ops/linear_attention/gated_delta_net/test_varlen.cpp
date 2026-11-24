@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <iostream>
 #include <random>
 #include <string>
@@ -23,6 +24,12 @@ namespace {
 constexpr int kState = 128;
 constexpr ReductionCriterion kOutputCriterion{6.0e-3, 5.0e-6, 8.0e-3};
 constexpr ReductionCriterion kStateCriterion{4.5e-3, 1.0e-5, 9.0e-3};
+// A BF16 State rounds to nearest even at every publication, as its reference does. Each rounding
+// moves an element by at most 2^-8 of it, so published states and the outputs that read them
+// carry one BF16 unit, 2^-7, in both terms beyond the FP32 budgets.
+constexpr double kBf16Unit = 1.0 / 128.0;
+constexpr ReductionCriterion kBf16OutputCriterion{6.0e-3 + kBf16Unit, 5.0e-6, 8.0e-3 + kBf16Unit};
+constexpr ReductionCriterion kBf16StateCriterion{4.5e-3 + kBf16Unit, 1.0e-5, 9.0e-3 + kBf16Unit};
 
 struct Boundary {
     int row, column;
@@ -36,6 +43,7 @@ struct Spec {
     std::vector<Boundary> boundaries;
     bool normalize;
     bool in_place;
+    DType state = DType::FP32;
 };
 
 struct SubSegment {
@@ -118,24 +126,46 @@ struct Layout {
     int records() const { return 2 * rows + 2 * boundaries; }
 };
 
-StateFieldLayout record_layout(int value_heads, std::size_t record_bytes) {
+StateFieldLayout record_layout(int value_heads, std::size_t record_bytes, DType dtype) {
     TensorRegion region;
-    region.dtype  = DType::FP32;
+    region.dtype  = dtype;
     region.shape  = {kState, kState, value_heads, 1};
     region.region = {0, record_bytes, 16};
     return StateFieldLayout{region, 1, 0};
 }
 
-Tensor record_tensor(GuardedDeviceBuffer& arena, const Layout& layout, int record, int value_heads) {
+Tensor record_tensor(GuardedDeviceBuffer& arena, const Layout& layout, int record, int value_heads,
+                     DType dtype) {
     return Tensor(arena.span().subspan(static_cast<std::size_t>(record) * layout.record_bytes,
                                        layout.record_bytes),
-                  DType::FP32, {kState, kState, value_heads});
+                  dtype, {kState, kState, value_heads});
 }
 
-std::vector<float> read_record(const GuardedDeviceBuffer& arena, const Layout& layout, int record) {
+std::vector<std::uint8_t> read_record(const GuardedDeviceBuffer& arena, const Layout& layout,
+                                      int record) {
     const auto* base = static_cast<const std::uint8_t*>(arena.data()) +
                        static_cast<std::size_t>(record) * layout.record_bytes;
-    return from_device<float>(base, layout.record_bytes / sizeof(float));
+    return from_device<std::uint8_t>(base, layout.record_bytes);
+}
+
+std::vector<double> record_values(const GuardedDeviceBuffer& arena, const Layout& layout,
+                                  int record, DType dtype) {
+    const auto* base = static_cast<const std::uint8_t*>(arena.data()) +
+                       static_cast<std::size_t>(record) * layout.record_bytes;
+    if (dtype == DType::BF16) return from_device_bf16(base, layout.record_bytes / 2);
+    return widen(from_device<float>(base, layout.record_bytes / sizeof(float)));
+}
+
+std::vector<std::uint8_t> state_bytes(const std::vector<float>& values, DType dtype) {
+    std::vector<std::uint8_t> bytes(values.size() * dtype_size(dtype));
+    if (dtype == DType::BF16) {
+        std::vector<std::uint16_t> bits(values.size());
+        for (std::size_t i = 0; i < values.size(); ++i) bits[i] = f32_to_bf16(values[i]);
+        std::memcpy(bytes.data(), bits.data(), bytes.size());
+    } else {
+        std::memcpy(bytes.data(), values.data(), bytes.size());
+    }
+    return bytes;
 }
 
 int run_case(const Spec& spec, std::uint32_t seed) {
@@ -147,7 +177,8 @@ int run_case(const Spec& spec, std::uint32_t seed) {
     const std::string label = "varlen " + spec.name + " Hq=" + std::to_string(hq) +
                               " Hv=" + std::to_string(hv) + " R=" + std::to_string(R) +
                               " C=" + std::to_string(C) + " T=" + std::to_string(T) +
-                              (spec.in_place ? " in-place" : " distinct");
+                              (spec.in_place ? " in-place" : " distinct") +
+                              (spec.state == DType::BF16 ? " state=bf16" : " state=fp32");
     std::cout << "GDN_VARLEN_CASE " << label << std::endl;
 
     std::mt19937 generator(seed);
@@ -169,10 +200,12 @@ int run_case(const Spec& spec, std::uint32_t seed) {
     round_to_bf16(in.k);
     round_to_bf16(in.v);
     const std::size_t state_floats = std::size_t(kState) * kState * hv;
-    const auto initial = uniform(state_floats * R, generator, -0.02F, 0.02F);
+    auto initial = uniform(state_floats * R, generator, -0.02F, 0.02F);
+    if (spec.state == DType::BF16) round_to_bf16(initial);
+    const auto initial_bytes = state_bytes(initial, spec.state);
 
     const auto subs = sub_segments(spec);
-    const Layout layout{R, C, state_floats * sizeof(float)};
+    const Layout layout{R, C, state_floats * dtype_size(spec.state)};
     const auto source_record = [&](int row) {
         return spec.in_place ? layout.destination(row) : layout.source(row);
     };
@@ -194,7 +227,8 @@ int run_case(const Spec& spec, std::uint32_t seed) {
     const auto prepare_arena = [&](GuardedDeviceBuffer& arena) {
         arena.fill(0xff);
         for (int row = 0; row < R; ++row)
-            arena.copy_from_host(initial.data() + state_floats * row, layout.record_bytes,
+            arena.copy_from_host(initial_bytes.data() + layout.record_bytes * row,
+                                 layout.record_bytes,
                                  std::size_t(source_record(row)) * layout.record_bytes);
     };
     const std::size_t arena_bytes = std::size_t(layout.records()) * layout.record_bytes;
@@ -229,8 +263,8 @@ int run_case(const Spec& spec, std::uint32_t seed) {
         const int output = last ? layout.destination(sub.row)
                                 : (sub.checkpoint >= 0 ? layout.checkpoint(sub.checkpoint)
                                                        : layout.scratch(scratch_boundary++));
-        Tensor state_in = record_tensor(arena_chain, layout, input, hv);
-        Tensor state_out = record_tensor(arena_chain, layout, output, hv);
+        Tensor state_in = record_tensor(arena_chain, layout, input, hv, spec.state);
+        Tensor state_out = record_tensor(arena_chain, layout, output, hv, spec.state);
         Tensor os = o_chain.slice(2, sub.start, sub.length);
         ops::gated_delta_net(q.slice(2, sub.start, sub.length), k.slice(2, sub.start, sub.length),
                              v.slice(2, sub.start, sub.length), g.slice(1, sub.start, sub.length),
@@ -253,7 +287,7 @@ int run_case(const Spec& spec, std::uint32_t seed) {
                       Tensor(d_b_columns.span(), DType::I32, {C}),
                       Tensor(d_b_offsets.span(), DType::I64, {C})};
     }
-    const auto field = record_layout(hv, layout.record_bytes);
+    const auto field = record_layout(hv, layout.record_bytes, spec.state);
     const Tensor source_table(d_source.span(), DType::I64, {R});
     const Tensor destination_table(d_destination.span(), DType::I64, {R});
     ops::GdnVarlenRows rows{Tensor(d_tokens.span(), DType::I32, {R + 1}),
@@ -284,9 +318,10 @@ int run_case(const Spec& spec, std::uint32_t seed) {
     if (!spec.in_place) {
         for (int row = 0; row < R; ++row) {
             const auto got = read_record(arena_varlen, layout, layout.source(row));
-            failures += verify_exact((label + " source unchanged").c_str(), got,
-                                     std::vector<float>(initial.begin() + state_floats * row,
-                                                        initial.begin() + state_floats * (row + 1)));
+            failures += verify_exact(
+                (label + " source unchanged").c_str(), got,
+                std::vector<std::uint8_t>(initial_bytes.begin() + layout.record_bytes * row,
+                                          initial_bytes.begin() + layout.record_bytes * (row + 1)));
         }
     }
     if (varlen_ws.used() != 0 || varlen_ws.peak_used() > capacity) {
@@ -297,26 +332,44 @@ int run_case(const Spec& spec, std::uint32_t seed) {
                 varlen_scratch.verify_guards(label + " workspace");
 
     // Independent reference: double-precision recurrence per row, from the row's initial state.
+    // A BF16 State rounds the exact state at every sub-segment end, where the composition
+    // publishes it.
+    const bool bf16             = spec.state == DType::BF16;
+    const auto& state_criterion = bf16 ? kBf16StateCriterion : kStateCriterion;
+    const auto& out_criterion   = bf16 ? kBf16OutputCriterion : kOutputCriterion;
     for (int row = 0; row < R; ++row) {
         auto row_in = slice_inputs(in, token_offsets[row], spec.lengths[row]);
         row_in.state.assign(initial.begin() + state_floats * row, initial.begin() + state_floats * (row + 1));
-        const auto ref = gdn_ref::evaluate(row_in, scale, spec.normalize);
+        std::vector<std::int64_t> publications;
+        if (spec.state == DType::BF16) {
+            for (const auto& boundary : spec.boundaries)
+                if (boundary.row == row) publications.push_back(boundary.column);
+            publications.push_back(spec.lengths[row]);
+        }
+        const auto ref = gdn_ref::evaluate(row_in, scale, spec.normalize, false, publications);
         const std::size_t out_count = std::size_t(spec.lengths[row]) * hv * kState;
         const auto* out_base = static_cast<const std::uint16_t*>(out_varlen.data()) +
                                std::size_t(token_offsets[row]) * hv * kState;
         failures += verify_close(label + " row " + std::to_string(row) + " out",
-                                 from_device_bf16(out_base, out_count), ref.out, kOutputCriterion);
-        failures += verify_close(label + " row " + std::to_string(row) + " state",
-                                 widen(read_record(arena_varlen, layout, layout.destination(row))),
-                                 ref.final_state, kStateCriterion);
+                                 from_device_bf16(out_base, out_count), ref.out, out_criterion);
+        failures += verify_close(
+            label + " row " + std::to_string(row) + " state",
+            record_values(arena_varlen, layout, layout.destination(row), spec.state),
+            ref.final_state, state_criterion);
         for (int b = 0; b < C; ++b) {
             if (spec.boundaries[b].row != row || !spec.boundaries[b].checkpoint) continue;
-            auto prefix = slice_inputs(in, token_offsets[row], spec.boundaries[b].column);
+            const int column = spec.boundaries[b].column;
+            auto prefix = slice_inputs(in, token_offsets[row], column);
             prefix.state = row_in.state;
-            const auto prefix_ref = gdn_ref::evaluate(prefix, scale, spec.normalize);
-            failures += verify_close(label + " checkpoint " + std::to_string(b),
-                                     widen(read_record(arena_varlen, layout, layout.checkpoint(b))),
-                                     prefix_ref.final_state, kStateCriterion);
+            std::vector<std::int64_t> prefix_publications;
+            for (const auto count : publications)
+                if (count <= column) prefix_publications.push_back(count);
+            const auto prefix_ref =
+                gdn_ref::evaluate(prefix, scale, spec.normalize, false, prefix_publications);
+            failures += verify_close(
+                label + " checkpoint " + std::to_string(b),
+                record_values(arena_varlen, layout, layout.checkpoint(b), spec.state),
+                prefix_ref.final_state, state_criterion);
         }
     }
     return failures;
@@ -421,6 +474,32 @@ int main(int argc, char** argv) {
     // The 64-value register-state kernel over rows long enough to wrap its three-stage ring.
     suite.add("gdn_varlen/hv64-many-rows", [] {
         return run_case(random_spec("hv64-many", 64, 10, 220, 40, 2025), 16);
+    });
+    // BF16 State: every sub-segment end publishes the state rounded to nearest even.
+    for (bool in_place : {false, true})
+        suite.add(std::string("gdn_varlen/mixed-routes/bf16-state") + (in_place ? "-in-place" : ""),
+                  [=] {
+                      return run_case({"mixed", 16, 32, {37, 5, 16, 70, 1},
+                                       {{0, 20, true}, {1, 3, true}, {3, 7, true}, {3, 33, false},
+                                        {3, 50, true}, {3, 60, true}},
+                                       true, in_place, DType::BF16},
+                                      21);
+                  });
+    suite.add("gdn_varlen/hv64-raw-qk/bf16-state", [] {
+        return run_case({"hv64", 16, 64, {130, 33, 4},
+                         {{0, 16, true}, {0, 17, false}, {0, 100, true}, {1, 15, true}}, false,
+                         false, DType::BF16},
+                        23);
+    });
+    suite.add("gdn_varlen/many-rows/bf16-state", [] {
+        auto spec  = random_spec("many", 32, 48, 45, 9, 2034);
+        spec.state = DType::BF16;
+        return run_case(spec, 25);
+    });
+    suite.add("gdn_varlen/hv64-many-rows/bf16-state", [] {
+        auto spec  = random_spec("hv64-many", 64, 10, 220, 40, 2035);
+        spec.state = DType::BF16;
+        return run_case(spec, 26);
     });
     suite.add("gdn_varlen/rejection", [] { return rejection_case(); });
     return suite.main(argc, argv);

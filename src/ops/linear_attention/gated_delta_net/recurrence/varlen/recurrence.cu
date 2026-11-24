@@ -434,8 +434,8 @@ struct Tile {
 };
 
 // MMA accumulators describe S^T[key,value]; external state remains [value,key].
-template <int DV>
-__device__ __forceinline__ void load_fragments(float (&state)[Tile<DV>::MPW][4], const float* base,
+template <int DV, class Word>
+__device__ __forceinline__ void load_fragments(float (&state)[Tile<DV>::MPW][4], const Word* base,
                                                int value_start, int warp, int lane) {
     using T = Tile<DV>;
     const int g = lane / 4, t = lane & 3;
@@ -444,16 +444,16 @@ __device__ __forceinline__ void load_fragments(float (&state)[Tile<DV>::MPW][4],
     for (int mi = 0; mi < T::MPW; ++mi) {
         const int key   = (m_start + mi * T::MW) * 16 + g;
         const int value = value_start + n * 8 + t * 2;
-        state[mi][0]    = base[value * kStateDim + key];
-        state[mi][1]    = base[(value + 1) * kStateDim + key];
-        state[mi][2]    = base[value * kStateDim + key + 8];
-        state[mi][3]    = base[(value + 1) * kStateDim + key + 8];
+        state[mi][0]    = state_value(base[value * kStateDim + key]);
+        state[mi][1]    = state_value(base[(value + 1) * kStateDim + key]);
+        state[mi][2]    = state_value(base[value * kStateDim + key + 8]);
+        state[mi][3]    = state_value(base[(value + 1) * kStateDim + key + 8]);
     }
 }
 
-template <int DV>
+template <int DV, class Word>
 __device__ __forceinline__ void store_fragments(const float (&state)[Tile<DV>::MPW][4],
-                                                float* base, int value_start, int warp, int lane) {
+                                                Word* base, int value_start, int warp, int lane) {
     using T = Tile<DV>;
     const int g = lane / 4, t = lane & 3;
     const int n = warp % T::NT, m_start = warp / T::NT;
@@ -461,10 +461,10 @@ __device__ __forceinline__ void store_fragments(const float (&state)[Tile<DV>::M
     for (int mi = 0; mi < T::MPW; ++mi) {
         const int key   = (m_start + mi * T::MW) * 16 + g;
         const int value = value_start + n * 8 + t * 2;
-        base[value * kStateDim + key]           = state[mi][0];
-        base[(value + 1) * kStateDim + key]     = state[mi][1];
-        base[value * kStateDim + key + 8]       = state[mi][2];
-        base[(value + 1) * kStateDim + key + 8] = state[mi][3];
+        base[value * kStateDim + key]           = state_word<Word>(state[mi][0]);
+        base[(value + 1) * kStateDim + key]     = state_word<Word>(state[mi][1]);
+        base[value * kStateDim + key + 8]       = state_word<Word>(state[mi][2]);
+        base[(value + 1) * kStateDim + key + 8] = state_word<Word>(state[mi][3]);
     }
 }
 
@@ -503,11 +503,11 @@ struct SubSegmentAccess {
 
 // Same per-row arithmetic as recurrent_bf16_direct_kernel. A warp owns four value rows at a
 // time and rows are independent, so any assignment of row groups to warps is bit-identical.
-template <int DV>
+template <int DV, class Word>
 __device__ __forceinline__ void run_recurrent_sub_segment(const Operands& ops,
                                                           const SubSegment& sub, int head,
-                                                          int value_start, const float* read,
-                                                          float* destination, float* checkpoint,
+                                                          int value_start, const Word* read,
+                                                          Word* destination, Word* checkpoint,
                                                           bool normalize) {
     const int warp = threadIdx.x / 32, lane = threadIdx.x % 32;
     const SubSegmentAccess access{ops.q,         ops.k,           ops.v,
@@ -534,11 +534,12 @@ __device__ __forceinline__ void run_recurrent_sub_segment(const Operands& ops,
 }
 
 // One CTA owns one (row, value head, value tile) and walks the row's sub-segments in order. The
-// state stays in registers between consecutive chunked sub-segments; FP32 registers and FP32
-// memory round-trip exactly, so this is bit-identical to publishing and reloading it. A
-// switch between the chunked and recurrent routes (different thread mappings) hands the state
-// over through the row destination record, which also stages every intermediate state.
-template <int DV>
+// state stays in registers between consecutive chunked sub-segments. FP32 registers and FP32
+// memory round-trip exactly, and a BF16 State is rounded in registers at each sub-segment end,
+// so this is bit-identical to publishing and reloading it. A switch between the chunked and
+// recurrent routes (different thread mappings) hands the state over through the row
+// destination record, which also stages every intermediate state.
+template <int DV, class Word>
 __global__ __launch_bounds__(kThreads<DV>, (DV >= 32 ? 2 : 4)) void recurrence_kernel(
     Operands ops, Workspace ws, bool normalize) {
     using T = Tile<DV>;
@@ -553,10 +554,10 @@ __global__ __launch_bounds__(kThreads<DV>, (DV >= 32 ? 2 : 4)) void recurrence_k
     const int m_start     = warp / T::NT;
 
     const auto head_offset = static_cast<std::int64_t>(head) * kStateDim * kStateDim;
-    const auto* source = reinterpret_cast<const float*>(ops.source_base + ops.source_offsets[row]) +
+    const auto* source = reinterpret_cast<const Word*>(ops.source_base + ops.source_offsets[row]) +
                          head_offset;
     auto* destination =
-        reinterpret_cast<float*>(ops.destination_base + ops.destination_offsets[row]) + head_offset;
+        reinterpret_cast<Word*>(ops.destination_base + ops.destination_offsets[row]) + head_offset;
     const int first_sub = ws.row_first[row], end_sub = ws.row_first[row + 1];
 
     float state[T::MPW][4];
@@ -564,15 +565,15 @@ __global__ __launch_bounds__(kThreads<DV>, (DV >= 32 ? 2 : 4)) void recurrence_k
     for (int s = first_sub; s < end_sub; ++s) {
         const SubSegment sub = ws.sub_segments[s];
         const bool last      = s + 1 == end_sub;
-        const float* read    = s == first_sub ? source : destination;
-        float* checkpoint =
+        const Word* read     = s == first_sub ? source : destination;
+        Word* checkpoint =
             sub.checkpoint >= 0
-                ? reinterpret_cast<float*>(ops.checkpoint_base + sub.checkpoint) + head_offset
+                ? reinterpret_cast<Word*>(ops.checkpoint_base + sub.checkpoint) + head_offset
                 : nullptr;
         if (sub.length < ops.chunked_threshold) {
             __syncthreads(); // the state may have been staged by threads of the other mapping
-            run_recurrent_sub_segment<DV>(ops, sub, head, value_start, read, destination,
-                                          checkpoint, normalize);
+            run_recurrent_sub_segment<DV, Word>(ops, sub, head, value_start, read, destination,
+                                                checkpoint, normalize);
             __syncthreads();
             continue;
         }
@@ -694,6 +695,7 @@ __global__ __launch_bounds__(kThreads<DV>, (DV >= 32 ? 2 : 4)) void recurrence_k
 
         // The state after this sub-segment: checkpoint it, publish it at the row end, or stage
         // it in the destination when the next sub-segment uses the recurrent mapping.
+        represent_state<Word>(state);
         if (checkpoint) store_fragments<DV>(state, checkpoint, value_start, warp, lane);
         if (last || ws.sub_segments[s + 1].length < ops.chunked_threshold) {
             store_fragments<DV>(state, destination, value_start, warp, lane);
@@ -738,10 +740,10 @@ __device__ __forceinline__ void load_register_stage(regs::Stage& stage, const Op
 // rows. The groups share every key, query and gate, and each performs the arithmetic of
 // run_recurrent_sequence, so the result is bit-identical; the next token's inputs are loaded
 // before the current token's reductions so their latency overlaps the transition.
-template <bool Normalize>
+template <bool Normalize, class Word>
 __device__ __forceinline__ void run_recurrent_rows(const Operands& ops, const SubSegment& sub,
-                                                   int head, int value_row, const float* read,
-                                                   float* destination, float* checkpoint) {
+                                                   int head, int value_row, const Word* read,
+                                                   Word* destination, Word* checkpoint) {
     constexpr int kGroups = 16 / kDvPerWarp;
     const int lane        = threadIdx.x & 31;
     const SubSegmentAccess access{ops.q,         ops.k,           ops.v,
@@ -821,6 +823,7 @@ __device__ __forceinline__ void run_recurrent_rows(const Operands& ops, const Su
 // warps owns one (row, value head, stripe) and walks the row's sub-segments in order. The state
 // stays in registers between consecutive chunked sub-segments. The recurrent route runs per warp
 // on the warp's own value rows, staging the state through the row destination record.
+template <class Word>
 __global__ __launch_bounds__(regs::kThreads, 4) void register_recurrence_kernel(
     Operands ops, Workspace ws, bool normalize) {
     extern __shared__ __align__(256) unsigned char backing[];
@@ -833,24 +836,24 @@ __global__ __launch_bounds__(regs::kThreads, 4) void register_recurrence_kernel(
     const auto out_pitch  = static_cast<std::int64_t>(ops.value_heads) * kStateDim;
 
     const auto head_offset = static_cast<std::int64_t>(head) * kStateDim * kStateDim;
-    const auto* source = reinterpret_cast<const float*>(ops.source_base + ops.source_offsets[row]) +
+    const auto* source = reinterpret_cast<const Word*>(ops.source_base + ops.source_offsets[row]) +
                          head_offset;
     auto* destination =
-        reinterpret_cast<float*>(ops.destination_base + ops.destination_offsets[row]) + head_offset;
+        reinterpret_cast<Word*>(ops.destination_base + ops.destination_offsets[row]) + head_offset;
     const int first_sub = ws.row_first[row], end_sub = ws.row_first[row + 1];
 
-    const auto checkpoint_of = [&](const SubSegment& sub) -> float* {
+    const auto checkpoint_of = [&](const SubSegment& sub) -> Word* {
         return sub.checkpoint >= 0
-                   ? reinterpret_cast<float*>(ops.checkpoint_base + sub.checkpoint) + head_offset
+                   ? reinterpret_cast<Word*>(ops.checkpoint_base + sub.checkpoint) + head_offset
                    : nullptr;
     };
 
     int s = first_sub;
     while (s < end_sub) {
-        const float* read = s == first_sub ? source : destination;
+        const Word* read = s == first_sub ? source : destination;
         if (ws.sub_segments[s].length < ops.chunked_threshold) {
             const SubSegment sub = ws.sub_segments[s];
-            float* checkpoint    = checkpoint_of(sub);
+            Word* checkpoint     = checkpoint_of(sub);
             __syncwarp(); // the lanes of this warp stored the state this route reads
             if (normalize)
                 run_recurrent_rows<true>(ops, sub, head, value_row, read, destination, checkpoint);
@@ -866,7 +869,7 @@ __global__ __launch_bounds__(regs::kThreads, 4) void register_recurrence_kernel(
         regs::load_state(state, read, value_row, lane);
         for (; s < end_sub && ws.sub_segments[s].length >= ops.chunked_threshold; ++s) {
             const SubSegment sub = ws.sub_segments[s];
-            float* checkpoint    = checkpoint_of(sub);
+            Word* checkpoint     = checkpoint_of(sub);
             const int chunks     = chunks_of(sub.length, ops.chunked_threshold);
             load_register_stage(sm.stage[0], ops, ws, head, value_start, sub.chunk_base,
                                 sub.start, min(kChunkSize, sub.length), tid);
@@ -899,6 +902,7 @@ __global__ __launch_bounds__(regs::kThreads, 4) void register_recurrence_kernel(
 
             // The state after this sub-segment: checkpoint it, and publish it when the row ends
             // or the next sub-segment takes the recurrent route.
+            represent_state<Word>(state);
             if (checkpoint) regs::store_state(state, checkpoint, value_row, lane);
             if (s + 1 == end_sub || ws.sub_segments[s + 1].length < ops.chunked_threshold)
                 regs::store_state(state, destination, value_row, lane);
@@ -907,24 +911,42 @@ __global__ __launch_bounds__(regs::kThreads, 4) void register_recurrence_kernel(
     }
 }
 
+template <class Word>
 void launch_registers(const Operands& ops, const Workspace& ws, bool normalize,
                       cudaStream_t stream) {
     constexpr int shared_bytes = sizeof(regs::Shared);
-    (void)common::prepare_shared<shared_bytes, register_recurrence_kernel, true>();
+    (void)common::prepare_shared<shared_bytes, register_recurrence_kernel<Word>, true>();
     const dim3 grid(static_cast<unsigned>(ops.value_heads * (kStateDim / regs::kValues)),
                     static_cast<unsigned>(ops.rows));
-    register_recurrence_kernel<<<grid, regs::kThreads, shared_bytes, stream>>>(ops, ws, normalize);
+    register_recurrence_kernel<Word>
+        <<<grid, regs::kThreads, shared_bytes, stream>>>(ops, ws, normalize);
     CUDA_CHECK(cudaGetLastError());
 }
 
-template <int DV>
+template <int DV, class Word>
 void launch_tile(const Operands& ops, const Workspace& ws, bool normalize, cudaStream_t stream) {
     constexpr int shared_bytes = sizeof(RecurrenceShared<DV>);
-    (void)common::prepare_shared<shared_bytes, recurrence_kernel<DV>, true>();
+    (void)common::prepare_shared<shared_bytes, recurrence_kernel<DV, Word>, true>();
     const dim3 grid(static_cast<unsigned>(ops.value_heads * (kStateDim / DV)),
                     static_cast<unsigned>(ops.rows));
-    recurrence_kernel<DV><<<grid, kThreads<DV>, shared_bytes, stream>>>(ops, ws, normalize);
+    recurrence_kernel<DV, Word><<<grid, kThreads<DV>, shared_bytes, stream>>>(ops, ws, normalize);
     CUDA_CHECK(cudaGetLastError());
+}
+
+template <class Word>
+void launch_recurrence(const Operands& ops, const Workspace& ws, bool normalize, int value_tile,
+                       cudaStream_t stream) {
+    switch (value_tile) {
+    case 64:
+        return launch_registers<Word>(ops, ws, normalize, stream);
+    case 32:
+        return launch_tile<32, Word>(ops, ws, normalize, stream);
+    case 16:
+        return launch_tile<16, Word>(ops, ws, normalize, stream);
+    case 8:
+        return launch_tile<8, Word>(ops, ws, normalize, stream);
+    }
+    throw std::logic_error("linear attention: invalid varlen recurrence value tile");
 }
 
 } // namespace
@@ -949,17 +971,9 @@ void launch(const Operands& ops, const Workspace& ws, bool normalize_qk, int val
                                                               ws.chunk_capacity);
         CUDA_CHECK(cudaGetLastError());
     }
-    switch (value_tile) {
-    case 64:
-        return launch_registers(ops, ws, normalize_qk, stream);
-    case 32:
-        return launch_tile<32>(ops, ws, normalize_qk, stream);
-    case 16:
-        return launch_tile<16>(ops, ws, normalize_qk, stream);
-    case 8:
-        return launch_tile<8>(ops, ws, normalize_qk, stream);
-    }
-    throw std::logic_error("linear attention: invalid varlen recurrence value tile");
+    if (ops.state_dtype == DType::BF16)
+        return launch_recurrence<__nv_bfloat16>(ops, ws, normalize_qk, value_tile, stream);
+    launch_recurrence<float>(ops, ws, normalize_qk, value_tile, stream);
 }
 
 } // namespace ninfer::ops::detail::gated_delta_net::varlen

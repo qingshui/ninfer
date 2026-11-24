@@ -129,4 +129,27 @@ bool launch_control_shared_gate_up_dense(const Tensor& x, const MoeWeights& weig
     return true;
 }
 
+bool launch_control_router_dense(const Tensor& x, const MoeWeights& weights, float* scores,
+                                 const Storage& storage, const Plan& plan,
+                                 CudaExecutionView execution) {
+    const auto& control = weights.control;
+    const int tokens    = static_cast<int>(x.ne[1]);
+    if (!scores || plan.hidden != H || control.qtype != QType::BF16 ||
+        control.n != Shape::control_rows || control.k != H)
+        return false;
+    const auto stream = execution.stream();
+    // The router rows are the experts and the shared gate; the select kernel counts into zeroed
+    // per-expert totals.
+    if (storage.groups.counts)
+        CUDA_CHECK(cudaMemsetAsync(storage.groups.counts, 0, Shape::experts * sizeof(int), stream));
+    const Sm100Epilogue epilogue{.kind = Sm100Epilogue::Scores,
+                                 .scores = scores,
+                                 .score_stride = Shape::score_rows};
+    launch_sm100_bf16_gemm({static_cast<const __nv_bfloat16*>(x.data),
+                            static_cast<const __nv_bfloat16*>(control.qdata), Shape::control_rows, H,
+                            tokens},
+                           epilogue, nullptr, stream);
+    return true;
+}
+
 } // namespace ninfer::ops::detail::moe_cuda::block_scaled

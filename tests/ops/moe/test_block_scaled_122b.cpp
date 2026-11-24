@@ -600,6 +600,10 @@ void add_cases(OpSuite& suite) {
         add("complete/t" + std::to_string(t),
             [t](Fixture& f, auto e) { return run(f, e, t, true, true); });
     }
+    // Decode sizes from 8 to 127 tokens split the control and shared gate/up product over K.
+    for (int t : {8, 33, 72, 127})
+        add("complete/t" + std::to_string(t),
+            [t](Fixture& f, auto e) { return run(f, e, t, true, true); });
     suite.add(std::move(catalogue), [=](auto selected) {
         DeviceContext device;
         Fixture fixture;

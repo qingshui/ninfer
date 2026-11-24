@@ -18,6 +18,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <exception>
+#include <functional>
 #include <iostream>
 #include <span>
 #include <string_view>
@@ -159,20 +160,27 @@ void test_frame_padding_fill(ninfer::DeviceContext& device) {
            "re-cleared ingress restores the scratch State destination");
 }
 
-// Unprepared graphs replay nothing, and the capture buckets cover every batch of the capacity.
+// Unprepared graphs replay nothing, and the capture buckets cover every batch of the capacity
+// with bounded padding: a replay runs every kernel over the padded rows.
 void test_capture_buckets() {
     const q36::Graphs graphs({512, 130, 0, ninfer::SpeculativeBackend::None});
     expect(graphs.captured_batch(q36::GraphPhase::Main, 130) == 0,
            "unprepared graphs replay no batch");
 
     const auto buckets = q36::graph_capture_buckets(130);
-    expect(buckets.size() == 9 && buckets.front() == 1 && buckets.back() == 130,
-           "capture buckets are the powers of two up to the capacity");
+    expect(buckets.front() == 1 && buckets.back() == 130 &&
+               std::adjacent_find(buckets.begin(), buckets.end(), std::greater_equal<>{}) ==
+                   buckets.end(),
+           "capture buckets ascend from one row to the capacity");
     for (std::uint32_t batch = 1; batch <= 130; ++batch) {
         const auto found = std::find_if(buckets.begin(), buckets.end(),
                                         [&](auto bucket) { return bucket >= batch; });
         expect(found != buckets.end(),
                "every batch of the capacity has a covering capture bucket");
+        if (found != buckets.end() && batch >= 16) {
+            expect(*found - batch <= batch / 6 + 3,
+                   "a batch of 16 rows or more is padded by about an eighth at most");
+        }
     }
 }
 

@@ -3,6 +3,8 @@
 #include "ops/common/cuda/pipeline.cuh"
 #include "ops/moe/kernels/cuda/routing/topk.cuh"
 
+#include <stdexcept>
+
 namespace ninfer::ops::detail::moe_cuda::block_scaled {
 namespace {
 using namespace common;
@@ -83,11 +85,16 @@ template <class Shape, bool Gate, int Columns, int Intermediate, bool SplitActiv
 __global__ __launch_bounds__(128) void shared_mma(
     const __nv_bfloat16* x, const __nv_bfloat16* weights, Storage storage,
     const float* coefficients, const float* beta, Output output, int tokens,
-    const __nv_bfloat16* control = nullptr, float* scores = nullptr, float* shared_gate = nullptr) {
+    const __nv_bfloat16* control = nullptr, float* scores = nullptr, float* shared_gate = nullptr,
+    float* partials = nullptr) {
     constexpr int BK = 64, BN = Columns, Rows = Gate ? 32 : 64,
                   K = Gate ? Shape::hidden : Intermediate;
     constexpr int WarpColumns = BN / 2, NT = WarpColumns / 8;
     constexpr int Planes = Gate || !SplitActivation ? 1 : 2;
+    // Split blockIdx.z covers its share of the K tiles. With `partials` (control and shared
+    // gate/up only) it stores its sums for shared_control_finalize instead of the epilogue.
+    const int iterations = K / BK / static_cast<int>(gridDim.z);
+    const int first      = static_cast<int>(blockIdx.z) * iterations;
     __shared__ __align__(16) __nv_bfloat16 ws[2][64 * BK];
     __shared__ __align__(16) __nv_bfloat16 xs[2][Planes][BN * BK];
     const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
@@ -98,7 +105,8 @@ __global__ __launch_bounds__(128) void shared_mma(
     const int row0 =
         route ? (shared_only ? Shape::experts : blockIdx.x * 64) : (blockIdx.x - route_blocks) * Rows;
     const int token0 = blockIdx.y * BN;
-    if (control && storage.groups.counts && blockIdx.x == 0 && blockIdx.y == 0) {
+    if (control && storage.groups.counts && blockIdx.x == 0 && blockIdx.y == 0 &&
+        blockIdx.z == 0) {
         for (int e = threadIdx.x; e < Shape::experts; e += blockDim.x) {
             storage.groups.counts[e] = 0;
         }
@@ -127,11 +135,15 @@ __global__ __launch_bounds__(128) void shared_mma(
         }
         cp_commit();
     };
-    stage(0, 0);
-    stage(1, 1);
+    stage(0, first);
+    if (iterations > 1) {
+        stage(1, first + 1);
+    } else {
+        cp_commit();
+    }
     float acc[2][NT][4] = {};
-    for (int kt = 0; kt < K / BK; ++kt) {
-        const int s = kt % 2;
+    for (int i = 0; i < iterations; ++i) {
+        const int s = i % 2;
         cp_wait<1>();
         __syncthreads();
 #pragma unroll
@@ -163,13 +175,42 @@ __global__ __launch_bounds__(128) void shared_mma(
             }
         }
         __syncthreads();
-        if (kt + 2 < K / BK) {
-            stage(s, kt + 2);
+        if (i + 2 < iterations) {
+            stage(s, first + i + 2);
         } else {
             cp_commit();
         }
     }
     cp_wait<0>();
+    if constexpr (Gate) {
+        if (partials) {
+            // [split][token][row]: the gate rows, the up rows, then the control rows.
+            constexpr int PartialRows = 2 * Intermediate + Shape::experts + 1;
+            float* sums = partials + std::int64_t(blockIdx.z) * tokens * PartialRows;
+#pragma unroll
+            for (int n = 0; n < NT; ++n) {
+#pragma unroll
+                for (int v = 0; v < 4; ++v) {
+                    const int token = token0 + wn * WarpColumns + n * 8 + (lane & 3) * 2 + (v & 1);
+                    if (token >= tokens) continue;
+                    float* row_sums = sums + std::int64_t(token) * PartialRows;
+                    if (route) {
+#pragma unroll
+                        for (int m = 0; m < 2; ++m) {
+                            const int row = row0 + wm * 16 + m * 32 + (lane >> 2) + (v / 2) * 8;
+                            if (row < Shape::experts + 1)
+                                row_sums[2 * Intermediate + row] = acc[m][n][v];
+                        }
+                    } else {
+                        const int row          = row0 + wm * 16 + (lane >> 2) + (v / 2) * 8;
+                        row_sums[row]          = acc[0][n][v];
+                        row_sums[Intermediate + row] = acc[1][n][v];
+                    }
+                }
+            }
+            return;
+        }
+    }
 #pragma unroll
     for (int n = 0; n < NT; ++n) {
 #pragma unroll
@@ -211,6 +252,41 @@ __global__ __launch_bounds__(128) void shared_mma(
                 }
             }
         }
+    }
+}
+
+// Adds the split partial sums of shared_mma in split order and applies its control and shared
+// gate/up epilogue. One thread per token and output; the outputs are the shared activation rows
+// followed by the control rows.
+template <class Shape, int Intermediate, bool SplitActivation>
+__global__ __launch_bounds__(256) void shared_control_finalize(const float* partials, int splits,
+                                                               int tokens, Storage storage,
+                                                               float* scores, float* shared_gate) {
+    constexpr int PartialRows = 2 * Intermediate + Shape::experts + 1;
+    const int token           = blockIdx.y;
+    const int output          = blockIdx.x * blockDim.x + threadIdx.x;
+    if (output >= Intermediate + Shape::experts + 1) return;
+    const auto sum = [&](int row) {
+        float value = 0.0F;
+        for (int split = 0; split < splits; ++split)
+            value += partials[(std::int64_t(split) * tokens + token) * PartialRows + row];
+        return value;
+    };
+    if (output < Intermediate) {
+        auto* h           = static_cast<__nv_bfloat16*>(storage.shared_activation);
+        const float value = silu(sum(output)) * sum(Intermediate + output);
+        const auto hi     = __float2bfloat16_rn(value);
+        const int index   = token * Intermediate + output;
+        h[index]          = hi;
+        if constexpr (SplitActivation)
+            h[tokens * Intermediate + index] = __float2bfloat16_rn(value - __bfloat162float(hi));
+        return;
+    }
+    const int row = output - Intermediate;
+    if (scores) {
+        scores[token * Shape::score_rows + row] = sum(2 * Intermediate + row);
+    } else if (row == Shape::experts) {
+        shared_gate[token] = 1.0F / (1.0F + __expf(-sum(2 * Intermediate + row)));
     }
 }
 
@@ -313,19 +389,34 @@ void launch_control_shared_impl(const Tensor& x, const MoeWeights& weights,
                          shared_gate);
     } else {
         bool dense_gate_up = false;
+        bool dense_router  = false;
 #if NINFER_TARGET_B200
         dense_gate_up = launch_control_shared_gate_up_dense(x, weights, storage, plan, execution);
+        dense_router  = dense_gate_up && routed &&
+                       launch_control_router_dense(x, weights, scores, storage, plan, execution);
 #endif
         // The blocks past the router rows produce the shared activation.
         const int gate_up_blocks = dense_gate_up ? 0 : Intermediate / 32;
+        // Splitting K needs every row of the call in the partial sums.
+        const int splits = !dense_gate_up && storage.shared_partials ? plan.shared_splits : 1;
+        if (splits < 1 || Shape::hidden / 64 % splits != 0)
+            throw std::logic_error("shared split count must divide the hidden-dimension tiles");
+        float* partials  = splits > 1 ? storage.shared_partials : nullptr;
         const auto launch        = [&]<int Columns>() {
             shared_mma<Shape, true, Columns, Intermediate, SplitActivation>
                 <<<dim3(gate_up_blocks + (routed ? (Shape::experts + 64) / 64 : 1),
-                        (x.ne[1] + Columns - 1) / Columns),
+                        (x.ne[1] + Columns - 1) / Columns, splits),
                    128, 0, stream>>>(input, gu, storage, nullptr, nullptr, FloatContribution{},
-                                     x.ne[1], control, scores, shared_gate);
+                                     x.ne[1], control, scores, shared_gate, partials);
+            if (!partials) return;
+            CUDA_CHECK(cudaGetLastError());
+            shared_control_finalize<Shape, Intermediate, SplitActivation>
+                <<<dim3((Intermediate + Shape::experts + 1 + 255) / 256, x.ne[1]), 256, 0,
+                   stream>>>(partials, splits, x.ne[1], storage, scores, shared_gate);
         };
-        if (plan.shared_columns == 64) {
+        if (dense_router) {
+            // The scores and counts are already produced.
+        } else if (plan.shared_columns == 64) {
             launch.template operator()<64>();
         } else {
             launch.template operator()<32>();

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "core/dtype.h"
+#include "ninfer/types.h"
 #include "op_measurement.cuh"
 
 namespace ninfer::bench::gdn_recurrence {
@@ -13,6 +15,7 @@ struct Options {
     std::vector<int> tokens{1024};
     bool breakdown      = false;
     std::string qk_norm = "fused";
+    DType state_dtype   = DType::FP32;
 };
 
 inline Options parse_options(int argc, char** argv) {
@@ -29,6 +32,7 @@ inline Options parse_options(int argc, char** argv) {
                    "  --qk-norm fused|composed (composed requires B=1)\n"
                    "  --breakdown (chunked stages)\n"
                    "  --state-form distinct|alias (batch default alias, prefill default distinct)\n"
+                   "  --state-dtype fp32|bf16 (batch-update State storage, default fp32)\n"
                    "Running and batch-update call public Ops; other modes and breakdown are "
                    "private stage analysis.\n"
                    "chunked-raw normalizes raw Q/K; chunked-normalized consumes "
@@ -73,6 +77,14 @@ inline Options parse_options(int argc, char** argv) {
             explicit_state = true;
         } else if (flag == "--qk-norm")
             o.qk_norm = value;
+        else if (flag == "--state-dtype") {
+            if (value == "fp32")
+                o.state_dtype = DType::FP32;
+            else if (value == "bf16")
+                o.state_dtype = DType::BF16;
+            else
+                throw std::invalid_argument("unknown state dtype");
+        }
         else if (!measurement::parse(o.timing, flag, value))
             throw std::invalid_argument("unknown option: " + std::string(flag));
     }
@@ -80,11 +92,15 @@ inline Options parse_options(int argc, char** argv) {
         throw std::invalid_argument("unknown state form");
     if (!explicit_state && o.mode == Mode::BatchUpdate) o.state_form = "alias";
     if (o.mode == Mode::BatchUpdate && !explicit_tokens) o.tokens = {1};
-    if (o.value_heads < o.qk_heads || o.value_heads % o.qk_heads || o.batch > 8 ||
+    // Batch update admits one row per decode lane.
+    if (o.value_heads < o.qk_heads || o.value_heads % o.qk_heads || o.batch < 1 ||
+        o.batch > static_cast<int>(kMaximumConcurrency) ||
         (o.mode != Mode::BatchUpdate && o.batch != 1))
         throw std::invalid_argument("invalid head/batch geometry");
     if (o.qk_norm != "fused" && o.qk_norm != "composed")
         throw std::invalid_argument("unknown normalization");
+    if (o.state_dtype != DType::FP32 && o.mode != Mode::BatchUpdate)
+        throw std::invalid_argument("--state-dtype bf16 requires batch-update");
     if (o.qk_norm == "composed" && (o.mode != Mode::BatchUpdate || o.batch != 1))
         throw std::invalid_argument("composed normalization requires batch-update with B=1");
     if (o.breakdown && o.mode == Mode::BatchUpdate)

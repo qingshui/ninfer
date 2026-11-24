@@ -2,6 +2,7 @@
 
 #include "ops/suite.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <stdexcept>
@@ -37,8 +38,20 @@ inline std::int64_t qk_head(std::int64_t value_head, std::int64_t qk_heads,
     return value_head / (value_heads / qk_heads);
 }
 
+// The BF16 value nearest to x, ties to even: the word a published BF16 State holds.
+inline double bf16_nearest(double x) {
+    if (x == 0.0 || !std::isfinite(x)) return x;
+    int exponent = 0;
+    (void)std::frexp(x, &exponent);
+    const double quantum = std::ldexp(1.0, std::max(exponent - 8, -133));
+    return std::nearbyint(x / quantum) * quantum;
+}
+
+// `bf16_publications` lists token counts after which the State is published as BF16: the
+// output of that token uses the exact state, and every later token starts from the rounded one.
 inline Result evaluate(const Inputs& in, double scale, bool normalize_qk,
-                       bool record_snapshots = false) {
+                       bool record_snapshots = false,
+                       const std::vector<std::int64_t>& bf16_publications = {}) {
     const std::int64_t S    = in.head_dim;
     const std::int64_t H_qk = in.qk_heads;
     const std::int64_t H_v  = in.value_heads;
@@ -82,6 +95,12 @@ inline Result evaluate(const Inputs& in, double scale, bool normalize_qk,
                 }
             }
         }
+    }
+
+    std::vector<char> publishes(static_cast<std::size_t>(T) + 1, 0);
+    for (const std::int64_t count : bf16_publications) {
+        if (count <= 0 || count > T) throw std::invalid_argument("gdn_ref: invalid publication");
+        publishes[static_cast<std::size_t>(count)] = 1;
     }
 
     Result result;
@@ -138,6 +157,10 @@ inline Result evaluate(const Inputs& in, double scale, bool normalize_qk,
                                        q_logical[qk_base + static_cast<std::size_t>(col)];
                     }
                     result.out[v_base + static_cast<std::size_t>(row)] = scale * state_dot_q;
+                }
+
+                if (publishes[static_cast<std::size_t>(t + 1)]) {
+                    for (double& value : state) value = bf16_nearest(value);
                 }
 
                 if (record_snapshots) {

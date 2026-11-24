@@ -309,8 +309,9 @@ ResourceReservation SessionImpl::reserve_units(std::span<const ExecutionUnit> un
                 backend_kv_histories->reserved_growth_pages(state.kv->backend->handle());
             add_backend[lane] = backend > old_backend[lane] ? backend - old_backend[lane] : 0;
         }
-        // A decode unit also asks for the pages of the next kDecodeGrowthReserveTokens positions,
-        // so one reclaim serves many steps. A recovering lane already holds its full coverage.
+        // A decode unit also sizes the reclaim of a short pool for the pages of the next
+        // kDecodeGrowthReserveTokens positions, so one reclaim serves many steps. A recovering
+        // lane already holds its full coverage.
         const auto current = state.continuation.metadata.execution_frontier;
         const auto target = std::min<std::uint64_t>(capacity, std::uint64_t{current} +
                                                                   kDecodeGrowthReserveTokens);
@@ -357,31 +358,22 @@ ResourceReservation SessionImpl::reserve_units(std::span<const ExecutionUnit> un
         }
         return bundle;
     };
-    const bool any_horizon = std::any_of(horizon.begin(), horizon.end(), [](bool v) { return v; });
-    std::optional<Bundle> chosen;
-    std::optional<ContextAssessment> wanted;
-    if (any_horizon) {
-        auto wide      = build(true);
-        auto affordable = directory.assess(wide.demand);
-        if (affordable.ready())
-            chosen = std::move(wide);
-        else
-            wanted = std::move(affordable);
-    }
-    if (!chosen) {
-        // The horizon is a preference; the minimum is the requirement.
-        auto narrow     = build(false);
-        auto assessment = directory.assess(narrow.demand);
-        if (!assessment.ready()) {
-            // When the minimum is short, let one reclaim cover the horizon as well, unless that
-            // larger demand needs something the minimum does not.
-            if (wanted && wanted->status == context::ContextAvailability::NeedsReclaim)
-                return {.assessment = std::move(*wanted)};
-            return {.assessment = std::move(assessment)};
+    // The minimum is the requirement and the only reservation: the unit's commit releases its
+    // growth, so a reserved horizon would be taken and returned on every step. The horizon sizes
+    // the reclaim of a short pool instead, so one reclaim serves many decode steps.
+    auto chosen     = build(false);
+    auto assessment = directory.assess(chosen.demand);
+    if (!assessment.ready()) {
+        // When the minimum is short, let one reclaim cover the horizon as well, unless that
+        // larger demand needs something the minimum does not.
+        if (std::any_of(horizon.begin(), horizon.end(), [](bool v) { return v; })) {
+            auto wanted = directory.assess(build(true).demand);
+            if (wanted.status == context::ContextAvailability::NeedsReclaim)
+                return {.assessment = std::move(wanted)};
         }
-        chosen = std::move(narrow);
+        return {.assessment = std::move(assessment)};
     }
-    auto& bundle   = *chosen;
+    auto& bundle   = chosen;
     auto& main_ids = bundle.main;
     auto& backend_ids = bundle.backend;
     auto reserved = directory.reserve(bundle.demand);

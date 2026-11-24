@@ -8,7 +8,8 @@
 namespace ninfer::ops::detail {
 namespace {
 // GDN output projection of the 122B geometry with the residual added in the epilogue. The
-// residual is the output tensor itself; the activation arrives already quantized in `scratch`.
+// residual is the output tensor itself; the activation arrives already quantized in `scratch`,
+// which also holds the partials that let decode calls split their K loop across idle SMs.
 void launch(const Tensor& x, const Weight& w, Tensor& out, Fp8A8Workspace scratch,
             cudaStream_t stream) {
     const auto p = fp8_a8_operands<float>(w, scratch, x.ne[1]);
@@ -17,7 +18,7 @@ void launch(const Tensor& x, const Weight& w, Tensor& out, Fp8A8Workspace scratc
     epilogue.kind     = Sm100Epilogue::Add;
     epilogue.residual = data;
     launch_sm100_fp8_gemm({p.x, p.x_scales, p.codes, p.scales, p.rows, p.k, p.tokens}, epilogue,
-                          data, stream);
+                          data, stream, {scratch.partials, scratch.partial_bytes});
 }
 } // namespace
 
@@ -27,6 +28,6 @@ Fp8LinearAddPlan select_fp8_row_fp32_add_n3072_k8192(LinearPolicy policy, std::i
     if (!allows_a8(policy))
         throw std::invalid_argument(
             "fp8 linear_add n=3072 k=8192: tcgen05 requires an A8 activation permission");
-    return {nullptr, launch, 0};
+    return {nullptr, launch, kSm100SplitPartialBytes};
 }
 } // namespace ninfer::ops::detail

@@ -1,5 +1,6 @@
 #pragma once
 
+
 namespace ninfer::runtime {
 
 template <class Instance>
@@ -124,19 +125,56 @@ void EngineCore<Instance>::ensure_base_plan(const std::shared_ptr<Request>& requ
 
 template <class Instance>
 [[nodiscard]] std::optional<std::uint32_t> EngineCore<Instance>::free_lane() const noexcept {
+    if (free_lane_cache_epoch_ == slots_epoch_) return free_lane_cache_;
+    std::optional<std::uint32_t> found;
     for (std::uint32_t lane = 0; lane < max_concurrency_; ++lane) {
-        if (!slots_[lane] && !materializing_[lane]) { return lane; }
+        if (!slots_[lane] && !materializing_[lane]) {
+            found = lane;
+            break;
+        }
     }
-    return std::nullopt;
+    free_lane_cache_       = found;
+    free_lane_cache_epoch_ = slots_epoch_;
+    return found;
 }
 
 template <class Instance>
-[[nodiscard]] std::uint32_t EngineCore<Instance>::free_lane_count() const noexcept {
+[[nodiscard]] std::uint32_t EngineCore<Instance>::occupied_lane_count() const noexcept {
+    if (occupied_cache_epoch_ == slots_epoch_) return occupied_cache_;
     std::uint32_t count = 0;
     for (std::uint32_t lane = 0; lane < max_concurrency_; ++lane) {
-        if (!slots_[lane] && !materializing_[lane]) { ++count; }
+        if (slots_[lane] || materializing_[lane]) { ++count; }
     }
+    occupied_cache_       = count;
+    occupied_cache_epoch_ = slots_epoch_;
     return count;
+}
+
+template <class Instance>
+[[nodiscard]] bool EngineCore<Instance>::admits_fresh_lanes(std::uint32_t lanes) noexcept {
+    const std::uint32_t occupied = occupied_lane_count();
+    if (lanes > max_concurrency_ - occupied) { return false; }
+    if (!lane_governor_) { return true; }
+    // An idle Engine starts the governor over and admits a sample group larger than the quota.
+    if (occupied == 0) {
+        lane_governor_->idle();
+        return true;
+    }
+    // The lanes in use after the admission stay within the quota: the governor shrinks the quota
+    // only while the residents fit it, so an admission past it would ratchet the quota up.
+    if (occupied + lanes <= lane_governor_->quota()) { return true; }
+    lane_governor_->hold();
+    return false;
+}
+
+template <class Instance>
+void EngineCore<Instance>::observe_token_cadence(Request& request, bool decode_row,
+                                                 std::uint32_t tokens,
+                                                 Clock::time_point now) noexcept {
+    if (lane_governor_ && decode_row && request.last_token_committed) {
+        lane_governor_->observe(now - *request.last_token_committed, tokens);
+    }
+    request.last_token_committed = now;
 }
 
 template <class Instance>
@@ -152,9 +190,11 @@ EngineCore<Instance>::find_group(std::uint64_t id) const noexcept {
     std::shared_ptr<SampleGroup> found;
     {
         std::lock_guard lock(queue_mutex_);
-        const auto it = std::find_if(groups_.begin(), groups_.end(),
-                                     [id](const auto& group) { return group->id == id; });
-        if (it != groups_.end() && (*it)->sealed) { found = *it; }
+        // Groups enter in id order and leave without reordering the rest: the list stays sorted.
+        const auto it = std::lower_bound(
+            groups_.begin(), groups_.end(), id,
+            [](const auto& group, std::uint64_t value) { return group->id < value; });
+        if (it != groups_.end() && (*it)->id == id && (*it)->sealed) { found = *it; }
     }
     return found;
 }
@@ -186,6 +226,7 @@ void EngineCore<Instance>::resolve_context_progress(
         }
         control = std::move(*entry);
         entry->reset();
+        ++slots_epoch_;
     }
     if (control) {
         const auto request = control->request;
@@ -720,7 +761,10 @@ template <class Instance>
 typename EngineCore<Instance>::AdmissionStatus
 EngineCore<Instance>::admit_request(const std::shared_ptr<Request>& request, bool restoring) {
     if (instance_.session->has_context_operation()) { return AdmissionStatus::Deferred; }
-    const auto lane  = free_lane();
+    // A fresh admission binds within the lane governor's quota; a restored request resumes its
+    // residency on any free lane.
+    const auto lane  = restoring || admits_fresh_lanes(1) ? free_lane()
+                                                           : std::optional<std::uint32_t>{};
     const auto owner = scheduler_.progress_owner();
     const auto suspended =
         restoring ? std::find_if(paused_.begin(), paused_.end(),
@@ -794,7 +838,7 @@ EngineCore<Instance>::admit_request(const std::shared_ptr<Request>& request, boo
             for (const auto& member : group->members) {
                 if (member->is_queued()) { ++remaining; }
             }
-            if (remaining > free_lane_count()) { return AdmissionStatus::Deferred; }
+            if (!admits_fresh_lanes(remaining)) { return AdmissionStatus::Deferred; }
         }
         const auto retained = resources_.retained_source(request->id);
         const auto revoked  = resources_.source_revocations(request->id);
@@ -822,13 +866,12 @@ EngineCore<Instance>::admit_request(const std::shared_ptr<Request>& request, boo
                 request->admission.fallback_reason = AdmissionFallbackReason::CostChanged;
             }
         }
-        admission_decision_.emplace(AdmissionDecision{
-            request, restoring, std::move(sources), 0,
-            resources_.begin_reclaim(*instance_.session, std::nullopt,
-                                     ReclaimRights{
-                                         restoring ? ReclaimPurpose::Execution
-                                                   : ReclaimPurpose::FreshAdmission,
-                                         request->id})});
+        const ReclaimRights rights{
+            restoring ? ReclaimPurpose::Execution : ReclaimPurpose::FreshAdmission, request->id};
+        typename ResourceManagement::ReclaimCursor cursor;
+        cursor.rights = rights;
+        admission_decision_.emplace(
+            AdmissionDecision{request, restoring, std::move(sources), 0, std::move(cursor)});
     }
     const auto& decision_request = admission_decision_->request;
     auto& decision               = *admission_decision_;
@@ -933,6 +976,11 @@ EngineCore<Instance>::admit_request(const std::shared_ptr<Request>& request, boo
             const auto excluded         = protected_source
                                               ? std::span<const Checkpoint>(&*protected_source, 1)
                                               : std::span<const Checkpoint>{};
+            if (!decision.ranked) {
+                decision.reclaim = resources_.begin_reclaim(*instance_.session, std::nullopt,
+                                                            decision.reclaim.rights);
+                decision.ranked  = true;
+            }
             const auto reclaimed = reclaim(assessment, restoring, excluded, &decision.reclaim);
             if (reclaimed == ReclaimProgress::Transferring) return AdmissionStatus::Admitted;
             if (reclaimed == ReclaimProgress::Deferred) {
@@ -1037,6 +1085,7 @@ EngineCore<Instance>::admit_request(const std::shared_ptr<Request>& request, boo
             materializing_[*lane].emplace(
                 MaterializingRequest{bound_request, LaneId{*lane}, begin, restoring,
                                      bound_choice});
+            ++slots_epoch_;
             context_owner_ = bound_request;
         }
         if constexpr (kInFlightCapture) {
@@ -1081,7 +1130,7 @@ EngineCore<Instance>::engage_fork_group(const SampleGroup& group,
     if (queued != 0 && queued - 1 > instance_.session->sample_fork_limit()) {
         return Engagement::Failed;
     }
-    return free_lane_count() >= queued ? Engagement::Ready : Engagement::Waiting;
+    return admits_fresh_lanes(queued) ? Engagement::Ready : Engagement::Waiting;
 }
 
 // The parent is bound: the group's other queued branches leave the queue and take one free lane
@@ -1346,6 +1395,13 @@ template <class Instance>
 LaneTable EngineCore<Instance>::build_lane_table(const LaneSlots& lanes) const {
     LaneTable table;
     table.lanes.resize(max_concurrency_);
+    for (std::uint32_t lane = 0; lane < max_concurrency_; ++lane) {
+        const auto& resident = slots_[lane];
+        if (resident && !lanes[lane] && resident->sequence && resident->is_decode_ready() &&
+            instance_.session->execution_pending(*resident->sequence)) {
+            ++table.decode_in_flight;
+        }
+    }
     for (std::uint32_t lane = 0; lane < max_concurrency_; ++lane) {
         const auto& request = lanes[lane];
         if (!request) continue;
@@ -1624,6 +1680,17 @@ template <class Instance>
         if (candidates.empty()) break;
         bool admitted = false;
         for (const auto& candidate : candidates) {
+            // A sample group's branch needs a lane the governor grants. Without one the pass
+            // checks it off unexamined, as an examination would end deferred; a branch the
+            // examination rejects (unplannable prompt, oversized fork group) fails once a lane
+            // can be granted. A saturated queue of groups is otherwise examined branch by branch
+            // on every admission check.
+            if (!admission_decision_ && candidate->sample_group_id &&
+                !instance_.session->has_context_operation() && !admits_fresh_lanes(1)) {
+                scheduler_.admission_candidate_checked(candidate->id);
+                candidate->admission_generation = admission_generation_;
+                continue;
+            }
             const auto status = admit_request(candidate, false);
             admitted = admitted || status == AdmissionStatus::Admitted;
             // One admission decision is live at a time; its request is the next candidate.
@@ -1664,7 +1731,7 @@ void EngineCore<Instance>::balance_retention() {
 }
 
 template <class Instance>
-void EngineCore<Instance>::begin_iteration(HostPhaseMeasurement& boundary) {
+bool EngineCore<Instance>::begin_iteration(HostPhaseMeasurement& boundary) {
     std::fill(control_executed_.begin(), control_executed_.end(), false);
     // Tails recorded while a context operation was in flight run before anything else in this
     // iteration, and in particular before admission can select a source.
@@ -1728,10 +1795,25 @@ void EngineCore<Instance>::begin_iteration(HostPhaseMeasurement& boundary) {
     // Groups at their fork frontier fork beside whatever computes: the fork opens no context
     // operation and needs only its own parent at rest.
     fork_ready_groups();
+    // A flight that prefill batching keeps to its decode rows does not wait for the admission
+    // pass: what the pass binds would be held back with the waiting prefill, so it runs once the
+    // flight is submitted and its lanes join a later iteration (see admission_trails_flight).
+    if (admission_trails_flight()) return true;
     // Admission runs beside the flights in flight: a Session with in-flight capture binds
     // synchronously and reclaims without waiting; any other Session starts only fresh root
     // bindings, and its reclamation and asynchronous bindings wait for a quiescent iteration.
     (void)admit_pending(boundary);
+    return false;
+}
+
+template <class Instance>
+[[nodiscard]] bool EngineCore<Instance>::admission_trails_flight() const {
+    const auto table  = build_lane_table(runnable_lanes());
+    const auto budget = iteration_budget();
+    std::size_t rows  = 0;
+    for (const auto& entry : table.lanes) rows += entry.decode_ready ? 1U : 0U;
+    return scheduler_.batching_holds(table, budget,
+                                     std::min<std::size_t>(rows, budget.decode_rows_limit));
 }
 
 template <class Instance>
@@ -1993,11 +2075,12 @@ void EngineCore<Instance>::worker_loop() noexcept {
             // The snapshot is published once the iteration's flights are submitted, so the
             // device does not wait for it.
             bool published = false;
+            bool trailing  = false;
             if (schedule) {
                 scheduled_revision = revision;
                 set_host_work_class(HostWorkClass::Control);
                 boundary = begin_host_phase();
-                begin_iteration(boundary);
+                trailing = begin_iteration(boundary);
                 finish_engine_phase(boundary, EngineHostPhase::Boundary);
                 if (submit_iteration(boundary)) {
                     progressed = true;
@@ -2005,6 +2088,7 @@ void EngineCore<Instance>::worker_loop() noexcept {
                     published = true;
                 }
             }
+            flush_consumer_wakes();
             if (!published && revision != published_revision_) publish_runtime_stats();
             {
                 ExecutionCallScope call(*this, CoordinatorCall::Flush);
@@ -2012,6 +2096,16 @@ void EngineCore<Instance>::worker_loop() noexcept {
                 call.finish();
             }
             flush_completions();
+            if (trailing) {
+                // The admission pass the iteration deferred runs beside its flight; the lanes it
+                // binds join the next iteration.
+                set_host_work_class(HostWorkClass::Control);
+                boundary = begin_host_phase();
+                if (admit_pending(boundary)) progressed = true;
+                finish_engine_phase(boundary, EngineHostPhase::Boundary);
+            }
+            // A flight the trailing pass polled to retirement may have committed outputs.
+            flush_consumer_wakes();
             outstanding = execution_outstanding();
             if (!outstanding) progressed |= process_measurement();
         } catch (...) {

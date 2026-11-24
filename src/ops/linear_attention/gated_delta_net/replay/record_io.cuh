@@ -29,14 +29,15 @@ struct RecordEffects {
     }
 };
 
-template <bool Masked>
+template <bool Masked, class StateWord>
 struct RecordAccess {
+    using State = StateWord;
     const __nv_bfloat16* q;
     const __nv_bfloat16* k;
     const __nv_bfloat16* v;
     const float* g;
     const float* beta;
-    const float* states;
+    const State* states;
     const std::int32_t* valid_columns;
     const std::int64_t* initial_offsets;
     __nv_bfloat16* key_record;
@@ -63,9 +64,9 @@ struct RecordAccess {
         return static_cast<std::int64_t>(coord.batch) * width + token;
     }
 
-    __device__ __forceinline__ const float*
+    __device__ __forceinline__ const State*
     state_read_base(const RecurrentCoordinates& coord) const {
-        return states + initial_offsets[coord.batch] / sizeof(float) +
+        return states + initial_offsets[coord.batch] / sizeof(State) +
                static_cast<std::int64_t>(coord.value_head) * kStateDim * kStateDim;
     }
 
@@ -132,14 +133,15 @@ struct RecordAccess {
     }
 };
 
-template <bool Masked>
+// Every token continues from the State its one-token update would publish.
+template <bool Masked, class State>
 __global__ void __launch_bounds__(common::kWarpSize* kNumWarps, 2)
-    recurrent_record_kernel(RecordAccess<Masked> access) {
+    recurrent_record_kernel(RecordAccess<Masked, State> access) {
     const RecurrentCoordinates coord = access.coordinates();
     const std::int32_t valid         = access.active_columns(coord);
     __align__(16) float state[kDvPerWarp][kQkPerLane];
     load_state_tile(state, access.state_read_base(coord), coord);
-    run_recurrent_sequence<true, RecordEffects>(state, access, coord, valid);
+    run_recurrent_sequence<true, RecordEffects, State>(state, access, coord, valid);
     zero_output_suffix(access, coord, valid, access.width);
 }
 

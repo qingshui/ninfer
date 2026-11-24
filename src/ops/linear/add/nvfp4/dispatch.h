@@ -10,6 +10,7 @@ struct Nvfp4LinearAddPlan {
     void (*quantized)(const Tensor&, const Weight&, Tensor&, Nvfp4A4Workspace,
                       cudaStream_t) = nullptr;
     Nvfp4ScaleLayout scale_layout   = Nvfp4ScaleLayout::RowMajor;
+    std::size_t partial_bytes       = 0;
 };
 
 Nvfp4LinearAddPlan select_nvfp4_add_n5120_k6144(LinearPolicy policy, std::int32_t tokens);

@@ -410,6 +410,116 @@ void test_plan_iteration_round_robin_and_priority() {
             "a replaying lane joined the prefill list");
 }
 
+// Prefill batching holds the prefill list back while enough decode rows ride and the waiting
+// lanes hold few tokens, for a bounded number of iterations in a row; every other case plans
+// prefill at once, and the held iterations still carry every decode row.
+void test_plan_iteration_batches_prefill() {
+    Scheduler scheduler(kSlots);
+    ninfer::runtime::LaneTable table;
+    table.lanes.resize(kSlots);
+    table.lanes[0].decode_ready  = true;
+    table.lanes[1].decode_ready  = true;
+    table.lanes[2].decode_ready  = true;
+    table.lanes[3].prefilling    = true;
+    table.lanes[3].prefill_limit = 100;
+    const auto budget = ninfer::runtime::IterationBudget{.token_budget         = 4096,
+                                                         .decode_rows_limit    = kSlots,
+                                                         .prefill_floor_tokens = 0,
+                                                         .batch_decode_rows    = 3,
+                                                         .batch_prefill_tokens = 256,
+                                                         .batch_max_deferrals  = 2};
+
+    for (int held = 0; held < 2; ++held) {
+        const auto plan = scheduler.plan_iteration(table, budget);
+        require(plan.decode_lanes == std::vector<std::uint32_t>({0, 1, 2}) &&
+                    !plan.has_prefill(),
+                "a held iteration dropped decode rows or planned prefill");
+    }
+    const auto bounded = scheduler.plan_iteration(table, budget);
+    require(bounded.prefill_lanes == std::vector<std::uint32_t>({3}),
+            "prefill stayed held past the deferral bound");
+    require(!scheduler.plan_iteration(table, budget).has_prefill(),
+            "the deferral bound did not restart after prefill was planned");
+
+    // Waiting lanes that reach the token target are planned at once and restart the count.
+    table.lanes[4].prefilling    = true;
+    table.lanes[4].prefill_limit = 200;
+    require(scheduler.plan_iteration(table, budget).prefill_lanes.size() == 2,
+            "lanes holding the token target stayed held");
+    table.lanes[4].prefilling    = false;
+    table.lanes[4].prefill_limit = 0;
+    require(!scheduler.plan_iteration(table, budget).has_prefill(),
+            "a planned prefill did not restart the deferral count");
+
+    // Fewer decode rows than the threshold, a priority lane, or no waiting prefill never hold.
+    table.lanes[2].decode_ready = false;
+    require(scheduler.plan_iteration(table, budget).has_prefill(),
+            "prefill was held with too few decode rows");
+    table.lanes[2].decode_ready = true;
+    (void)scheduler.plan_iteration(table, budget);
+    table.priority_lane = 3;
+    require(scheduler.plan_iteration(table, budget).has_prefill(),
+            "the priority lane was held");
+    table.priority_lane.reset();
+    table.lanes[3].prefilling = false;
+    require(!scheduler.plan_iteration(table, budget).has_prefill() &&
+                scheduler.plan_iteration(table, budget).decode_lanes.size() == 3,
+            "an iteration without waiting prefill changed its decode rows");
+
+    // Decode lanes that are still executing count toward the threshold, and while every one of
+    // them executes the waiting prefill does not fly by itself or spend the deferral count, however
+    // many tokens it holds. Too few resident decode lanes never hold.
+    table.lanes[3].prefilling = true;
+    ninfer::runtime::LaneTable busy;
+    busy.lanes.resize(kSlots);
+    busy.lanes[3].prefilling    = true;
+    busy.lanes[3].prefill_limit = 100;
+    busy.decode_in_flight       = 3;
+    Scheduler fresh(kSlots);
+    for (int i = 0; i < 4; ++i) {
+        const auto held = fresh.plan_iteration(busy, budget);
+        require(held.empty(), "prefill flew alone beside executing decode lanes");
+    }
+    const auto first_held = fresh.plan_iteration(table, budget);
+    require(first_held.decode_lanes.size() == 3 && !first_held.has_prefill(),
+            "holding while decode lanes executed spent the deferral count");
+    busy.lanes[3].prefill_limit = 512;
+    require(fresh.plan_iteration(busy, budget).empty(),
+            "a large prefill flew alone beside executing decode lanes");
+    table.lanes[3].prefill_limit = 512;
+    require(fresh.plan_iteration(table, budget).prefill_lanes.size() == 1,
+            "a large prefill was held from the decode rows' flight");
+    table.lanes[3].prefill_limit = 100;
+    busy.lanes[3].prefill_limit  = 100;
+    busy.decode_in_flight        = 2;
+    require(fresh.plan_iteration(busy, budget).has_prefill(),
+            "too few resident decode lanes held the prefill");
+
+    // batching_holds reads the same rule without advancing it: it holds while the decode rows fly,
+    // the waiting tokens stay below the target (none waiting included) and deferrals remain.
+    Scheduler probe(kSlots);
+    require(probe.batching_holds(table, budget, 3), "batching did not hold small prefill");
+    require(probe.batching_holds(table, budget, 3) && probe.batching_holds(table, budget, 3),
+            "batching_holds advanced the deferral count");
+    require(!probe.batching_holds(table, budget, 0), "batching held with no decode rows flying");
+    require(!probe.batching_holds(table, budget, 2), "batching held with too few decode rows");
+    table.lanes[3].prefill_limit = 512;
+    require(!probe.batching_holds(table, budget, 3), "batching held a large prefill");
+    table.lanes[3].prefilling    = false;
+    table.lanes[3].prefill_limit = 0;
+    require(probe.batching_holds(table, budget, 3), "batching did not hold an empty prefill list");
+    table.lanes[3].prefilling    = true;
+    table.lanes[3].prefill_limit = 100;
+    for (int held = 0; held < 2; ++held) (void)probe.plan_iteration(table, budget);
+    require(!probe.batching_holds(table, budget, 3), "batching held past the deferral bound");
+
+    // A zero threshold disables batching.
+    auto disabled             = budget;
+    disabled.batch_decode_rows = 0;
+    require(scheduler.plan_iteration(table, disabled).has_prefill(),
+            "a zero threshold still held prefill");
+}
+
 // A table whose size does not match the configured lanes is rejected.
 void test_plan_iteration_rejects_foreign_lane_table() {
     Scheduler scheduler(kSlots);
@@ -493,6 +603,7 @@ int main() {
         test_plan_iteration_decode_rows_ride_within_limit();
         test_plan_iteration_prefill_budget_and_floor();
         test_plan_iteration_round_robin_and_priority();
+        test_plan_iteration_batches_prefill();
         test_plan_iteration_rejects_foreign_lane_table();
         test_decode_and_control_membership();
         test_lane_tables_follow_the_configured_capacity();

@@ -15,6 +15,7 @@ namespace ninfer::bench::gdn {
 struct Geometry {
     static constexpr std::uint64_t head_dim = 128;
     int qk_heads, value_heads, tokens, batch = 1;
+    std::uint64_t state_word = sizeof(float); // bytes of one recurrent State word
 
     std::uint64_t qk_bytes() const {
         return head_dim * qk_heads * tokens * batch * sizeof(std::uint16_t);
@@ -29,7 +30,7 @@ struct Geometry {
     }
 
     std::uint64_t state_bytes() const {
-        return head_dim * head_dim * value_heads * batch * sizeof(float);
+        return head_dim * head_dim * value_heads * batch * state_word;
     }
 };
 

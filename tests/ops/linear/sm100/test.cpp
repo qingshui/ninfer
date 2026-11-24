@@ -1,6 +1,7 @@
-// tcgen05 dense GEMM (B200 / sm_100a): direct operand-level checks of the four epilogues and of
-// the linear_backend() routing. The shape-level coverage of the registered 122B projections is in
-// the projection / split / add suites, which run the same kernels through the public Ops.
+// tcgen05 dense GEMM (B200 / sm_100a): direct operand-level checks of the four epilogues, of the
+// split-K path of decode calls and its plan, and of the linear_backend() routing. The shape-level
+// coverage of the registered 122B projections is in the projection / split / add suites, which run
+// the same kernels through the public Ops.
 //
 // The reference is an independent double-precision contraction of the dequantized operands. The
 // NVFP4 operands are built here in the K16M128x4 atom order from the format definition
@@ -16,6 +17,9 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
+#include <iostream>
+#include <optional>
 #include <random>
 #include <string>
 #include <vector>
@@ -81,7 +85,9 @@ std::vector<double> contract(const std::vector<float>& w, const std::vector<floa
     return acc;
 }
 
-constexpr std::array<int, 3> kSegments = {512, 256, 768};
+// Three Split segments over the weight rows; the last takes the rows the first two leave.
+std::array<int, 3> segments_of(int rows) { return {512, 256, rows - 768}; }
+
 const char* kind_name(int kind) {
     return kind == Sm100Epilogue::Identity ? "identity"
            : kind == Sm100Epilogue::Add    ? "add"
@@ -94,6 +100,7 @@ template <class Launch>
 int check_epilogue(const std::string& label, int kind, const std::vector<double>& acc, int rows,
                    int tokens, double scale, const PointwiseCriterion& criterion,
                    const Launch& launch) {
+    const std::array<int, 3> segments = segments_of(rows);
     std::vector<float> residual(static_cast<std::size_t>(tokens) * rows);
     fill_uniform(residual, 77U, -4.F, 4.F);
     round_to_bf16(residual);
@@ -110,13 +117,13 @@ int check_epilogue(const std::string& label, int kind, const std::vector<double>
     epilogue.kind = static_cast<Sm100Epilogue::Kind>(kind);
     if (kind == Sm100Epilogue::Add) epilogue.residual = static_cast<const __nv_bfloat16*>(y.data());
     if (kind == Sm100Epilogue::Split) {
-        for (int width : kSegments) {
+        for (int width : segments) {
             segment_buffers.emplace_back(cuda_environment().context.device(),
                                          static_cast<std::size_t>(tokens) * width * 2);
             segment_buffers.back().fill(0xff);
             segment_pointers.push_back(static_cast<__nv_bfloat16*>(segment_buffers.back().data()));
         }
-        epilogue.segments = kSegments;
+        epilogue.segments = segments;
         epilogue.outputs  = segment_pointers;
     }
     launch(epilogue, static_cast<__nv_bfloat16*>(y.data()));
@@ -126,7 +133,7 @@ int check_epilogue(const std::string& label, int kind, const std::vector<double>
     std::vector<std::vector<double>> segment_values;
     for (std::size_t s = 0; s < segment_buffers.size(); ++s)
         segment_values.push_back(from_device_bf16(
-            segment_buffers[s], static_cast<std::size_t>(tokens) * kSegments[s]));
+            segment_buffers[s], static_cast<std::size_t>(tokens) * segments[s]));
     const auto all_values =
         from_device_bf16(y, static_cast<std::size_t>(tokens) * out_rows);
     std::vector<double> got, expected;
@@ -142,9 +149,9 @@ int check_epilogue(const std::string& label, int kind, const std::vector<double>
             }
             expected.push_back(value);
             if (kind == Sm100Epilogue::Split) {
-                if (r == base + kSegments[segment]) base += kSegments[segment++];
+                if (r == base + segments[segment]) base += segments[segment++];
                 got.push_back(segment_values[segment][static_cast<std::size_t>(t) *
-                                                          kSegments[segment] + (r - base)]);
+                                                          segments[segment] + (r - base)]);
             }
         }
         if (kind != Sm100Epilogue::Split)
@@ -154,11 +161,39 @@ int check_epilogue(const std::string& label, int kind, const std::vector<double>
     return verify_pointwise(label, got, expected, criterion);
 }
 
-int nvfp4_case(int kind, int tokens) {
-    constexpr int kRows = 1536, kK = 1024;
+// Split-K scratch, poisoned with NaN before every launch: a partial that the reduction reads
+// without the GEMM having written it turns the output non-finite.
+struct SplitScratch {
+    DeviceBuffer buffer{cuda_environment().context.device(), kSm100SplitPartialBytes};
+
+    Sm100Partials poisoned() {
+        buffer.fill(0xff);
+        return {static_cast<float*>(buffer.data()), kSm100SplitPartialBytes};
+    }
+};
+
+// A split case whose plan stopped cutting tiles would only repeat a whole-K case.
+int require_split(const std::string& label, const Sm100GemmPlan& plan) {
+    if (plan.split_tiles > 0) return 0;
+    std::cerr << label << ": the plan runs every tile over the whole K loop\n";
+    return 1;
+}
+
+std::string case_label(const char* format, int kind, int tokens, int rows, int k, bool split) {
+    std::string label = std::string("sm100 ") + format + " " + kind_name(kind) + " t" +
+                        std::to_string(tokens);
+    if (split) label += " r" + std::to_string(rows) + " k" + std::to_string(k) + " split";
+    return label;
+}
+
+int nvfp4_case(int kind, int tokens, int k = 1024, bool split = false) {
+    constexpr int kRows    = 1536;
     constexpr float kAlpha = 1.F / 64.F;
-    const Fp4Matrix w = make_fp4(kRows, kK, 11U), x = make_fp4(tokens, kK, 12U);
-    const auto acc    = contract(w.dequantized, x.dequantized, kRows, kK, tokens);
+    const std::string label = case_label("nvfp4", kind, tokens, kRows, k, split);
+    if (split && require_split(label, nvfp4_sm100_plan(kRows, k, tokens, kSm100SplitPartialBytes)))
+        return 1;
+    const Fp4Matrix w = make_fp4(kRows, k, 11U), x = make_fp4(tokens, k, 12U);
+    const auto acc    = contract(w.dequantized, x.dequantized, kRows, k, tokens);
     const auto wc = to_device(w.codes), ws = to_device(w.scales), xc = to_device(x.codes),
                xs = to_device(x.scales);
     const Nvfp4A4Operands operands{static_cast<const std::uint8_t*>(xc.data()),
@@ -166,15 +201,17 @@ int nvfp4_case(int kind, int tokens) {
                                    static_cast<const std::uint8_t*>(wc.data()),
                                    static_cast<const std::uint8_t*>(ws.data()),
                                    kRows,
-                                   kK,
+                                   k,
                                    tokens,
                                    kAlpha,
                                    Nvfp4ScaleLayout::K16M128x4};
-    return check_epilogue(std::string("sm100 nvfp4 ") + kind_name(kind) + " t" +
-                              std::to_string(tokens),
-                          kind, acc, kRows, tokens, kAlpha, {0.05, 0.02},
+    std::optional<SplitScratch> scratch;
+    if (split) scratch.emplace();
+    return check_epilogue(label, kind, acc, kRows, tokens, kAlpha, {0.05, 0.02},
                           [&](const Sm100Epilogue& e, __nv_bfloat16* y) {
-                              launch_sm100_nvfp4_gemm(operands, e, y, nullptr);
+                              launch_sm100_nvfp4_gemm(operands, e, y, nullptr,
+                                                      scratch ? scratch->poisoned()
+                                                              : Sm100Partials{});
                           });
 }
 
@@ -197,6 +234,53 @@ int bf16_case(int kind, int tokens, int k = 1024) {
                           [&](const Sm100Epilogue& e, __nv_bfloat16* y) {
                               launch_sm100_bf16_gemm(operands, e, y, nullptr);
                           });
+}
+
+// Router scores: 257 weight rows end inside a 128-row tile and the FP32 results are stored with a
+// padded token stride, which the columns past the rows must leave untouched.
+int scores_case(int tokens) {
+    constexpr int kRows = 257, kStride = 260, kK = 3072;
+    std::vector<float> w(static_cast<std::size_t>(kRows) * kK),
+        x(static_cast<std::size_t>(tokens) * kK);
+    fill_uniform(w, 41U, -1.F, 1.F);
+    fill_uniform(x, 42U, -1.F, 1.F);
+    round_to_bf16(w);
+    round_to_bf16(x);
+    const auto acc = contract(w, x, kRows, kK, tokens);
+    const auto dw = to_device_bf16(w), dx = to_device_bf16(x);
+    DeviceBuffer y(cuda_environment().context.device(),
+                   static_cast<std::size_t>(tokens) * kStride * sizeof(float));
+    y.fill(0xff);
+    Sm100Epilogue epilogue;
+    epilogue.kind         = Sm100Epilogue::Scores;
+    epilogue.scores       = static_cast<float*>(y.data());
+    epilogue.score_stride = kStride;
+    const Sm100Bf16Operands operands{static_cast<const __nv_bfloat16*>(dx.data()),
+                                     static_cast<const __nv_bfloat16*>(dw.data()), kRows, kK,
+                                     tokens};
+    launch_sm100_bf16_gemm(operands, epilogue, nullptr, nullptr);
+    cuda_check_last_launch("sm100 scores");
+    cuda_synchronize();
+    const std::vector<float> values =
+        from_device<float>(y, static_cast<std::size_t>(tokens) * kStride);
+    std::vector<double> got, expected;
+    int padding_failures = 0;
+    for (int t = 0; t < tokens; ++t) {
+        for (int r = 0; r < kRows; ++r) {
+            got.push_back(values[static_cast<std::size_t>(t) * kStride + r]);
+            expected.push_back(acc[static_cast<std::size_t>(t) * kRows + r]);
+        }
+        for (int r = kRows; r < kStride; ++r) {
+            std::uint32_t bits;
+            std::memcpy(&bits, &values[static_cast<std::size_t>(t) * kStride + r], sizeof(bits));
+            if (bits != 0xffffffffU) ++padding_failures;
+        }
+    }
+    if (padding_failures != 0)
+        std::cerr << "sm100 scores t" << tokens << ": " << padding_failures
+                  << " padding columns were written\n";
+    return padding_failures + verify_pointwise("sm100 scores t" + std::to_string(tokens), got,
+                                               expected, {2e-3, 2e-4});
 }
 
 // E4M3 codes drawn over the finite range with one FP32 scale per row; the dequantized values
@@ -225,25 +309,105 @@ Fp8Matrix make_fp8(int rows, int k, std::uint32_t seed) {
     return m;
 }
 
-int fp8_case(int kind, int tokens, int k = 1024) {
-    constexpr int kRows = 1536;
-    const Fp8Matrix w = make_fp8(kRows, k, 31U), x = make_fp8(tokens, k, 32U);
-    const auto acc    = contract(w.dequantized, x.dequantized, kRows, k, tokens);
+Sm100Fp8Operands fp8_operands(const DeviceBuffer& wc, const DeviceBuffer& ws,
+                              const DeviceBuffer& xc, const DeviceBuffer& xs, int rows, int k,
+                              int tokens) {
+    return {static_cast<const std::uint8_t*>(xc.data()), static_cast<const float*>(xs.data()),
+            static_cast<const std::uint8_t*>(wc.data()), static_cast<const float*>(ws.data()),
+            rows,
+            k,
+            tokens};
+}
+
+int fp8_case(int kind, int tokens, int k = 1024, int rows = 1536, bool split = false) {
+    const std::string label = case_label("fp8", kind, tokens, rows, k, split);
+    if (split && require_split(label, fp8_sm100_plan(rows, k, tokens, kSm100SplitPartialBytes)))
+        return 1;
+    const Fp8Matrix w = make_fp8(rows, k, 31U), x = make_fp8(tokens, k, 32U);
+    const auto acc    = contract(w.dequantized, x.dequantized, rows, k, tokens);
     const auto wc = to_device(w.codes), ws = to_device(w.scales), xc = to_device(x.codes),
                xs = to_device(x.scales);
-    const Sm100Fp8Operands operands{static_cast<const std::uint8_t*>(xc.data()),
-                                    static_cast<const float*>(xs.data()),
-                                    static_cast<const std::uint8_t*>(wc.data()),
-                                    static_cast<const float*>(ws.data()),
-                                    kRows,
-                                    k,
-                                    tokens};
-    return check_epilogue(std::string("sm100 fp8 ") + kind_name(kind) + " t" +
-                              std::to_string(tokens),
-                          kind, acc, kRows, tokens, 1.0, {0.05, 0.01},
+    const Sm100Fp8Operands operands = fp8_operands(wc, ws, xc, xs, rows, k, tokens);
+    std::optional<SplitScratch> scratch;
+    if (split) scratch.emplace();
+    return check_epilogue(label, kind, acc, rows, tokens, 1.0, {0.05, 0.01},
                           [&](const Sm100Epilogue& e, __nv_bfloat16* y) {
-                              launch_sm100_fp8_gemm(operands, e, y, nullptr);
+                              launch_sm100_fp8_gemm(operands, e, y, nullptr,
+                                                    scratch ? scratch->poisoned()
+                                                            : Sm100Partials{});
                           });
+}
+
+// A split call sums the K partials of a tile in a fixed order, so repeated calls store the same
+// bits for the whole and the cut tiles alike.
+int split_determinism_case() {
+    constexpr int kRows = 20480, kK = 3072, kTokens = 40;
+    const std::string label = "sm100 fp8 split determinism";
+    if (require_split(label, fp8_sm100_plan(kRows, kK, kTokens, kSm100SplitPartialBytes)))
+        return 1;
+    const Fp8Matrix w = make_fp8(kRows, kK, 41U), x = make_fp8(kTokens, kK, 42U);
+    const auto wc = to_device(w.codes), ws = to_device(w.scales), xc = to_device(x.codes),
+               xs = to_device(x.scales);
+    const Sm100Fp8Operands operands = fp8_operands(wc, ws, xc, xs, kRows, kK, kTokens);
+    const std::size_t count         = static_cast<std::size_t>(kTokens) * kRows;
+    SplitScratch scratch;
+    std::array<std::vector<std::uint16_t>, 2> runs;
+    for (auto& run : runs) {
+        DeviceBuffer y(cuda_environment().context.device(), count * 2);
+        y.fill(0xff);
+        launch_sm100_fp8_gemm(operands, {}, static_cast<__nv_bfloat16*>(y.data()), nullptr,
+                              scratch.poisoned());
+        cuda_check_last_launch("sm100 fp8 split");
+        cuda_synchronize();
+        run = from_device<std::uint16_t>(y, count);
+    }
+    if (runs[0] == runs[1]) return 0;
+    std::cerr << label << ": two runs stored different bits\n";
+    return 1;
+}
+
+// Plan invariants: calls above kSm100MaxSplitTokens or without scratch run every tile over the
+// whole K loop, and a split cuts at most every tile into at least two non-empty K ranges whose
+// partial blocks fit the scratch.
+int split_plan_case() {
+    int failures      = 0;
+    const auto expect = [&](bool holds, const std::string& what) {
+        if (holds) return;
+        std::cerr << "sm100 split plan: " << what << '\n';
+        ++failures;
+    };
+    struct Shape {
+        const char* format;
+        int rows, k, k_iters;
+    };
+    for (const Shape& shape : {Shape{"fp8", 20480, 3072, 24}, Shape{"fp8", 3072, 8192, 64},
+                               Shape{"fp8", 1536, 1024, 8}, Shape{"nvfp4", 3072, 8192, 32},
+                               Shape{"nvfp4", 1536, 1024, 4}}) {
+        const bool fp8   = std::string(shape.format) == "fp8";
+        const auto plan  = [&](int tokens, std::size_t bytes) {
+            return fp8 ? fp8_sm100_plan(shape.rows, shape.k, tokens, bytes)
+                       : nvfp4_sm100_plan(shape.rows, shape.k, tokens, bytes);
+        };
+        for (int tokens = 1; tokens <= 260; ++tokens) {
+            const std::string what = std::string(shape.format) + " r" + std::to_string(shape.rows) +
+                                     " k" + std::to_string(shape.k) + " t" +
+                                     std::to_string(tokens);
+            expect(plan(tokens, 0).split_tiles == 0, what + " splits without scratch");
+            const Sm100GemmPlan p = plan(tokens, kSm100SplitPartialBytes);
+            if (p.split_tiles == 0) continue;
+            const long tiles = static_cast<long>(shape.rows / 128) *
+                               ((tokens + p.tile_tokens - 1) / p.tile_tokens);
+            const std::size_t bytes = static_cast<std::size_t>(p.split_tiles) * p.k_splits *
+                                      p.tile_tokens * 128 * sizeof(float);
+            expect(tokens <= kSm100MaxSplitTokens, what + " splits a prefill call");
+            expect(p.split_tiles <= tiles, what + " cuts more tiles than exist");
+            expect(p.k_splits >= 2 && p.k_splits <= shape.k_iters, what + " k_splits out of range");
+            expect(p.split_tiles * p.k_splits <= kSm100MaxSplitUnits &&
+                       bytes <= kSm100SplitPartialBytes,
+                   what + " partials exceed the scratch");
+        }
+    }
+    return failures;
 }
 
 // The registered 122B shapes run on tcgen05 at every token count; nothing else does.
@@ -278,6 +442,8 @@ int routing_case() {
 int main(int argc, char** argv) {
     OpSuite suite;
     suite.add("sm100/backend_routing", routing_case);
+    for (int tokens : {1, 17, 130, 600})
+        suite.add("sm100/scores/t" + std::to_string(tokens), [=] { return scores_case(tokens); });
     for (int kind : {Sm100Epilogue::Identity, Sm100Epilogue::Add, Sm100Epilogue::Split,
                      Sm100Epilogue::SwiGLU})
         for (int tokens : {1, 130, 257}) {
@@ -286,18 +452,43 @@ int main(int argc, char** argv) {
             suite.add(std::string("sm100/bf16/") + kind_name(kind) + "/t" + std::to_string(tokens),
                       [=] { return bf16_case(kind, tokens); });
         }
-    // Calls of 3072 tokens and more run 256-token BF16 tiles; 3200 ends in a half tile.
+    // Large calls run 256-token BF16 tiles; 3200 ends in a half tile.
     for (int kind : {Sm100Epilogue::Identity, Sm100Epilogue::Add, Sm100Epilogue::Split})
         suite.add(std::string("sm100/bf16/") + kind_name(kind) + "/t3200",
                   [=] { return bf16_case(kind, 3200, 256); });
     suite.add("sm100/bf16/identity/t3072",
               [] { return bf16_case(Sm100Epilogue::Identity, 3072, 256); });
+    // Token counts that select the 64-, 128- and 256-token tiles of the 1536-row cases.
+    for (int tokens : {600, 1100, 2000}) {
+        suite.add("sm100/bf16/identity/t" + std::to_string(tokens),
+                  [=] { return bf16_case(Sm100Epilogue::Identity, tokens, 256); });
+        suite.add("sm100/bf16/swiglu/t" + std::to_string(tokens),
+                  [=] { return bf16_case(Sm100Epilogue::SwiGLU, tokens, 256); });
+        suite.add("sm100/fp8/identity/t" + std::to_string(tokens),
+                  [=] { return fp8_case(Sm100Epilogue::Identity, tokens, 256); });
+    }
     for (int kind : {Sm100Epilogue::Identity, Sm100Epilogue::Add, Sm100Epilogue::Split}) {
         for (int tokens : {1, 17, 130, 257})
             suite.add(std::string("sm100/fp8/") + kind_name(kind) + "/t" + std::to_string(tokens),
                       [=] { return fp8_case(kind, tokens); });
         suite.add(std::string("sm100/fp8/") + kind_name(kind) + "/t3200",
                   [=] { return fp8_case(kind, 3200, 256); });
+    }
+    // Decode calls given split-K scratch: 1536 rows and K 8192 cut every tile, 20480 rows and
+    // K 3072 run whole tiles before the cut ones; 100 tokens end inside a 128-token tile.
+    suite.add("sm100/split_plan", split_plan_case);
+    suite.add("sm100/fp8/split_determinism", split_determinism_case);
+    for (int kind : {Sm100Epilogue::Identity, Sm100Epilogue::Add, Sm100Epilogue::Split}) {
+        const std::string name = kind_name(kind);
+        for (int tokens : {16, 100}) {
+            suite.add("sm100/nvfp4/" + name + "/t" + std::to_string(tokens) + "/split",
+                      [=] { return nvfp4_case(kind, tokens, 8192, true); });
+            suite.add("sm100/fp8/" + name + "/t" + std::to_string(tokens) + "/split",
+                      [=] { return fp8_case(kind, tokens, 8192, 1536, true); });
+        }
+        const int tokens = kind == Sm100Epilogue::Add ? 40 : 16;
+        suite.add("sm100/fp8/" + name + "/t" + std::to_string(tokens) + "/r20480/split",
+                  [=] { return fp8_case(kind, tokens, 3072, 20480, true); });
     }
     return suite.main(argc, argv);
 }

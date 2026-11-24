@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ops/linear/kernels/fp8/fp8_a8_plan.h"
+#include "ops/linear/kernels/sm100/gemm.h"
 #include "ops/linear/split/operands.h"
 
 #include <array>
@@ -67,7 +68,9 @@ void bf16_split_n20480_k3072_dispatch(const Tensor& x, const Weight& weight,
                                       std::span<const Tensor> outputs, cudaStream_t stream);
 
 // B200 only. The same geometry with E4M3 row-scaled weights: quantizes x into `workspace` and runs
-// the tcgen05 GEMM. The caller owns operand validation and the scratch.
+// the tcgen05 GEMM. The caller owns operand validation and the scratch; workspace partials of
+// kFp8SplitN20480K3072PartialBytes let a decode call split its K loop across idle SMs.
+inline constexpr std::size_t kFp8SplitN20480K3072PartialBytes = kSm100SplitPartialBytes;
 void fp8_split_n20480_k3072_dispatch(const Tensor& x, const Weight& weight,
                                      std::span<const Tensor> outputs, Fp8A8Workspace workspace,
                                      cudaStream_t stream);

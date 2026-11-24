@@ -4,14 +4,19 @@
 //
 // Roles of one 320-thread CTA (one CTA per SM, ~210 KiB of shared memory):
 //   warps 0-3   softmax / epilogue. Thread t owns packed query row t: the 128-lane TMEM accumulator
-//               maps one row to one lane, so row maxima and sums never cross threads.
+//               maps one row to one lane, so row maxima and sums never cross threads. A one-token
+//               entry (decode) instead stores its 16 query rows once per lane quadrant, and warp q
+//               takes a quarter of every key tile (fill_q_decode, softmax_decode, epilogue_decode).
 //   warp 4      MMA issue (one elected thread): S = Q.K^T into S[b], O += P.V
-//   warp 5      TMEM allocation
+//   warp 5      TMEM allocation; for native FP8, the page producer (one bulk copy group per page
+//               into a two-stage page ring, produce_pages)
 //   warps 6-9   Q preparation, then the K/V tile producer (copy or dequantize into the swizzled
-//               shared-memory layouts the UMMA descriptors read)
+//               shared-memory layouts the UMMA descriptors read), from global memory or, for native
+//               FP8, from the staged pages
 //
 // Tensor memory: S double buffer (64 columns per buffer; two 64-column groups for native FP8), then
-// the 256-column O accumulator. Shared memory: [K0 K1 V0 V1 P] ring, Q, per-row/key scales, barriers.
+// the 256-column O accumulator. Shared memory: [K0 K1 V0 V1 P] ring (followed by the page ring for
+// native FP8), Q, per-row/key scales, barriers.
 //
 // Operand layouts (all 128B-swizzled, 16-byte slot s of row r stored at slot s ^ (r & 7)):
 //   Q  (A, K-major)    chunk c = 64 bf16 (128 fp8) features, 128 rows x 128 B per chunk
@@ -39,6 +44,15 @@ using Geometry = CausalD256H32Kv2;
 
 inline constexpr int kGroup = Geometry::GroupSize; // query heads per KV head
 
+// Shared bytes of one staged page. Only the native FP8 policy stages its pages.
+template <class Policy>
+constexpr int page_stage_bytes() {
+    if constexpr (Policy::kNativeFp8)
+        return Policy::kPageBytes;
+    else
+        return 0;
+}
+
 template <KvDType Kv>
 struct Cfg {
     using Policy                    = KvPolicy<Kv>;
@@ -53,16 +67,22 @@ struct Cfg {
     static constexpr int kKBytes = kNative ? kKeys * kD : kKeys * kD * 2; // per stage
     static constexpr int kVBytes = kKeys * kD * 2;                        // per stage
     static constexpr int kPBytes = kRows * kKeys * 2;
+    // Native FP8 pages reach the loader warps through two page stages that warp 5 fills by bulk
+    // copy (see produce_pages).
+    static constexpr int kPageStages = kNative ? 2 : 0;
+    static constexpr int kPageBytes  = page_stage_bytes<Policy>();
     // Epilogue transposition scratch: 4 warps x 32 rows x (256 + 1) fp32.
     static constexpr int kScratchStride = 257;
     static constexpr int kScratchBytes  = 4 * 32 * kScratchStride * 4;
-    static constexpr int kRingUsed      = 2 * kKBytes + 2 * kVBytes + kPBytes;
+    static constexpr int kRingUsed =
+        2 * kKBytes + 2 * kVBytes + kPBytes + kPageStages * kPageBytes;
     static constexpr int kRingBytes =
         ((kRingUsed > kScratchBytes ? kRingUsed : kScratchBytes) + 1023) / 1024 * 1024;
 
     static constexpr int kKOff      = 0;
     static constexpr int kVOff      = 2 * kKBytes;
     static constexpr int kPOff      = kVOff + 2 * kVBytes;
+    static constexpr int kPageOff   = kPOff + kPBytes;
     static constexpr int kQOff      = kRingBytes;
     static constexpr int kQScaleOff = kQOff + kQBytes;
     static constexpr int kKScaleOff = kQScaleOff + kRows * 4;
@@ -229,31 +249,40 @@ struct Shared {
     std::uint64_t* pv_done;
     std::uint64_t* o_full;
     std::uint32_t* tmem_slot;
+    unsigned char* page;
+    std::uint64_t* page_full;  // [2]
+    std::uint64_t* page_empty; // [2]
 
     __device__ __forceinline__ unsigned char* k_stage(int s) const { return k + s * C::kKBytes; }
     __device__ __forceinline__ unsigned char* v_stage(int s) const { return v + s * C::kVBytes; }
+    __device__ __forceinline__ unsigned char* page_stage(int s) const {
+        return page + s * C::kPageBytes;
+    }
 };
 
 template <class C>
 __device__ __forceinline__ Shared<C> make_shared(unsigned char* base) {
     Shared<C> s{};
-    s.k         = base + C::kKOff;
-    s.v         = base + C::kVOff;
-    s.p         = base + C::kPOff;
-    s.q         = base + C::kQOff;
-    s.scratch   = base;
-    s.q_scale   = reinterpret_cast<float*>(base + C::kQScaleOff);
-    s.k_scale   = reinterpret_cast<float*>(base + C::kKScaleOff);
-    auto* bar   = reinterpret_cast<std::uint64_t*>(base + C::kBarOff);
-    s.q_full    = bar;
-    s.kv_full   = bar + 1;
-    s.kv_empty  = bar + 3;
-    s.s_full    = bar + 5;
-    s.s_empty   = bar + 7;
-    s.p_full    = bar + 9;
-    s.pv_done   = bar + 10;
-    s.o_full    = bar + 11;
-    s.tmem_slot = reinterpret_cast<std::uint32_t*>(bar + 12);
+    s.k          = base + C::kKOff;
+    s.v          = base + C::kVOff;
+    s.p          = base + C::kPOff;
+    s.q          = base + C::kQOff;
+    s.scratch    = base;
+    s.q_scale    = reinterpret_cast<float*>(base + C::kQScaleOff);
+    s.k_scale    = reinterpret_cast<float*>(base + C::kKScaleOff);
+    auto* bar    = reinterpret_cast<std::uint64_t*>(base + C::kBarOff);
+    s.q_full     = bar;
+    s.kv_full    = bar + 1;
+    s.kv_empty   = bar + 3;
+    s.s_full     = bar + 5;
+    s.s_empty    = bar + 7;
+    s.p_full     = bar + 9;
+    s.pv_done    = bar + 10;
+    s.o_full     = bar + 11;
+    s.tmem_slot  = reinterpret_cast<std::uint32_t*>(bar + 12);
+    s.page       = base + C::kPageOff;
+    s.page_full  = bar + 13;
+    s.page_empty = bar + 15;
     return s;
 }
 
@@ -298,7 +327,12 @@ __device__ __forceinline__ void fill_q(const FmhaParams& p, const Work& w,
     };
     // The loads of kBatch rows are in flight together: one memory round trip serves them all.
     constexpr int kBatch = 4;
-    for (int row0 = warp; row0 < C::kRows; row0 += 4 * kBatch) {
+    constexpr int kSpan  = 4 * kBatch; // rows of one iteration over the four loader warps
+    // Rows of tokens past `live` hold no query (at decode all but the first 16). Only the
+    // iterations that hold a live row transform and quantize; the rows after them are cleared.
+    const int live_rows = min(max(w.live * kGroup - w.row_begin, 0), C::kRows);
+    const int filled    = (live_rows + kSpan - 1) / kSpan * kSpan;
+    for (int row0 = warp; row0 < filled; row0 += kSpan) {
         float v[kBatch][8];
         bool valid[kBatch];
 #pragma unroll
@@ -316,11 +350,92 @@ __device__ __forceinline__ void fill_q(const FmhaParams& p, const Work& w,
 #pragma unroll
         for (int b = 0; b < kBatch; ++b) finish(row0 + 4 * b, v[b], valid[b]);
     }
+    // Row r of chunk c is the 128 bytes at c * kRows * 128 + r * 128 (the swizzle stays inside a
+    // row), so the cleared rows of a chunk are one contiguous range.
+    constexpr int kChunkBytes = C::kRows * 128;
+    constexpr int kChunks     = C::kQBytes / kChunkBytes;
+    const int clear_bytes     = (C::kRows - filled) * 128;
+    for (int i = ltid * 16; i < kChunks * clear_bytes; i += 128 * 16) {
+        const int chunk = i / clear_bytes;
+        *reinterpret_cast<uint4*>(sh.q + chunk * kChunkBytes + filled * 128 +
+                                  (i - chunk * clear_bytes)) = make_uint4(0, 0, 0, 0);
+    }
+    if constexpr (C::kNative)
+        for (int row = filled + ltid; row < C::kRows; row += 128) sh.q_scale[row] = 0.0f;
 }
 
-// One loader thread's share of a K/V tile, held in registers between its global loads and its
-// shared-memory stores. Issuing every load of a tile before the first store makes a tile cost one
-// memory round trip, and lets the next tile's loads run while the MMA and softmax work on this one.
+// Loader warps for a one-token entry (decode): its 16 query rows, each stored in all four TMEM
+// lane quadrants (tile rows r, 32 + r, 64 + r, 96 + r) so that softmax warp q owns copy q (see
+// softmax_decode). Rows 16-31 of every quadrant are zero.
+template <KvDType Kv>
+__device__ __forceinline__ void fill_q_decode(const FmhaParams& p, const Work& w,
+                                              const Shared<Cfg<Kv>>& sh, int ltid) {
+    using C              = Cfg<Kv>;
+    constexpr int kOwned = kGroup / 4; // query rows of one loader warp
+    const int warp = ltid >> 5, lane = ltid & 31;
+    // Every row holds a query, so the transforms of a warp's rows run without branches and overlap.
+    float v[kOwned][8];
+#pragma unroll
+    for (int b = 0; b < kOwned; ++b) {
+        const __nv_bfloat16* src =
+            p.q + causal_q_index<Geometry>(w.kv_head * kGroup + warp + 4 * b, 0, w.token_base);
+#pragma unroll
+        for (int r = 0; r < 8; ++r) v[b][r] = __bfloat162float(src[lane + 32 * r]);
+    }
+    if constexpr (C::Policy::kRotate) {
+#pragma unroll
+        for (int b = 0; b < kOwned; ++b) kv::normalized_hadamard_d256_inplace(v[b], lane);
+    }
+#pragma unroll
+    for (int b = 0; b < kOwned; ++b) {
+        const int row = warp + 4 * b;
+        if constexpr (!C::kNative) {
+#pragma unroll
+            for (int r = 0; r < 8; ++r) {
+                const int d                = lane + 32 * r;
+                const __nv_bfloat16 value = __float2bfloat16(v[b][r]);
+#pragma unroll
+                for (int q = 0; q < 4; ++q)
+                    *reinterpret_cast<__nv_bfloat16*>(sh.q + (d >> 6) * 16384 +
+                                                      sw128(32 * q + row, (d & 63) >> 3) +
+                                                      (d & 7) * 2) = value;
+            }
+        } else {
+            float amax = 0.0f;
+#pragma unroll
+            for (int r = 0; r < 8; ++r) amax = fmaxf(amax, fabsf(v[b][r]));
+            amax = common::warp_max(amax, 0xffffffffu);
+            const float qs  = amax > 0.0f ? amax / common::kFp8E4M3MaxFinite : 0.0f;
+            const float inv = qs > 0.0f ? 1.0f / qs : 0.0f;
+#pragma unroll
+            for (int r = 0; r < 8; ++r) {
+                const int d             = lane + 32 * r;
+                const std::uint8_t code = common::fp8_quant_code(v[b][r], inv);
+#pragma unroll
+                for (int q = 0; q < 4; ++q)
+                    sh.q[(d >> 7) * 16384 + sw128(32 * q + row, (d & 127) >> 4) + (d & 15)] = code;
+            }
+            if (lane < 4) sh.q_scale[32 * lane + row] = qs;
+        }
+    }
+    // Rows 16-31 of quadrant q in chunk c are the 2048 bytes at c * kRows * 128 + (32q + 16) * 128.
+    constexpr int kChunkBytes = C::kRows * 128;
+    constexpr int kChunks     = C::kQBytes / kChunkBytes;
+    constexpr int kUnits      = kGroup * 128 / 16; // 16-byte units of one quadrant's empty rows
+    for (int i = ltid; i < kChunks * 4 * kUnits; i += 128) {
+        const int block = i / kUnits;
+        *reinterpret_cast<uint4*>(sh.q + (block >> 2) * kChunkBytes +
+                                  (32 * (block & 3) + kGroup) * 128 + (i % kUnits) * 16) =
+            make_uint4(0, 0, 0, 0);
+    }
+    if constexpr (C::kNative)
+        if (ltid < 4 * kGroup) sh.q_scale[32 * (ltid / kGroup) + kGroup + ltid % kGroup] = 0.0f;
+}
+
+// One loader thread's share of a K/V tile, held in registers between its loads (global, or from a
+// staged page) and its shared-memory stores. Issuing every load of a tile before the first store
+// makes a tile cost one memory round trip, and lets the next tile's loads run while the MMA and
+// softmax work on this one.
 template <KvDType Kv>
 struct TileRegs {
     using C                      = Cfg<Kv>;
@@ -402,6 +517,63 @@ __device__ __forceinline__ void store_kv(const TileRegs<Kv>& regs, int stage,
             sh.k_scale[stage * 2 * C::kKeys + 2 * ltid + 1] = s1;
         }
     }
+}
+
+__device__ __forceinline__ const std::int64_t* split_page_table(const FmhaParams& p,
+                                                                const Work& w) {
+    return p.cache.tables +
+           static_cast<std::int64_t>(p.cache.table_rows ? p.cache.table_rows[w.row] : 0) *
+               p.cache.table_stride +
+           (w.split_start >> 6);
+}
+
+// Warp 5 (native FP8): the pages of the split, page j into page stage j & 1 once the loader warps
+// have read page j - 2 from it. Lane l holds the record of page l of each run of 32 pages.
+template <KvDType Kv>
+__device__ __forceinline__ void produce_pages(const FmhaParams& p, const Work& w,
+                                              const Shared<Cfg<Kv>>& sh, int lane) {
+    using C      = Cfg<Kv>;
+    using Policy = typename C::Policy;
+    static_assert(Policy::kPageCodeBytes == C::kKeys * C::kD);
+    const std::int64_t* table = split_page_table(p, w);
+    std::int64_t records      = 0;
+    for (int j = 0; j < w.n_tiles; ++j) {
+        if ((j & 31) == 0) records = j + lane < w.n_tiles ? table[j + lane] : 0;
+        const std::int64_t record = __shfl_sync(0xffffffffu, records, j & 31);
+        const int stage           = j & 1;
+        sm::mbarrier_wait(&sh.page_empty[stage], ((j >> 1) & 1) ^ 1u);
+        if (lane == 0)
+            Policy::stage_page(p.cache, record, w.kv_head, sh.page_stage(stage),
+                               &sh.page_full[stage]);
+    }
+}
+
+// Loader warps (native FP8): load_kv from the staged page of tile `tile`. Unit ltid + 128 * it of
+// load_kv keeps the thread's feature slice and moves 128 / kVec rows per iteration, so every
+// iteration reads at a fixed offset from the thread's first unit.
+template <KvDType Kv>
+__device__ __forceinline__ void load_staged_kv(const Work& w, int tile, const unsigned char* page,
+                                               int ltid, TileRegs<Kv>& regs) {
+    using C      = Cfg<Kv>;
+    using Policy = typename C::Policy;
+    using Regs   = TileRegs<Kv>;
+    static_assert(128 % Regs::kVecK == 0 && 128 % Regs::kVecV == 0);
+    const int live  = w.end - (w.split_start + tile * C::kKeys); // rows from `live` on are zero
+    const int k_row = ltid / Regs::kVecK, k_d = ltid % Regs::kVecK * 16;
+    const int v_row = ltid / Regs::kVecV, v_d = ltid % Regs::kVecV * 8;
+#pragma unroll
+    for (int it = 0; it < Regs::kKIters; ++it) {
+        const int row = k_row + it * (128 / Regs::kVecK);
+        regs.k[it]    = row < live ? Policy::staged_k16(page, row, k_d) : make_uint4(0, 0, 0, 0);
+    }
+#pragma unroll
+    for (int it = 0; it < Regs::kVIters; ++it) {
+        const int row = v_row + it * (128 / Regs::kVecV);
+        regs.v[it]    = typename Regs::VRaw{};
+        if (row < live) regs.v[it] = Policy::staged_v8_raw(page, row, v_d);
+    }
+    regs.k_valid = ltid < C::kKeys && ltid < live;
+    regs.k_pair  = regs.k_valid ? Policy::staged_k_scale_pair(page, ltid) : 0u;
 }
 
 // Warp 4: one elected thread issues every tcgen05.mma of the CTA in order
@@ -562,7 +734,10 @@ __device__ __forceinline__ void softmax_role(const FmhaParams& p, const Work& w,
             tile_max = fmaxf(tile_max, x[i]);
         }
         const float m_new = fmaxf(m, tile_max);
-        const float alpha = m == kNegInf ? 0.0f : common::exp2_approx(m - m_new);
+        // A row without an unmasked key so far holds O = 0 and l = 0, so its factor is immaterial;
+        // 1 lets a warp skip the O rescale when its other rows keep their maxima (at decode, most
+        // rows of the tile hold no query).
+        const float alpha = m == kNegInf ? 1.0f : common::exp2_approx(m - m_new);
         float sum = 0.0f;
 #pragma unroll
         for (int i = 0; i < C::kKeys; ++i) {
@@ -587,6 +762,128 @@ __device__ __forceinline__ void softmax_role(const FmhaParams& p, const Work& w,
                            *reinterpret_cast<const unsigned*>(&h1),
                            *reinterpret_cast<const unsigned*>(&h2),
                            *reinterpret_cast<const unsigned*>(&h3));
+        }
+        if (j > 0 && __any_sync(0xffffffffu, alpha != 1.0f)) {
+            const std::uint32_t o_lane = t_lane + C::kOCol;
+#pragma unroll 2
+            for (int cc = 0; cc < C::kD / 32; ++cc) {
+                std::uint32_t r[32];
+                sm::tmem_load_32x32b<32>(o_lane + cc * 32, r);
+                sm::tmem_load_wait();
+#pragma unroll
+                for (int i = 0; i < 32; ++i) r[i] = __float_as_uint(__uint_as_float(r[i]) * alpha);
+                tmem_store_32x32b_x32(o_lane + cc * 32, r);
+            }
+            sm::tmem_store_wait();
+        }
+        sm::fence_proxy_async_shared();
+        sm::fence_before_thread_sync();
+        sm::mbarrier_arrive(sh.p_full);
+    }
+    m_out = m;
+    l_out = l;
+}
+
+// The running maximum of softmax_decode moves only once a score exceeds it by this much (log2
+// units): probabilities then stay at most 2^8 in fp16, and the O rescale is rare.
+inline constexpr float kDecodeSlack = 8.0f;
+
+// Warps 0-3 for a one-token entry (decode): warp q holds copy q of the 16 query rows (TMEM lanes
+// 32q .. 32q + 15, see fill_q_decode) and keys [16q, 16q + 16) of every tile, an online softmax
+// over a quarter of the keys that epilogue_decode merges. P keeps zeros outside the warp's keys
+// and in the rows past the queries (written once), so the shared P.V MMA accumulates the partial
+// O of every quadrant in its own lanes.
+template <KvDType Kv>
+__device__ __forceinline__ void softmax_decode(const FmhaParams& p, const Work& w,
+                                               const Shared<Cfg<Kv>>& sh, std::uint32_t tmem,
+                                               int tid, float& m_out, float& l_out) {
+    using C              = Cfg<Kv>;
+    constexpr int kSlice = C::kKeys / 4;
+    const int warp       = tid >> 5;
+    const int key0       = warp * kSlice;
+    const bool query     = (tid & 31) < kGroup;
+    const int limit      = query ? min(p.positions[w.token_base] + 1, w.end) : 0;
+    const std::uint32_t t_lane = tmem + (static_cast<std::uint32_t>(warp * 32) << 16);
+
+#pragma unroll
+    for (int v = 0; v < C::kKeys / 8; ++v)
+        *reinterpret_cast<uint4*>(sh.p + sw128(tid, v)) = make_uint4(0, 0, 0, 0);
+
+    float scale_log2 = p.scale * common::kLog2E;
+    if constexpr (C::kNative) {
+        sm::mbarrier_wait(sh.q_full, 0);
+        scale_log2 *= sh.q_scale[tid];
+    }
+    const float kNegInf = -CUDART_INF_F;
+    float m = kNegInf, l = 0.0f;
+
+    for (int j = 0; j < w.n_tiles; ++j) {
+        const int stage            = j & 1;
+        const std::uint32_t parity = (j >> 1) & 1;
+        sm::mbarrier_wait(&sh.s_full[stage], parity);
+        if constexpr (C::kNative) sm::mbarrier_wait(&sh.kv_full[stage], parity);
+        sm::fence_after_thread_sync();
+
+        float x[kSlice];
+        {
+            const std::uint32_t s_addr = t_lane + stage * C::kSCols + key0;
+            std::uint32_t r0[kSlice];
+            sm::tmem_load_32x32b<kSlice>(s_addr, r0);
+            if constexpr (!C::kNative) {
+                sm::tmem_load_wait();
+#pragma unroll
+                for (int i = 0; i < kSlice; ++i) x[i] = __uint_as_float(r0[i]);
+            } else {
+                // Two 128-feature groups: s = S0 * ks0 + S1 * ks1 per key.
+                const float* ks = sh.k_scale + stage * 2 * C::kKeys + 2 * key0;
+                std::uint32_t r1[kSlice];
+                sm::tmem_load_32x32b<kSlice>(s_addr + C::kKeys, r1);
+                sm::tmem_load_wait();
+#pragma unroll
+                for (int i = 0; i < kSlice; ++i)
+                    x[i] = __uint_as_float(r0[i]) * ks[2 * i] +
+                           __uint_as_float(r1[i]) * ks[2 * i + 1];
+            }
+        }
+        sm::fence_before_thread_sync();
+        sm::mbarrier_arrive(&sh.s_empty[stage]);
+
+        const int k0   = w.split_start + j * C::kKeys + key0;
+        float tile_max = kNegInf;
+#pragma unroll
+        for (int i = 0; i < kSlice; ++i) {
+            x[i]     = k0 + i < limit ? x[i] * scale_log2 : kNegInf;
+            tile_max = fmaxf(tile_max, x[i]);
+        }
+        // From -inf any finite maximum moves m; O is still zero then, so the factor is 1.
+        const bool move   = tile_max > m + kDecodeSlack;
+        const float alpha = move && m != kNegInf ? common::exp2_approx(m - tile_max) : 1.0f;
+        if (move) m = tile_max;
+        float sum = 0.0f;
+#pragma unroll
+        for (int i = 0; i < kSlice; ++i) {
+            x[i] = x[i] == kNegInf ? 0.0f : common::exp2_approx(x[i] - m);
+            sum += x[i];
+        }
+        l = l * alpha + sum;
+
+        if (j > 0) {
+            sm::mbarrier_wait(sh.pv_done, (j - 1) & 1);
+            sm::fence_after_thread_sync();
+        }
+        if (query) {
+#pragma unroll
+            for (int v = 0; v < kSlice / 8; ++v) {
+                const __half2 h0 = __floats2half2_rn(x[8 * v], x[8 * v + 1]);
+                const __half2 h1 = __floats2half2_rn(x[8 * v + 2], x[8 * v + 3]);
+                const __half2 h2 = __floats2half2_rn(x[8 * v + 4], x[8 * v + 5]);
+                const __half2 h3 = __floats2half2_rn(x[8 * v + 6], x[8 * v + 7]);
+                *reinterpret_cast<uint4*>(sh.p + sw128(tid, key0 / 8 + v)) =
+                    make_uint4(*reinterpret_cast<const unsigned*>(&h0),
+                               *reinterpret_cast<const unsigned*>(&h1),
+                               *reinterpret_cast<const unsigned*>(&h2),
+                               *reinterpret_cast<const unsigned*>(&h3));
+            }
         }
         if (j > 0 && __any_sync(0xffffffffu, alpha != 1.0f)) {
             const std::uint32_t o_lane = t_lane + C::kOCol;
@@ -743,6 +1040,97 @@ __device__ __forceinline__ void epilogue(const FmhaParams& p, const Work& w,
     }
 }
 
+// Warps 0-3 after the last P.V of a one-token entry: merge the four quadrant partials of every
+// query row in quadrant order, then publish as `epilogue` does. The idle K/V ring holds the scaled
+// partials; warp q then finishes query rows 4q .. 4q + 3, lane l holding features l + 32 i.
+template <KvDType Kv>
+__device__ __forceinline__ void epilogue_decode(const FmhaParams& p, const Work& w,
+                                                const Shared<Cfg<Kv>>& sh, std::uint32_t tmem,
+                                                int tid, float m, float l) {
+    using C               = Cfg<Kv>;
+    constexpr int kStride = C::kD + 4; // fp32 row stride of a partial, off the bank period
+    const int warp = tid >> 5, lane = tid & 31, row = lane & (kGroup - 1);
+    const bool query = lane < kGroup;
+    float* partial   = reinterpret_cast<float*>(sh.scratch); // [quadrant][row][kStride]
+    float* maxima    = partial + 4 * kGroup * kStride;       // [quadrant][row]
+    float* sums      = maxima + 4 * kGroup;                  // [quadrant][row], scaled
+    static_assert((4 * kGroup * kStride + 8 * kGroup) * 4 <= C::kRingBytes);
+    const float kNegInf = -CUDART_INF_F;
+
+    sm::mbarrier_wait(sh.o_full, 0);
+    sm::fence_after_thread_sync();
+    if (query) maxima[warp * kGroup + row] = m;
+    asm volatile("bar.sync 1, 128;" ::: "memory");
+    float row_max = kNegInf;
+#pragma unroll
+    for (int q = 0; q < 4; ++q) row_max = fmaxf(row_max, maxima[q * kGroup + row]);
+    const float factor = m == kNegInf ? 0.0f : common::exp2_approx(m - row_max);
+    if (query) sums[warp * kGroup + row] = factor * l;
+    const std::uint32_t o_lane = tmem + (static_cast<std::uint32_t>(warp * 32) << 16) + C::kOCol;
+    float* own = partial + (warp * kGroup + row) * kStride;
+#pragma unroll 2
+    for (int cc = 0; cc < C::kD / 32; ++cc) {
+        std::uint32_t r[32];
+        sm::tmem_load_32x32b<32>(o_lane + cc * 32, r);
+        sm::tmem_load_wait();
+        if (query) {
+#pragma unroll
+            for (int i = 0; i < 8; ++i)
+                *reinterpret_cast<float4*>(own + cc * 32 + 4 * i) =
+                    make_float4(factor * __uint_as_float(r[4 * i]),
+                                factor * __uint_as_float(r[4 * i + 1]),
+                                factor * __uint_as_float(r[4 * i + 2]),
+                                factor * __uint_as_float(r[4 * i + 3]));
+        }
+    }
+    asm volatile("bar.sync 1, 128;" ::: "memory");
+
+    for (int k = 0; k < kGroup / 4; ++k) {
+        const int r    = warp * (kGroup / 4) + k;
+        const int head = w.kv_head * kGroup + r;
+        float v[8];
+#pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            const int d = lane + 32 * i;
+            v[i]        = partial[r * kStride + d];
+#pragma unroll
+            for (int q = 1; q < 4; ++q) v[i] += partial[(q * kGroup + r) * kStride + d];
+        }
+        float sum = sums[r], maximum = maxima[r];
+#pragma unroll
+        for (int q = 1; q < 4; ++q) {
+            sum += sums[q * kGroup + r];
+            maximum = fmaxf(maximum, maxima[q * kGroup + r]);
+        }
+        if (p.splits > 1) {
+            const std::int64_t batch_acc =
+                static_cast<std::int64_t>(w.batch) * 256 * Geometry::QHeads * p.width * p.splits;
+            const std::int64_t batch_stat =
+                static_cast<std::int64_t>(w.batch) * Geometry::QHeads * p.width * p.splits;
+            float* acc = p.partial.acc + batch_acc +
+                         causal_partial_index<Geometry>(head, 0, 0, w.split, p.width);
+#pragma unroll
+            for (int i = 0; i < 8; ++i) acc[lane + 32 * i] = v[i];
+            if (lane == 0) {
+                const auto stat =
+                    batch_stat + causal_stat_index<Geometry>(head, 0, w.split, p.width);
+                p.partial.maximum[stat] =
+                    maximum == kNegInf ? maximum : maximum * 0.69314718055994531f;
+                p.partial.sum[stat] = sum;
+            }
+            continue;
+        }
+        const float inv = sum > 0.0f ? __frcp_rn(sum) : 0.0f;
+#pragma unroll
+        for (int i = 0; i < 8; ++i) v[i] *= inv;
+        if constexpr (C::Policy::kInverseRotate) kv::normalized_hadamard_d256_inplace(v, lane);
+#pragma unroll
+        for (int i = 0; i < 8; ++i)
+            causal_store_output(p.out + causal_q_index<Geometry>(head, lane + 32 * i, w.token_base),
+                                v[i]);
+    }
+}
+
 template <KvDType Kv>
 __device__ __forceinline__ void run_cta(const FmhaParams& p, const Work& w) {
     using C = Cfg<Kv>;
@@ -766,6 +1154,10 @@ __device__ __forceinline__ void run_cta(const FmhaParams& p, const Work& w) {
             sm::mbarrier_init(&sh.kv_empty[s], 1);
             sm::mbarrier_init(&sh.s_full[s], 1);
             sm::mbarrier_init(&sh.s_empty[s], 128);
+            if constexpr (C::kPageStages != 0) {
+                sm::mbarrier_init(&sh.page_full[s], 1);
+                sm::mbarrier_init(&sh.page_empty[s], 128);
+            }
         }
         sm::mbarrier_init(sh.p_full, 128);
         sm::mbarrier_init(sh.pv_done, 1);
@@ -779,38 +1171,71 @@ __device__ __forceinline__ void run_cta(const FmhaParams& p, const Work& w) {
     __syncthreads();
     sm::fence_after_thread_sync();
     const std::uint32_t tmem = *sh.tmem_slot;
+    // A one-token entry fills 16 of the 128 tile rows; it spreads its keys over the softmax warps.
+    const bool decode = w.width == 1;
 
     if (warp < 4) {
         float m = 0.0f, l = 0.0f;
-        softmax_role<Kv>(p, w, sh, tmem, tid, m, l);
-        epilogue<Kv>(p, w, sh, tmem, tid, m, l);
+        if (decode) {
+            softmax_decode<Kv>(p, w, sh, tmem, tid, m, l);
+            epilogue_decode<Kv>(p, w, sh, tmem, tid, m, l);
+        } else {
+            softmax_role<Kv>(p, w, sh, tmem, tid, m, l);
+            epilogue<Kv>(p, w, sh, tmem, tid, m, l);
+        }
     } else if (warp == 4) {
         mma_role<Kv>(sh, tmem, w.n_tiles);
-    } else if (warp >= C::kLoaderWarp0) {
+    } else if (warp == 5) {
+        if constexpr (C::kPageStages != 0) produce_pages<Kv>(p, w, sh, tid & 31);
+    } else {
         const int ltid = tid - C::kLoaderWarp0 * 32;
         static_assert(C::kKeys == 64, "a cache record holds 64 keys");
-        const std::int64_t* table =
-            p.cache.tables +
-            static_cast<std::int64_t>(p.cache.table_rows ? p.cache.table_rows[w.row] : 0) *
-                p.cache.table_stride;
-        const int page0 = w.split_start >> 6;
-        // The first tile's loads overlap the Q preparation. A tile's page record is read two tiles
-        // before the tile's loads need it.
-        TileRegs<Kv> regs;
-        std::int64_t record_next = w.n_tiles > 1 ? table[page0 + 1] : 0;
-        load_kv<Kv>(p, w, 0, table[page0], ltid, regs);
-        fill_q<Kv>(p, w, sh, ltid);
-        sm::fence_proxy_async_shared();
-        sm::mbarrier_arrive(sh.q_full);
-        for (int j = 0; j < w.n_tiles; ++j) {
-            const int stage = j & 1;
-            const std::int64_t record_after = j + 2 < w.n_tiles ? table[page0 + j + 2] : 0;
-            sm::mbarrier_wait(&sh.kv_empty[stage], ((j >> 1) & 1) ^ 1u);
-            store_kv<Kv>(regs, stage, sh, ltid);
+        const auto prepare_q = [&] {
+            if (decode)
+                fill_q_decode<Kv>(p, w, sh, ltid);
+            else
+                fill_q<Kv>(p, w, sh, ltid);
             sm::fence_proxy_async_shared();
-            sm::mbarrier_arrive(&sh.kv_full[stage]);
-            if (j + 1 < w.n_tiles) load_kv<Kv>(p, w, j + 1, record_next, ltid, regs);
-            record_next = record_after;
+            sm::mbarrier_arrive(sh.q_full);
+        };
+        if constexpr (C::kPageStages != 0) {
+            // The first two pages arrive while the Q tile is prepared. A page stage is released
+            // before its tile waits for a K/V stage, so two pages stay in flight.
+            prepare_q();
+            for (int j = 0; j < w.n_tiles; ++j) {
+                const int stage            = j & 1;
+                const std::uint32_t parity = (j >> 1) & 1;
+                TileRegs<Kv> regs;
+                sm::mbarrier_wait(&sh.page_full[stage], parity);
+                load_staged_kv<Kv>(w, j, sh.page_stage(stage), ltid, regs);
+                // The arrive orders only generic-proxy accesses, and the bulk copy that refills
+                // this stage writes through the async proxy: the proxy fence keeps that copy
+                // behind the page reads above.
+                sm::fence_proxy_async_shared();
+                sm::mbarrier_arrive(&sh.page_empty[stage]);
+                sm::mbarrier_wait(&sh.kv_empty[stage], parity ^ 1u);
+                store_kv<Kv>(regs, stage, sh, ltid);
+                sm::fence_proxy_async_shared();
+                sm::mbarrier_arrive(&sh.kv_full[stage]);
+            }
+        } else {
+            const std::int64_t* table = split_page_table(p, w);
+            // The first tile's loads overlap the Q preparation. A tile's page record is read two
+            // tiles before the tile's loads need it.
+            TileRegs<Kv> regs;
+            std::int64_t record_next = w.n_tiles > 1 ? table[1] : 0;
+            load_kv<Kv>(p, w, 0, table[0], ltid, regs);
+            prepare_q();
+            for (int j = 0; j < w.n_tiles; ++j) {
+                const int stage = j & 1;
+                const std::int64_t record_after = j + 2 < w.n_tiles ? table[j + 2] : 0;
+                sm::mbarrier_wait(&sh.kv_empty[stage], ((j >> 1) & 1) ^ 1u);
+                store_kv<Kv>(regs, stage, sh, ltid);
+                sm::fence_proxy_async_shared();
+                sm::mbarrier_arrive(&sh.kv_full[stage]);
+                if (j + 1 < w.n_tiles) load_kv<Kv>(p, w, j + 1, record_next, ltid, regs);
+                record_next = record_after;
+            }
         }
     }
     __syncthreads();

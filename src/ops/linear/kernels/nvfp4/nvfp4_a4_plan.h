@@ -21,7 +21,9 @@ struct Nvfp4A4Workspace {
     // Extent of the scale plane. The tiled layout writes over whole tiles, so it reaches past the
     // real token count; carrying the size lets the quantizer check that rather than trust that the
     // caller allocated through allocate_nvfp4_a4_workspace.
-    std::size_t scale_bytes = 0;
+    std::size_t scale_bytes   = 0;
+    float* partials           = nullptr; // FP32 split-K scratch the plan asked for, if any
+    std::size_t partial_bytes = 0;
 };
 
 inline std::size_t nvfp4_a4_checked_bytes(std::int32_t tokens, std::size_t bytes_per_token) {
@@ -35,7 +37,8 @@ inline std::size_t nvfp4_a4_checked_bytes(std::int32_t tokens, std::size_t bytes
 
 template <class Arena>
 Nvfp4A4Workspace allocate_nvfp4_a4_workspace(Arena& arena, std::int32_t tokens,
-                                             std::int32_t input_rows) {
+                                             std::int32_t input_rows,
+                                             std::size_t partial_bytes = 0) {
     if (input_rows <= 0 || (input_rows % 64) != 0) {
         throw std::invalid_argument("nvfp4 A4 workspace: invalid K");
     }
@@ -48,13 +51,16 @@ Nvfp4A4Workspace allocate_nvfp4_a4_workspace(Arena& arena, std::int32_t tokens,
         nvfp4_a4_padded_tokens(tokens), static_cast<std::size_t>(input_rows) / 16);
     const MemorySpan codes  = arena.alloc_bytes(code_bytes, 256);
     const MemorySpan scales = arena.alloc_bytes(scale_bytes, 256);
+    float* partials =
+        partial_bytes ? static_cast<float*>(arena.alloc_bytes(partial_bytes, 256).data) : nullptr;
     return {static_cast<std::uint8_t*>(codes.data), static_cast<std::uint8_t*>(scales.data),
-            scale_bytes};
+            scale_bytes, partials, partial_bytes};
 }
 
-inline std::size_t nvfp4_a4_workspace_capacity_bytes(std::int32_t tokens, std::int32_t input_rows) {
+inline std::size_t nvfp4_a4_workspace_capacity_bytes(std::int32_t tokens, std::int32_t input_rows,
+                                                     std::size_t partial_bytes = 0) {
     WorkspaceLayoutBuilder layout;
-    (void)allocate_nvfp4_a4_workspace(layout, tokens, input_rows);
+    (void)allocate_nvfp4_a4_workspace(layout, tokens, input_rows, partial_bytes);
     return layout.peak_bytes(1);
 }
 

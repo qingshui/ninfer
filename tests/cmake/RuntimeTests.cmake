@@ -2,6 +2,10 @@ ninfer_add_test(ninfer_scheduler_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../runtime/test_scheduler.cpp"
   LIBRARIES ninfer_runtime_support)
 
+ninfer_add_test(ninfer_lane_governor_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../runtime/test_lane_governor.cpp"
+  LIBRARIES ninfer_runtime_support)
+
 ninfer_add_test(ninfer_context_cost_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../runtime/test_context_cost.cpp"
   LIBRARIES ninfer_runtime_support ninfer::json)

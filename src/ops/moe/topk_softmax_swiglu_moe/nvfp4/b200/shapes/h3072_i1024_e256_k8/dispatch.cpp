@@ -2,6 +2,14 @@
 
 namespace ninfer::ops::detail::moe_complete {
 namespace {
+// Decode sizes split the mma.sync control and shared gate/up product over K: 8 splits keep about
+// 300-600 CTAs in flight while a call has one or two 32-token column tiles, 4 once it has three
+// or four. From 128 tokens the dense tcgen05 GEMMs take the shared gate/up product.
+int shared_splits(int tokens) {
+    if (tokens < 8 || tokens >= 128) return 1;
+    return tokens <= 64 ? 8 : 4;
+}
+
 Plan select_plan(int tokens, int, ExpertSubsetKind) {
     Plan plan;
     plan.implementation = kernel::ExpertImplementation::BlockScaled;
@@ -18,7 +26,11 @@ Plan select_plan(int tokens, int, ExpertSubsetKind) {
                            .shared_algorithm      = tokens < 8
                                                         ? kernel::block_scaled::SharedAlgorithm::Vector
                                                         : kernel::block_scaled::SharedAlgorithm::Mma,
+                           // The sorting network keeps a token's ranked run in registers; the
+                           // insertion order indexes it and spills it to local memory.
+                           .network_topk          = true,
                            .shared_columns        = tokens >= 512 ? 64 : 32,
+                           .shared_splits         = shared_splits(tokens),
                            .queued_ctas_per_sm    = 6};
     return plan;
 }

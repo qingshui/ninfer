@@ -6,7 +6,8 @@ namespace ninfer::ops::detail {
 namespace {
 // Full-attention o_proj of the 122B geometry with the residual added in the epilogue. Quantized
 // calls run on tcgen05 at every token count (the activation scales use the K16M128x4 atom layout
-// that kernel reads); the mma.sync ladder below serves A16-only policy calls.
+// that kernel reads, and the scratch holds the partials of a split decode call); the mma.sync
+// ladder below serves A16-only policy calls.
 template <class S, int T = 0, bool Exact = false>
 using Instance = Nvfp4ScheduleInstance<S, 8192, T, Exact>;
 
@@ -41,7 +42,7 @@ void launch_a4(const Tensor& x, const Weight& w, Tensor& out, Nvfp4A4Workspace s
     epilogue.kind     = Sm100Epilogue::Add;
     epilogue.residual = data;
     launch_sm100_nvfp4_gemm(nvfp4_a4_operands(w, scratch, x.ne[1], Nvfp4ScaleLayout::K16M128x4),
-                            epilogue, data, stream);
+                            epilogue, data, stream, {scratch.partials, scratch.partial_bytes});
 }
 } // namespace
 
@@ -49,6 +50,6 @@ Nvfp4LinearAddPlan select_nvfp4_add_n3072_k8192(LinearPolicy policy, std::int32_
     if (!allows_a4(policy) ||
         linear_backend(QType::NVFP4, 3072, 8192, tokens) != LinearBackend::Tcgen05)
         return {select_a16(tokens)};
-    return {nullptr, launch_a4, Nvfp4ScaleLayout::K16M128x4};
+    return {nullptr, launch_a4, Nvfp4ScaleLayout::K16M128x4, kSm100SplitPartialBytes};
 }
 } // namespace ninfer::ops::detail

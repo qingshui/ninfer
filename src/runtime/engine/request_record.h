@@ -237,6 +237,8 @@ struct RequestRecord {
     bool completion_observed              = false;
     std::optional<RecoveryProgress> recovery;
     std::optional<Clock::time_point> last_progress;
+    // When the request's previous token committed: the cadence the lane governor measures.
+    std::optional<Clock::time_point> last_token_committed;
     // Sample-group linkage. A group member names its group by id and its branch by index.
     std::uint64_t sample_group_id  = 0;
     std::uint32_t branch_index     = 0;

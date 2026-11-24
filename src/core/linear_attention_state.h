@@ -12,6 +12,8 @@ struct LinearAttentionStateSpec {
     std::int32_t value_head_dim = 0;
     std::int32_t key_head_dim   = 0;
     DType conv_dtype            = DType::BF16;
+    // FP32 or BF16 storage of the recurrence. The Ops that update it define its rounding.
+    DType recurrent_dtype = DType::FP32;
 };
 
 struct LinearAttentionStateLayout {

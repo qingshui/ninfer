@@ -127,8 +127,11 @@ void validate(const Tensor& q, const Tensor& k, const Tensor& v, const Tensor& g
     operand::tensor(rows.token_offsets, DType::I32, {row_count + 1}, alignof(std::int32_t), op,
                     "token offsets", device);
     const std::initializer_list<std::int32_t> field_shape{gdn::kStateDim, gdn::kStateDim, hv};
-    operand::state_field(rows.source, DType::FP32, field_shape, 16, op, "source", device);
-    operand::state_field(rows.destination, DType::FP32, field_shape, 16, op, "destination",
+    const DType state_dtype = rows.destination.field.tensor.dtype;
+    gdn::require_state_dtype(state_dtype, state_dtype, op, "destination");
+    gdn::require_state_dtype(rows.source.field.tensor.dtype, state_dtype, op, "source");
+    operand::state_field(rows.source, state_dtype, field_shape, 16, op, "source", device);
+    operand::state_field(rows.destination, state_dtype, field_shape, 16, op, "destination",
                          device);
     for (const Tensor* offsets :
          {&rows.source.records.byte_offsets, &rows.destination.records.byte_offsets}) {
@@ -150,7 +153,8 @@ void validate(const Tensor& q, const Tensor& k, const Tensor& v, const Tensor& g
     if (checkpoint_field.layers != 1)
         throw std::invalid_argument(std::string(op) + ": select one checkpoint state layer");
     const StateFieldView checkpoint{rows.destination.records, checkpoint_field};
-    operand::state_field(checkpoint, DType::FP32, field_shape, 16, op, "checkpoint field", device,
+    gdn::require_state_dtype(checkpoint_field.tensor.dtype, state_dtype, op, "checkpoint field");
+    operand::state_field(checkpoint, state_dtype, field_shape, 16, op, "checkpoint field", device,
                          false);
 }
 
@@ -235,7 +239,8 @@ void gated_delta_net_varlen(const Tensor& q, const Tensor& k, const Tensor& v, c
         row_count,
         boundary_count,
         threshold,
-        scale};
+        scale,
+        rows.destination.field.tensor.dtype};
     const int tile = gdn::select_value_tile(hq, hv, tokens, execution.multiprocessor_count());
     gdn::varlen::launch(operands, workspace, normalize_qk, tile, execution.stream());
 }

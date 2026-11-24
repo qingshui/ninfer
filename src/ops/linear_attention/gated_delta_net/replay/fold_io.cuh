@@ -47,15 +47,16 @@ __device__ __forceinline__ GdnReplayFoldKernelRow fold_row(const GdnReplayFoldDe
     return {rows.sources[b], rows.destinations[b], rows.columns[b], 0};
 }
 
-template <class Geometry, class Rows = GdnReplayFoldKernelRows>
+template <class Geometry, class Rows, class StateWord>
 struct FoldAccess {
+    using State = StateWord;
     const __nv_bfloat16* key_record;
     const __nv_bfloat16* value_record;
     const uint2* gate_record;
     const __nv_bfloat16* conv_record;
-    float* recurrent_layer0;
+    State* recurrent_layer0;
     __nv_bfloat16* conv_layer0;
-    std::int64_t recurrent_layer_stride;
+    std::int64_t recurrent_layer_stride; // State words
     std::int64_t conv_layer_stride;
     std::int32_t record_capacity;
     std::int32_t width;
@@ -92,16 +93,16 @@ struct FoldAccess {
         return static_cast<std::int64_t>(coord.layer) * record_capacity + coord.batch;
     }
 
-    __device__ __forceinline__ const float*
+    __device__ __forceinline__ const State*
     state_read_base(const RecurrentCoordinates& coord) const {
         return recurrent_layer0 + static_cast<std::int64_t>(coord.layer) * recurrent_layer_stride +
-               fold_row(rows, coord.batch).source_offset / sizeof(float) +
+               fold_row(rows, coord.batch).source_offset / sizeof(State) +
                static_cast<std::int64_t>(coord.value_head) * kStateDim * kStateDim;
     }
 
-    __device__ __forceinline__ float* state_write_base(const RecurrentCoordinates& coord) const {
+    __device__ __forceinline__ State* state_write_base(const RecurrentCoordinates& coord) const {
         return recurrent_layer0 + static_cast<std::int64_t>(coord.layer) * recurrent_layer_stride +
-               fold_row(rows, coord.batch).destination_offset / sizeof(float) +
+               fold_row(rows, coord.batch).destination_offset / sizeof(State) +
                static_cast<std::int64_t>(coord.value_head) * kStateDim * kStateDim;
     }
 
@@ -126,7 +127,7 @@ struct FoldAccess {
     __device__ __forceinline__ void
     store_final_state(const RecurrentCoordinates& coord,
                       const float (&state)[kDvPerWarp][kQkPerLane]) const {
-        float* destination = state_write_base(coord);
+        State* destination = state_write_base(coord);
 #pragma unroll
         for (int r = 0; r < kDvPerWarp; ++r) {
             store_qk_lane(state[r],
@@ -174,15 +175,16 @@ struct FoldAccess {
     }
 };
 
-template <class Geometry, class Rows = GdnReplayFoldKernelRows>
+// Every token continues from the State its one-token update would publish.
+template <class Geometry, class Rows, class State>
 __global__ void __launch_bounds__(common::kWarpSize* kNumWarps, 2)
-    recurrent_fold_kernel(const __grid_constant__ FoldAccess<Geometry, Rows> access) {
+    recurrent_fold_kernel(const __grid_constant__ FoldAccess<Geometry, Rows, State> access) {
     const RecurrentCoordinates coord = access.coordinates();
     const std::int32_t valid         = access.active_columns(coord);
     if (valid == 0) { return; }
     __align__(16) float state[kDvPerWarp][kQkPerLane];
     load_state_tile(state, access.state_read_base(coord), coord);
-    run_recurrent_sequence<true, FoldEffects>(state, access, coord, valid);
+    run_recurrent_sequence<true, FoldEffects, State>(state, access, coord, valid);
     access.store_final_state(coord, state);
     access.publish_final_conv_history(coord, valid);
 }

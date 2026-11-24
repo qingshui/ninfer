@@ -61,6 +61,12 @@ Storage allocate(Arena& arena, const Plan& plan, int tokens, bool routed, int sh
         const auto type       = vector ? DType::FP32 : DType::BF16;
         const int planes      = vector || !plan.shared_split_activation ? 1 : 2;
         out.shared_activation = arena.alloc(type, {shared_intermediate, tokens, planes}).data;
+        if (!vector && plan.shared_splits > 1) {
+            out.shared_partials = static_cast<float*>(
+                arena.alloc(DType::FP32, {2 * shared_intermediate + experts + 1, tokens,
+                                          plan.shared_splits})
+                    .data);
+        }
     }
     return out;
 }

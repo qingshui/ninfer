@@ -88,10 +88,9 @@ struct RequestBasePlanImpl {
 
 // Most checkpoints one request places in flights: the system prompt and the last shared message.
 inline constexpr std::size_t kMaxFlightCheckpoints = 2;
-// How far past its frontier a decode unit reserves KV growth when the pool allows it. A pool that
-// cannot hold the whole horizon still grants the unit's own minimum, and a pool that cannot hold
-// the minimum is reclaimed up to the horizon, so one reclaim serves many decode steps. The
-// reservation is released when the unit commits.
+// How far past its frontier a decode unit's KV growth reaches when the pool must be reclaimed. A
+// unit reserves only its own minimum, which its commit releases; a pool that cannot hold the
+// minimum is reclaimed up to the horizon, so one reclaim serves many decode steps.
 inline constexpr std::uint32_t kDecodeGrowthReserveTokens = 1024;
 
 enum class Lifecycle : std::uint8_t {
