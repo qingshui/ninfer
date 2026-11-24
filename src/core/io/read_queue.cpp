@@ -162,7 +162,7 @@ std::size_t DirectReadQueue::poll(std::span<ReadCompletion> output) {
 ReadWake DirectReadQueue::wait() {
     auto& p = *impl_;
     std::array<pollfd, 2> descriptors{{{p.ring.ring_fd, POLLIN, 0}, {p.notification, POLLIN, 0}}};
-    int result;
+    int result = 0;
     do {
         result = ::poll(descriptors.data(), descriptors.size(), -1);
     } while (result < 0 && errno == EINTR);
@@ -172,8 +172,8 @@ ReadWake DirectReadQueue::wait() {
             throw std::runtime_error("direct read wait descriptor failed");
     }
     if (descriptors[1].revents & POLLIN) {
-        std::uint64_t value;
-        ssize_t n;
+        std::uint64_t value = 0;
+        ssize_t n = 0;
         do { n = ::read(p.notification, &value, sizeof(value)); } while (n < 0 && errno == EINTR);
         if (n < 0 && errno != EAGAIN) check(-errno, "consume read queue notification");
         return ReadWake::Signalled;
@@ -183,7 +183,7 @@ ReadWake DirectReadQueue::wait() {
 
 void DirectReadQueue::wake() {
     const std::uint64_t value = 1;
-    ssize_t n;
+    ssize_t n = 0;
     do { n = ::write(impl_->notification, &value, sizeof(value)); } while (n < 0 && errno == EINTR);
     if (n < 0 && errno != EAGAIN) check(-errno, "wake direct read queue");
 }

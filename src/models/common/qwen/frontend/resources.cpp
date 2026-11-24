@@ -1,6 +1,7 @@
 #include "models/common/qwen/frontend/resources.h"
 
 #include "artifact/schema.h"
+#include <cmath>
 
 namespace ninfer::models::qwen {
 namespace {
@@ -90,7 +91,7 @@ void validate_pixel_pipeline(const Json& config, std::string_view resource) {
                                         " must contain three values");
         }
         for (const Json& value : config.at(key)) {
-            if (!value.is_number() || value.get<double>() != 0.5) {
+            if (!value.is_number() || std::fabs(value.get<double>() - 0.5) > 0.0) {
                 throw std::invalid_argument(std::string(resource) + "." + key +
                                             " does not match the compiled normalization");
             }
@@ -98,7 +99,8 @@ void validate_pixel_pipeline(const Json& config, std::string_view resource) {
     };
     require_half_triplet("image_mean");
     require_half_triplet("image_std");
-    if (number_or_default(config, "rescale_factor", resource, kRescaleFactor) != kRescaleFactor) {
+    if (std::fabs(number_or_default(config, "rescale_factor", resource, kRescaleFactor) -
+                  kRescaleFactor) > 0.0) {
         throw std::invalid_argument(std::string(resource) +
                                     ".rescale_factor does not match the compiled normalization");
     }
@@ -135,7 +137,8 @@ frontend::ProcessorOptions parse_processor_options(std::string_view image_json,
         integer_or_default(video, "min_frames", "video_preprocessor_config.json", kVideoMinFrames));
     options.video_max_frames = static_cast<int>(
         integer_or_default(video, "max_frames", "video_preprocessor_config.json", kVideoMaxFrames));
-    if (options.video_fps != kVideoFps || options.video_min_frames != kVideoMinFrames ||
+    if (std::fabs(options.video_fps - kVideoFps) > 0.0 ||
+        options.video_min_frames != kVideoMinFrames ||
         options.video_max_frames != kVideoMaxFrames) {
         throw std::invalid_argument(
             "video_preprocessor_config.json does not match registered sampling defaults");

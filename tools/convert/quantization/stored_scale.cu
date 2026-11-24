@@ -1,5 +1,6 @@
 #include <cuda_runtime.h>
 #include <cstdint>
+#include <cmath>
 
 namespace {
 
@@ -29,7 +30,7 @@ __device__ int nearest(double x, double s) {
     for (int i = 0; i < (NF4 ? 4 : 3); ++i) {
         const int mid          = (low + high) / 2;
         const double threshold = (code_value<NF4>(mid) + code_value<NF4>(mid + 1)) * .5 * s;
-        const bool above       = x > threshold || (!NF4 && x == threshold && (mid & 1));
+        const bool above       = x >= threshold && (x > threshold || (!NF4 && (mid & 1)));
         if (above)
             low = mid + 1;
         else
@@ -105,7 +106,7 @@ __global__ void encode(const float* values, unsigned char* codes, unsigned char*
         maximum = fmax(maximum, __shfl_xor_sync(mask, maximum, offset, 16));
     }
     int best_word = 0, code = NF4 ? 7 : 0;
-    if (maximum != 0.) {
+    if (std::fpclassify(maximum) != FP_ZERO) {
         const double limit  = NF4 ? 1. : 6.;
         const double target = NF4 ? x : fabs(x);
         const float x_low = __double2float_rd(target), x_high = __double2float_ru(target);
@@ -127,7 +128,7 @@ __global__ void encode(const float* values, unsigned char* codes, unsigned char*
             if (__fmul_rd(clipped, clipped) > upper) continue;
             if (error_lower_bound<NF4>(x_low, x_high, s, mask) > upper) continue;
             const double candidate = error<NF4>(x, s, mask);
-            if (candidate < best_error || (candidate == best_error && word < best_word)) {
+            if (candidate <= best_error && (candidate < best_error || word < best_word)) {
                 best_error = candidate;
                 best_word  = word;
                 upper      = incumbent_upper_bound(best_error);

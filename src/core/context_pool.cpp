@@ -353,7 +353,7 @@ struct ContextPool::Impl {
 
     std::uint32_t make_entry(std::uint32_t c, std::uint32_t block, std::uint32_t slot,
                              std::uint64_t owner, State state) noexcept {
-        std::uint32_t index;
+        std::uint32_t index = 0;
         if (free_entries.empty())
             index = entry_count++;
         else {
@@ -642,7 +642,7 @@ struct ContextPool::Impl {
                     holes.push({block.occupied(), i});
             }
             for (std::size_t count = 0; count < counts[c]; ++count) {
-                std::uint32_t target;
+                std::uint32_t target = 0;
                 if (holes.empty()) {
                     if (empty_blocks.empty())
                         throw std::logic_error(

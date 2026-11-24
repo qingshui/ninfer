@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cmath>
+
 
 namespace ninfer::runtime {
 
@@ -912,7 +914,8 @@ EngineCore<Instance>::admit_request(const std::shared_ptr<Request>& request, boo
             const auto& sampling = decision_request->options.execution.sampling;
             const bool predicted_synchronous =
                 !restoring && !decision_request->suspended && !choice.source.checkpoint &&
-                sampling.presence_penalty == 0.0F && sampling.frequency_penalty == 0.0F;
+                std::fpclassify(sampling.presence_penalty) == FP_ZERO &&
+                std::fpclassify(sampling.frequency_penalty) == FP_ZERO;
             if (!quiescent && !predicted_synchronous) { return AdmissionStatus::Deferred; }
         }
         // A new selection replaces its old waiting reference before capacity is

@@ -46,7 +46,9 @@ Coefficients<Weight> coefficients(int input, int output) {
             out.weights.push_back(static_cast<Weight>(weight));
             sum += weight;
         }
-        if (sum == 0.0) { throw std::runtime_error("bicubic resize produced zero weights"); }
+        if (std::fpclassify(sum) == FP_ZERO) {
+            throw std::runtime_error("bicubic resize produced zero weights");
+        }
         const int first = out.offsets[static_cast<std::size_t>(dst)];
         for (std::size_t i = static_cast<std::size_t>(first); i < out.weights.size(); ++i) {
             out.weights[i] = static_cast<Weight>(out.weights[i] / sum);

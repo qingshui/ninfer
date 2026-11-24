@@ -373,7 +373,7 @@ void CommunicationContext::close(std::chrono::steady_clock::time_point deadline)
 }
 
 int CommunicationContext::version() const {
-    int value;
+    int value = 0;
     check_nccl(ncclGetVersion(&value), "NCCL version");
     return value;
 }

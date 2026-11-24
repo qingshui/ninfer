@@ -18,7 +18,7 @@ inline __m512 load_bf16(const std::uint16_t* source) noexcept {
 inline float reduce_sum(__m512 values) noexcept { return _mm512_reduce_add_ps(values); }
 
 inline __m512 decode_nvfp4(const std::uint8_t* codes, std::uint8_t scale) noexcept {
-    std::uint64_t packed;
+    std::uint64_t packed = 0;
     std::memcpy(&packed, codes, sizeof(packed));
     const auto words = _mm_cvtepu8_epi16(_mm_cvtsi64_si128(packed));
     const auto bytes =
@@ -71,7 +71,7 @@ struct F32 {
 template <int Bits>
 inline __m512 decode_signed_q(const std::uint8_t* code, const std::uint8_t* high) noexcept {
     static_assert(Bits >= 4 && Bits <= 6);
-    std::uint64_t packed;
+    std::uint64_t packed = 0;
     std::memcpy(&packed, code, sizeof(packed));
     const auto words = _mm_cvtepu8_epi16(_mm_cvtsi64_si128(packed));
     const auto bytes =
@@ -79,7 +79,7 @@ inline __m512 decode_signed_q(const std::uint8_t* code, const std::uint8_t* high
                      _mm_and_si128(_mm_slli_epi16(words, 4), _mm_set1_epi16(0x0f00)));
     auto values = _mm512_cvtepu8_epi32(bytes);
     if constexpr (Bits == 6) {
-        std::uint32_t packed_high;
+        std::uint32_t packed_high = 0;
         std::memcpy(&packed_high, high, sizeof(packed_high));
         auto upper = _mm512_srlv_epi32(
             _mm512_set1_epi32(static_cast<int>(packed_high)),
@@ -89,7 +89,7 @@ inline __m512 decode_signed_q(const std::uint8_t* code, const std::uint8_t* high
         upper  = _mm512_srai_epi32(_mm512_slli_epi32(upper, 30), 26);
         values = _mm512_add_epi32(values, upper);
     } else if constexpr (Bits == 5) {
-        std::uint16_t bits;
+        std::uint16_t bits = 0;
         std::memcpy(&bits, high, sizeof(bits));
         values = _mm512_mask_sub_epi32(values, bits, values, _mm512_set1_epi32(16));
     } else {

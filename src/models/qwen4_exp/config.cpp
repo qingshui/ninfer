@@ -176,7 +176,7 @@ Config parse_config(const artifact::Directory& directory, const LoadOptions& opt
         expect(m, "hybrid", true);
         expect(m, "layer_types", Json::array({"indexed_attention"}));
         expect(m, "mtp_use_hidden_state_from_layer", nullptr);
-        if (positive(m, "rope_theta") != out.text.qsa.rope_theta)
+        if (std::fabs(positive(m, "rope_theta") - out.text.qsa.rope_theta) > 0.0)
             throw ArtifactError("MTP RoPE differs from Main");
     }
     return out;

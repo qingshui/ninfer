@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <memory>
+#include <cmath>
 
 namespace ninfer::models::qwen3_5::execution {
 namespace {
@@ -130,7 +131,7 @@ std::vector<DecodePhaseClock::CaptureSample> DecodePhaseClock::read_capture() {
             continue;
         const double value = milliseconds;
         const auto& baseline = capture_baseline_[index];
-        if (baseline && *baseline == value) continue;
+        if (baseline && std::fabs(*baseline - value) <= 0.0) continue;
         capture_baseline_[index] = value;
         fresh.push_back({index, segment.phase, value});
     }

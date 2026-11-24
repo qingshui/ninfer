@@ -48,7 +48,7 @@ MediaProcessorConfig media_config(const Json& json, std::uint32_t max_tokens) {
             throw artifact::ArtifactError(std::string("GLM processor requires ") + flag);
     }
     if (json.value("resize_mode", std::string("pad")) != "pad" || json.value("resample", 3) != 3 ||
-        json.value("rescale_factor", 1.0 / 255.0) != 1.0 / 255.0)
+        std::fabs(json.value("rescale_factor", 1.0 / 255.0) - (1.0 / 255.0)) > 0.0)
         throw artifact::ArtifactError("GLM processor requires bicubic pad and 1/255 rescaling");
     return out;
 }

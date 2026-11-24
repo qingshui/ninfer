@@ -95,7 +95,7 @@ SingleProjectionWeight single(const WeightView& view, std::span<const WeightInpu
                 input.calibration.operation == operation && values.size() == 1 &&
                     std::isfinite(values.front()) && values.front() > 0,
                 "NVFP4 matrix input requires a positive scalar calibration in its scale domain");
-            if (input_scale == 0) {
+            if (std::fpclassify(input_scale) == FP_ZERO) {
                 input_scale = values.front();
             } else if (allows_a4(policy)) {
                 require(std::bit_cast<std::uint32_t>(input_scale) ==
@@ -103,7 +103,7 @@ SingleProjectionWeight single(const WeightView& view, std::span<const WeightInpu
                         "shared NVFP4 A4 input requires identical calibration");
             }
         }
-        if (input_scale == 0) { input_scale = 1.0F; }
+        if (std::fpclassify(input_scale) == FP_ZERO) { input_scale = 1.0F; }
     }
     return {native_weight(view, input_scale), policy};
 }

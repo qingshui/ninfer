@@ -30,7 +30,7 @@ __device__ void assign(const Field& f, int block) {
         if (selected < 0) return;
     const bool live    = !Gather || selected > 0;
     const Word* source = nullptr;
-    Word* destination;
+    Word* destination = nullptr;
     if constexpr (Gather) {
         if (live) source = reinterpret_cast<const Word*>(f.source + f.offsets[row]);
         destination = reinterpret_cast<Word*>(f.destination + row * f.row_stride);

@@ -98,7 +98,7 @@ void validate_standard_output_controls(const Json& body) {
                 bad_request("logit_bias values must be numbers", "logit_bias");
             }
             const double value = iterator.value().get<double>();
-            if (!std::isfinite(value) || value != 0.0) {
+            if (!std::isfinite(value) || std::fpclassify(value) != FP_ZERO) {
                 bad_request(
                     "nonzero logit_bias requires per-token logit modification, which NInfer "
                     "does not provide",
@@ -191,7 +191,7 @@ void validate_compatibility_hints(const Json& body) {
             bad_request("repetition_penalty must be a number", "repetition_penalty");
         }
         const double value = body.at("repetition_penalty").get<double>();
-        if (!std::isfinite(value) || value != 1.0) {
+        if (!std::isfinite(value) || std::fabs(value - 1.0) > 0.0) {
             bad_request(
                 "a non-neutral repetition_penalty requires a sampler transform that NInfer does "
                 "not provide; only repetition_penalty=1 is accepted",

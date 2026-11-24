@@ -504,7 +504,7 @@ struct Transport::Impl {
                     socket_error("control poll");
                 }
                 if (pollers[0].revents) {
-                    std::uint64_t count;
+                    std::uint64_t count = 0;
                     while (::read(receive->wake.fd(), &count, sizeof(count)) < 0 &&
                            errno == EINTR) {}
                 }

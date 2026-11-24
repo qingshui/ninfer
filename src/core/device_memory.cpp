@@ -10,7 +10,7 @@ namespace {
 void read_system_memory(DeviceMemorySnapshot& snapshot) {
     std::ifstream input("/proc/meminfo");
     std::string key, rest;
-    std::uint64_t kib;
+    std::uint64_t kib = 0;
     while (input >> key >> kib) {
         std::getline(input, rest);
         if (key == "MemAvailable:") snapshot.system_available_bytes = kib * 1024;

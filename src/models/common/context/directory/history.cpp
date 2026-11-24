@@ -449,7 +449,7 @@ HistoryDirectory::metadata_requirement(std::span<const HistoryMetadataDemand> de
         return required > capacity ? (required - capacity) * element : 0;
     };
     const auto descriptor = [&]() -> std::optional<std::uint32_t> {
-        std::uint32_t index;
+        std::uint32_t index = 0;
         if (retired_count)
             index = retired.histories[--retired_count];
         else if (free_count)
@@ -491,7 +491,7 @@ HistoryDirectory::metadata_requirement(std::span<const HistoryMetadataDemand> de
     };
     std::vector<HistoryId> writers;
     for (const auto& demand : demands) {
-        std::uint32_t index;
+        std::uint32_t index = 0;
         if (demand.history.valid()) {
             (void)require(demand.history);
             if (std::find(writers.begin(), writers.end(), demand.history) != writers.end())
@@ -540,7 +540,7 @@ HistoryDirectory::metadata_requirement(std::span<const HistoryMetadataDemand> de
 
 MetadataReservation HistoryDirectory::reserve_control(const HistoryMetadataDemand& demand) {
     MetadataReservation descriptor;
-    History* history;
+    History* history = nullptr;
     if (demand.history.valid())
         history = &require(demand.history);
     else {

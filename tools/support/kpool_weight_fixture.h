@@ -44,9 +44,9 @@ struct EncodedWeight {
                 if (mx) {
                     int exponent = 0;
                     if (maximum) {
-                        int e;
+                        int e = 0;
                         const double fraction = std::frexp(double(maximum) / 448., &e);
-                        exponent              = std::max(-127, e - (fraction == .5));
+                        exponent              = std::max(-127, e - (fraction <= 0.5));
                     }
                     host[offset] = std::byte(exponent + 127);
                     multiplier   = std::ldexp(1.F, exponent);

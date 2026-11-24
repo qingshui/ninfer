@@ -18,9 +18,9 @@ inline void encode_fp8_latent(const std::vector<std::uint16_t>& values,
         }
         int exponent = 0;
         if (maximum) {
-            int e;
+            int e = 0;
             const double fraction = std::frexp(double(maximum) / 448.0, &e);
-            exponent              = std::max(-127, e - (fraction == .5));
+            exponent              = std::max(-127, e - (fraction <= 0.5));
         }
         scales[group] = exponent + 127;
         for (int d = 0; d < 128; ++d) {

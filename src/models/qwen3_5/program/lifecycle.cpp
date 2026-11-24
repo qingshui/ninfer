@@ -6,6 +6,7 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <cmath>
 
 namespace ninfer::models::qwen3_5::detail {
 
@@ -103,7 +104,8 @@ void RankProgramImpl::install_binding(const ResidencyBinding& binding, cudaStrea
     residency.sequence  = binding.member.sequence;
     residency.installed = true;
     residency.penalties =
-        binding.sampling.presence_penalty != 0.0F || binding.sampling.frequency_penalty != 0.0F;
+        std::fpclassify(binding.sampling.presence_penalty) != FP_ZERO ||
+        std::fpclassify(binding.sampling.frequency_penalty) != FP_ZERO;
     if (!resources.token_counts.data || !residency.penalties) return;
     Tensor destination = resources.token_counts.slice(1, static_cast<int>(lane), 1);
     if (binding.counts.empty()) {

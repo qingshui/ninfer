@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <stdexcept>
+#include <cmath>
 
 namespace ninfer::models::qwen3_5::detail {
 namespace {
@@ -38,7 +39,8 @@ ops::SamplingConfig RankProgramImpl::sampling_config(const ExecutionRow& row,
     result.presence_penalty  = values.presence_penalty;
     result.frequency_penalty = values.frequency_penalty;
     result.seed              = values.seed;
-    if (values.presence_penalty != 0.0F || values.frequency_penalty != 0.0F) {
+    if (std::fpclassify(values.presence_penalty) != FP_ZERO ||
+        std::fpclassify(values.frequency_penalty) != FP_ZERO) {
         result.token_counts = static_cast<std::int32_t*>(
             resources.token_counts
                 .slice(1, static_cast<std::int32_t>(row.member.residency.lane.value), 1)

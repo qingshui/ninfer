@@ -1068,9 +1068,9 @@ void validate_metadata(const Json& body, nlohmann::json& metadata) {
 
 void reject_unsupported_platform_fields(const Json& body) {
     const struct {
-        const char* field;
-        const char* code;
-        const char* reason;
+        const char* field = nullptr;
+        const char* code = nullptr;
+        const char* reason = nullptr;
     } unsupported[] = {
         {"conversation", "conversations_not_supported",
          "conversation requires an OpenAI Conversations resource"},

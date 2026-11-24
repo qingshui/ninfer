@@ -79,7 +79,7 @@ PrepareArguments prepare_arguments(const QsaKvProjectionView& p,
         return result;
     }();
     for (int i = 0; i < 32; ++i) {
-        a.frequency[i] = params.rope_theta == 1e7F
+        a.frequency[i] = std::fabs(params.rope_theta - 1e7F) <= 0.0F
                              ? default_frequency[i]
                              : std::pow(double(params.rope_theta), -double(i) / 32);
     }

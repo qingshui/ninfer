@@ -121,7 +121,7 @@ std::size_t ReadOnlyFile::read_direct(std::uint64_t offset,
                                       std::span<std::byte> destination) const {
     validate_direct_read(view_, offset, destination);
     if (destination.empty()) return 0;
-    ssize_t n;
+    ssize_t n = 0;
     do {
         n = ::pread(view_.descriptor, destination.data(), destination.size(), position(offset));
     } while (n < 0 && errno == EINTR);

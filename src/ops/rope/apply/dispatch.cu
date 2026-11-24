@@ -4,6 +4,7 @@
 #include "core/platform.h"
 
 #include <algorithm>
+#include <cmath>
 
 namespace ninfer::ops::detail {
 namespace {
@@ -57,7 +58,8 @@ Selection select_rope(const RopeArguments& a, int multiprocessors) {
         return {launch_rope_axial64<8>, 128};
     }
 
-    if (axes == 1 && a.first.ne[0] == 128 && a.rotary_dim == 128 && a.theta == 1.0e7F) {
+    if (axes == 1 && a.first.ne[0] == 128 && a.rotary_dim == 128 &&
+        std::fabs(a.theta - 1.0e7F) <= 0.0F) {
         if (first_heads == 32 && second_heads == 8) {
             if (tokens <= 16) return {launch_rope_split<5, 32, 8>, 160};
             if (tokens <= 400) return {launch_rope_split<8, 32, 8>, 256};
@@ -70,7 +72,8 @@ Selection select_rope(const RopeArguments& a, int multiprocessors) {
                 return select_fixed<RopeKernelMode::D128R128, 8, 0>(tokens, multiprocessors);
         }
     }
-    if (a.rotary_dim == 64 && a.theta == 1.0e7F && (axes == 1 || axes == 3)) {
+    if (a.rotary_dim == 64 && std::fabs(a.theta - 1.0e7F) <= 0.0F &&
+        (axes == 1 || axes == 3)) {
         if (a.second) {
             if (first_heads == 24 && second_heads == 4)
                 return select_r64<24, 4>(axes, tokens, multiprocessors);

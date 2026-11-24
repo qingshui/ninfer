@@ -31,7 +31,7 @@ inline float reduce_sum(__m256 values) noexcept {
 }
 
 inline __m256 decode_nvfp4(const std::uint8_t* codes, std::uint8_t scale) noexcept {
-    std::uint32_t packed;
+    std::uint32_t packed = 0;
     std::memcpy(&packed, codes, sizeof(packed));
     const auto words = _mm_cvtepu8_epi16(_mm_cvtsi32_si128(packed));
     const auto bytes =
@@ -64,7 +64,7 @@ struct F32 {
 template <int Bits>
 inline __m256 decode_signed_q(const std::uint8_t* code, const std::uint8_t* high) noexcept {
     static_assert(Bits >= 4 && Bits <= 6);
-    std::uint32_t packed;
+    std::uint32_t packed = 0;
     std::memcpy(&packed, code, sizeof(packed));
     const auto words = _mm_cvtepu8_epi16(_mm_cvtsi32_si128(packed));
     const auto bytes =
@@ -72,7 +72,7 @@ inline __m256 decode_signed_q(const std::uint8_t* code, const std::uint8_t* high
                      _mm_and_si128(_mm_slli_epi16(words, 4), _mm_set1_epi16(0x0f00)));
     auto values = _mm256_cvtepu8_epi32(bytes);
     if constexpr (Bits == 6) {
-        std::uint16_t packed_high;
+        std::uint16_t packed_high = 0;
         std::memcpy(&packed_high, high, sizeof(packed_high));
         auto upper = _mm256_srlv_epi32(_mm256_set1_epi32(packed_high),
                                        _mm256_setr_epi32(0, 2, 4, 6, 8, 10, 12, 14));

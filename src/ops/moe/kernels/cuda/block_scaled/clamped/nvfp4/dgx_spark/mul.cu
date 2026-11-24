@@ -151,7 +151,7 @@ quantize_grouped_input(const __nv_bfloat16* x, const int* ids, ExpertSubsetKind 
                 product_scales[std::int64_t(row) * (intermediate / 16) + tid] = 0;
             }
         }
-        int assignment;
+        int assignment = 0;
         __shared__ int packed;
         if constexpr (Index) {
             assignment       = task;

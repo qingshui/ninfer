@@ -101,8 +101,9 @@ void append_context_impl(DraftExecutionView& execution, const Tensor& features,
         if (config.dflash2) {
             std::array<ops::ContextKVMaterializeLayerView, ops::kContextKVMaterializeLayers> layers;
             if (config.num_hidden_layers != layers.size() ||
-                config.local_layer_count() != layers.size() || config.rms_norm_eps != 1e-6F ||
-                config.rope_theta != 1e7F) {
+                config.local_layer_count() != layers.size() ||
+                    std::fabs(config.rms_norm_eps - 1e-6F) > 0.0 ||
+                    std::fabs(config.rope_theta - 1e7F) > 0.0) {
                 throw std::invalid_argument(
                     "masked draft context: config is outside the fused materialization contract");
             }
@@ -206,7 +207,8 @@ void propose_dflash2_batch(DraftExecutionView& execution, const DraftInputs& inp
     if (execution.parameters.profile->config.draft->dflash2) {
         const auto& target = execution.parameters.profile->config.text;
         const auto& config = *execution.parameters.profile->config.draft;
-        if (config.rms_norm_eps != 1e-6F || config.rope_theta != 1e7F) {
+        if (std::fabs(config.rms_norm_eps - 1e-6F) > 0.0 ||
+            std::fabs(config.rope_theta - 1e7F) > 0.0) {
             throw std::invalid_argument(
                 "DFlash2: fused norm/RoPE requires epsilon=1e-6 and theta=1e7");
         }

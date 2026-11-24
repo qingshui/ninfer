@@ -35,7 +35,7 @@ void check(int result, const char* operation) {
 
 CpuAffinity cpu_list(hwloc_const_bitmap_t bitmap) {
     CpuAffinity result;
-    int cpu;
+    int cpu = 0;
     hwloc_bitmap_foreach_begin(cpu, bitmap) { result.push_back(cpu); }
     hwloc_bitmap_foreach_end();
     return result;
@@ -182,7 +182,7 @@ std::vector<std::thread> cpu_detail::start_workers(std::uint32_t count,
                 try {
                     startup->initialize(rank);
                 } catch (...) { error = std::current_exception(); }
-                bool run;
+                bool run = false;
                 {
                     std::unique_lock lock(startup->mutex);
                     if (error && !startup->error) startup->error = error;
