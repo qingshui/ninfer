@@ -81,7 +81,7 @@ Layout inspect(const RenderedChat& rendered, std::span<const ChatMessage> messag
     layout.tools.resize(rendered.tools.size());
 
     struct Group {
-        std::size_t begin, end;
+        std::size_t begin = 0, end = 0;
         ChatRole role;
     };
 

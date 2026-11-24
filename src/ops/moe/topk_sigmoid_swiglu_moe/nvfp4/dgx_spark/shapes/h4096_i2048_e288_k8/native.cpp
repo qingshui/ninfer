@@ -1,4 +1,5 @@
 #include "ops/moe/topk_sigmoid_swiglu_moe/dispatch.h"
+#include <cmath>
 
 namespace ninfer::ops::detail::moe_sigmoid {
 namespace {
@@ -45,7 +46,8 @@ moe_cuda::block_scaled::clamped::Plan select_native(const SwiGLUProfile& ffn, in
         p.a16.buckets[1]                = {32, 32, 32, {128, 128, 128, 1}};
         p.a16.buckets[2]                = {128, 64, 64, {128, 128, 128, 1}};
         p.a16.buckets[3]                = {INT_MAX, 64, 64, {128, 128, 64, 1}};
-        p.a16.fp16_product = ffn.gate_up_layout != QuantLayout::Csf32 && *ffn.clamp_limit == 10.F;
+        p.a16.fp16_product = ffn.gate_up_layout != QuantLayout::Csf32 &&
+            std::fabs(*ffn.clamp_limit - 10.F) <= 0.0F;
         if (p.a16.fp16_product) {
             p.group_columns         = 256;
             p.nvfp4.down_row_window  = 4;

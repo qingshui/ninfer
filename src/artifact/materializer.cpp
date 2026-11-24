@@ -34,7 +34,7 @@ void populate_host_pages(MemorySpan storage) {
     const auto plan = plan_cpu_team(topology.info(), workers);
 
     struct Pages {
-        std::byte* data;
+        std::byte* data = nullptr;
         std::size_t count;
         std::uint32_t workers;
     } pages{static_cast<std::byte*>(storage.data),

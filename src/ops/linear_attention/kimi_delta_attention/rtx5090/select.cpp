@@ -12,7 +12,7 @@ int select_value_tile(int value_heads, int multiprocessor_count) {
     std::int64_t best_work = INT64_MAX;
 
     struct Choice {
-        int tile, cost;
+        int tile = 0, cost = 0;
     };
 
     for (const auto [tile, cost] : {Choice{64, 34}, Choice{32, 20}, Choice{16, 13}}) {

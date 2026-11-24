@@ -1,4 +1,5 @@
 #include "ops/moe/routed_swiglu/cuda/dispatch.h"
+#include <cmath>
 
 namespace ninfer::ops::detail::moe_routed {
 namespace {
@@ -49,7 +50,8 @@ Plan select_native(const SwiGLUProfile& ffn, int tokens, int) {
                                                        : clamped::Nvfp4A16Tile{128, 128, 128, 1}};
         p.a16.buckets[1]                = {32, 32, 32, {128, 128, 128, 1}};
         p.a16.buckets[2]                = {128, 64, 64, {128, 128, 128, 1}};
-        p.a16.fp16_product = ffn.gate_up_layout != QuantLayout::Csf32 && *ffn.clamp_limit == 10.F;
+        p.a16.fp16_product = ffn.gate_up_layout != QuantLayout::Csf32 &&
+            std::fabs(*ffn.clamp_limit - 10.F) <= 0.0F;
         if (p.a16.fp16_product) {
             p.nvfp4.down_row_window = 4;
             p.column_major_down     = !p.single_block_grouping;

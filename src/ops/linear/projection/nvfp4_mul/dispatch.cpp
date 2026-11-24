@@ -13,8 +13,8 @@ Nvfp4MulRoute select_nvfp4_mul_route(int rows, int k, int tokens, LinearPolicy p
         throw std::invalid_argument("NVFP4_MUL linear: invalid tokens or policy");
 #if NINFER_TARGET_SPARK
     struct Shape {
-        int rows, k;
-        Nvfp4MulRoute (*select)(int);
+        int rows = 0, k = 0;
+        Nvfp4MulRoute (*select)(int) = nullptr;
     };
 
     constexpr std::array shapes{

@@ -17,7 +17,7 @@ MlaProjectionInputs mla_projection_inputs(std::span<const BoundWeight> weights, 
     struct Role {
         WeightId id;
         WeightRegion region;
-        ops::KpoolProjectionRows* rows;
+        ops::KpoolProjectionRows* rows = nullptr;
         std::size_t parent;
     };
 
